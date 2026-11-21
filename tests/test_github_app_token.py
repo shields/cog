@@ -481,15 +481,15 @@ def test_the_tool_parses_as_python_3_13() -> None:
     """Homebrew's python3 may not be first on a PATH, and Debian's is 3.13."""
     _ = ast.parse(TOOL.read_text(), feature_version=(3, 13))
     python = shutil.which("python3.13")
-    if python is not None:
-        result = subprocess.run(
-            [python, str(TOOL), "--help"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-        assert result.returncode == 0, result.stderr
+    assert python is not None, "python3.13 is required"
+    result = subprocess.run(
+        [python, str(TOOL), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_a_server_error_fails_and_leaves_the_record(

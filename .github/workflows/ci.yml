@@ -1,0 +1,63 @@
+# Copyright © 2026 Michael Shields
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI
+
+# Both triggers run for a pull request's branch, as right-answers/ci.md
+# prescribes, so CI also runs before a PR is opened and on PRs from forks.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    name: Lint and test
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.13.9"
+          enable-cache: false
+      - uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: "1.4.4"
+          no-cache: true
+      - run: make ci-tools
+      - id: setup
+        run: make setup
+      - run: make actions-lock-install
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # The checks are independent, and make -k runs every lint and test target
+      # even after one fails, so one failure doesn't hide another suite.
+      - run: make -k lint
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+      - run: make build
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+      - run: make -k test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          COG_FAIL_ON_SKIP: "1"

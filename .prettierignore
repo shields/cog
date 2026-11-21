@@ -1,0 +1,28 @@
+# Copyright © 2026 Michael Shields
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# deploy.sh pipes this file through jq, which rejects the trailing commas that
+# Prettier adds to .jsonc.
+cloudflare/wrangler.jsonc
+
+# uv and pytest write a .gitignore inside their own directories, which Prettier
+# does not read.
+.venv/
+.pytest_cache/
+
+# git hides nested worktrees through .git/info/exclude and Playwright MCP output
+# through the global ignore file, and Prettier reads neither.
+.claude/worktrees/
+.worktrees/
+.playwright-mcp/

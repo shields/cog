@@ -1,0 +1,47 @@
+// Copyright © 2026 Michael Shields
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["github>shields/right-answers//renovate/base.json5"],
+  lockFileMaintenance: { automerge: true },
+  packageRules: [
+    {
+      description: "Automerge dev dependencies",
+      // Rules apply independently, so this one also merges major updates: dev
+      // dependencies can't break production. pep621 gives every
+      // [dependency-groups] entry the depType "dependency-groups", whatever
+      // the group is named.
+      matchDepTypes: ["devDependencies", "dependency-groups"],
+      automerge: true,
+    },
+    {
+      description: "Keep TypeScript within what typescript-eslint supports",
+      // Newer TypeScript stops ESLint from loading its configuration. Lift this
+      // when typescript-eslint's peer range includes the new version.
+      matchPackageNames: ["typescript"],
+      allowedVersions: "<6.1.0",
+    },
+    {
+      description: "Hold new GitHub Actions releases for three days",
+      // Renovate withholds an update with no release time indefinitely, and
+      // container registries give none, so the hold is limited to GitHub
+      // sources. These include the uv version that setup-uv takes from a
+      // release.
+      matchManagers: ["github-actions"],
+      matchDatasources: ["github-tags", "github-releases"],
+      minimumReleaseAge: "3 days",
+    },
+  ],
+}

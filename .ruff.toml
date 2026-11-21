@@ -1,0 +1,42 @@
+# Copyright © 2023-2026 Michael Shields
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+target-version = "py315"
+
+[lint]
+# https://docs.astral.sh/ruff/rules/
+select = [
+  "ALL",
+]
+
+ignore = [
+  "ANN401",  # typing.Any
+  "C90",     # Cyclomatic complexity
+  "COM812",  # Conflicts with Ruff formatter
+  "ISC001",  # Conflicts with Ruff formatter
+  "D",       # pydocstyle (disable docstring rules)
+  "PLR09",   # "Too many" branches, arguments, etc.
+  "S603",    # subprocess output
+  "S607",    # subprocess using path
+  "T201",    # print()
+  "RUF001",  # ambiguous Unicode character in string
+  "RUF002",  # ambiguous Unicode character in docstring
+  "RUF003",  # ambiguous Unicode character in comment
+]
+
+[lint.per-file-ignores]
+"tests/*" = [
+  "PLR2004", # tests compare against literal expectations
+  "S101",    # pytest tests assert
+]

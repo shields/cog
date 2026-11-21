@@ -30,7 +30,12 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "guest" / "reset-identity.sh"
 BASH = shutil.which("bash") or "/bin/bash"
 
-pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required")
+
+@pytest.fixture(autouse=True)
+def _jq_is_installed() -> None:
+    if shutil.which("jq") is None:
+        pytest.fail("jq is required")
+
 
 # What Claude Code 2.1.291 writes at its first start, with the entries that
 # provisioning wants to keep.
