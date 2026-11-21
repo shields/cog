@@ -1,0 +1,81 @@
+{
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "DISABLE_TELEMETRY": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(gh issue list *)",
+      "Bash(gh pr view *)",
+      "Bash(git diff *)",
+      "Bash(make test)",
+      "Bash(uv run pytest *)",
+      "WebSearch"
+    ],
+    "deny": [
+      "Bash(bunx:*)",
+      "Bash(git commit --no-verify *)",
+      "Bash(git commit -n*)",
+      "Bash(git push*)",
+      "Bash(git -C * push*)",
+      "Bash(git -c * push*)",
+      "Bash(git --git-dir* push*)",
+      "Bash(git --work-tree* push*)",
+      "Bash(gh api *-X DELETE*)",
+      "Bash(gh api *--method=POST*)",
+      "Bash(gh repo create*)",
+      "Bash(gh repo delete*)",
+      "Bash(npx:*)",
+      "Bash(uvx:*)"
+    ],
+    "ask": [
+      "Bash(apt install *)",
+      "Bash(brew install *)",
+      "Bash(uv add *)",
+      "Edit(//**/Brewfile)",
+      "Edit(//**/uv.lock)"
+    ],
+    "defaultMode": "auto"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for py in /opt/homebrew/bin/python3 /usr/local/bin/python3 /home/linuxbrew/.linuxbrew/bin/python3; do [ -x \"$py\" ] && \"$py\" -c 'import sys; sys.exit(sys.version_info < (3, 15))' && exec \"$py\" \"$HOME/.claude/hooks/dependency_guard.py\"; done; echo 'dependency_guard.py: Python 3.15+ not found' >&2; exit 2",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for py in /opt/homebrew/bin/python3 /usr/local/bin/python3 /home/linuxbrew/.linuxbrew/bin/python3; do [ -x \"$py\" ] && \"$py\" -c 'import sys; sys.exit(sys.version_info < (3, 15))' && exec \"$py\" \"$HOME/.codex/hooks/git_guard.py\"; done; echo 'git_guard.py: Python 3.15+ not found' >&2; exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 0,
+    "refreshInterval": 5
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "allowLocalBinding": true
+    },
+    "filesystem": {
+      "allowWrite": ["~/.cache/uv"],
+      "denyRead": ["~/.config/secrets"]
+    }
+  }
+}

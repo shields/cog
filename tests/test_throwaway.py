@@ -33,16 +33,14 @@ type Json = dict[str, object]
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "guest" / "throwaway.sh"
 BASH = shutil.which("bash") or "/bin/bash"
-HAS_JQ = shutil.which("jq") is not None
-
-pytestmark = pytest.mark.skipif(not HAS_JQ, reason="jq is required")
+SETTINGS_FILE = REPO / "tests/fixtures/claude-settings.json"
 
 
 def load(text: str) -> Json:
     return cast("Json", json.loads(text))
 
 
-SETTINGS = load((REPO / ".claude/settings.json").read_text())
+SETTINGS = load(SETTINGS_FILE.read_text())
 DENY = cast("list[str]", cast("Json", SETTINGS["permissions"])["deny"])
 GUARD_ENTRIES = [
     entry
@@ -52,11 +50,23 @@ GUARD_ENTRIES = [
 
 
 def run(
-    etc: Path, *args: str, script: Path = SCRIPT, env: dict[str, str] | None = None
+    etc: Path,
+    *args: str,
+    settings: Path = SETTINGS_FILE,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     user = [] if {"--user", "--no-github-timer"} & set(args) else ["--user", "tester"]
     return subprocess.run(
-        [BASH, str(script), "--etc-dir", str(etc), *user, *args],
+        [
+            BASH,
+            str(SCRIPT),
+            "--claude-settings",
+            str(settings),
+            "--etc-dir",
+            str(etc),
+            *user,
+            *args,
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -79,13 +89,11 @@ def managed(etc: Path) -> Json:
     return load((etc / "claude-code/managed-settings.json").read_text())
 
 
-def tree_with_settings(tmp_path: Path, settings: Json) -> Path:
-    """A copy of the script beside a .claude/settings.json of the test's choosing."""
-    (tmp_path / "provision").mkdir()
-    (tmp_path / ".claude").mkdir()
-    _ = shutil.copy(SCRIPT, tmp_path / "guest/throwaway.sh")
-    _ = (tmp_path / ".claude/settings.json").write_text(json.dumps(settings))
-    return tmp_path / "guest/throwaway.sh"
+def write_settings(tmp_path: Path, settings: Json) -> Path:
+    """A settings file of the test's choosing."""
+    path = tmp_path / "settings.json"
+    _ = path.write_text(json.dumps(settings))
+    return path
 
 
 def files_under(root: Path) -> list[str]:
@@ -224,8 +232,7 @@ def test_codex_forbids_gh_api_requests_that_name_a_write_method_first(
     etc: Path, command: list[str], decision: str | None
 ) -> None:
     codex = shutil.which("codex")
-    if codex is None:
-        pytest.skip("Codex CLI is not installed")
+    assert codex is not None, "the Codex CLI is required"
     assert run(etc).returncode == 0
     result = subprocess.run(
         [
@@ -281,10 +288,10 @@ def test_a_settings_file_without_the_guard_hook_is_refused(tmp_path: Path) -> No
         for entry in cast("list[Json]", hooks["PreToolUse"])
         if "git_guard.py" not in json.dumps(entry)
     ]
-    script = tree_with_settings(tmp_path, settings)
+    path = write_settings(tmp_path, settings)
     etc = tmp_path / "etc"
     etc.mkdir()
-    result = run(etc, script=script)
+    result = run(etc, settings=path)
     assert result.returncode != 0
     assert "git_guard.py" in result.stderr
     assert files_under(etc) == []
@@ -293,32 +300,44 @@ def test_a_settings_file_without_the_guard_hook_is_refused(tmp_path: Path) -> No
 def test_a_settings_file_without_deny_rules_is_refused(tmp_path: Path) -> None:
     settings = copy.deepcopy(SETTINGS)
     del cast("Json", settings["permissions"])["deny"]
-    script = tree_with_settings(tmp_path, settings)
+    path = write_settings(tmp_path, settings)
     etc = tmp_path / "etc"
     etc.mkdir()
-    result = run(etc, script=script)
+    result = run(etc, settings=path)
     assert result.returncode != 0
     assert "permissions.deny" in result.stderr
     assert files_under(etc) == []
 
 
 def test_a_missing_settings_file_is_refused(tmp_path: Path) -> None:
-    script = tree_with_settings(tmp_path, SETTINGS)
-    (tmp_path / ".claude/settings.json").unlink()
     etc = tmp_path / "etc"
     etc.mkdir()
-    result = run(etc, script=script)
+    result = run(etc, settings=tmp_path / "missing.json")
     assert result.returncode != 0
-    assert "settings.json does not exist" in result.stderr
+    assert "missing.json does not exist" in result.stderr
+    assert files_under(etc) == []
+
+
+def test_the_settings_argument_is_required(etc: Path) -> None:
+    result = subprocess.run(
+        [BASH, str(SCRIPT), "--etc-dir", str(etc), "--no-github-timer"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode != 0
+    assert "--claude-settings" in result.stderr
+    assert files_under(etc) == []
 
 
 def test_a_status_line_is_optional(tmp_path: Path) -> None:
     settings = copy.deepcopy(SETTINGS)
     del settings["statusLine"]
-    script = tree_with_settings(tmp_path, settings)
+    path = write_settings(tmp_path, settings)
     etc = tmp_path / "etc"
     etc.mkdir()
-    assert run(etc, script=script).returncode == 0
+    assert run(etc, settings=path).returncode == 0
     assert "statusLine" not in managed(etc)
 
 
@@ -418,7 +437,14 @@ def test_without_a_timer_no_unit_is_written(etc: Path) -> None:
 def test_the_timer_user_defaults_to_the_sudo_user(etc: Path) -> None:
     env = {"PATH": os.environ["PATH"], "SUDO_USER": "lima"}
     result = subprocess.run(
-        [BASH, str(SCRIPT), "--etc-dir", str(etc)],
+        [
+            BASH,
+            str(SCRIPT),
+            "--claude-settings",
+            str(SETTINGS_FILE),
+            "--etc-dir",
+            str(etc),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -432,7 +458,14 @@ def test_the_timer_user_defaults_to_the_sudo_user(etc: Path) -> None:
 def test_the_timer_needs_a_user(etc: Path) -> None:
     env = {"PATH": os.environ["PATH"]}
     result = subprocess.run(
-        [BASH, str(SCRIPT), "--etc-dir", str(etc)],
+        [
+            BASH,
+            str(SCRIPT),
+            "--claude-settings",
+            str(SETTINGS_FILE),
+            "--etc-dir",
+            str(etc),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -467,6 +500,6 @@ def test_help_succeeds() -> None:
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root may write /etc")
 def test_without_root_the_real_etc_is_refused() -> None:
-    result = run_plain()
+    result = run_plain("--claude-settings", str(SETTINGS_FILE))
     assert result.returncode != 0
     assert "must run as root" in result.stderr

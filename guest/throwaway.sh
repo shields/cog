@@ -21,13 +21,13 @@
 # Claude's policy is a managed settings file, which no other settings file
 # overrides. Because its ask rules and hooks would prompt even in bypass mode,
 # managed settings are the only source of permission rules and hooks, and they
-# carry the deny rules, the git_guard.py hook and the status line of this
-# repository's .claude/settings.json. Codex's policy is its system config,
-# which ~/.codex/config.toml overrides key by key.
+# carry the deny rules, the git_guard.py hook and the status line of the
+# settings file named by --claude-settings. Codex's policy is its system
+# config, which ~/.codex/config.toml overrides key by key.
 #
 set -euo pipefail
 
-usage="usage: sudo guest/throwaway.sh [--etc-dir DIR] [--user NAME | --no-github-timer]"
+usage="usage: sudo guest/throwaway.sh --claude-settings FILE [--etc-dir DIR] [--user NAME | --no-github-timer]"
 
 die() {
     printf 'throwaway.sh: %s\n' "$*" >&2
@@ -37,11 +37,17 @@ die() {
 etc=/etc
 user=${SUDO_USER:-}
 timer=1
+settings=
 while (($#)); do
     case $1 in
     -h | --help)
         printf '%s\n' "$usage"
         exit 0
+        ;;
+    --claude-settings)
+        [[ $# -ge 2 && -n $2 ]] || die "$usage"
+        settings=$2
+        shift 2
         ;;
     --etc-dir)
         [[ $# -ge 2 && -n $2 ]] || die "$usage"
@@ -60,6 +66,7 @@ while (($#)); do
     *) die "$usage" ;;
     esac
 done
+[[ -n $settings ]] || die "$usage"
 if [[ $etc == /etc && $(id -u) -ne 0 ]]; then
     die "must run as root; use: sudo $0"
 fi
@@ -69,8 +76,6 @@ if ((timer)); then
 fi
 command -v jq >/dev/null || die "jq is not installed"
 
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-settings=$script_dir/../.claude/settings.json
 [[ -f $settings ]] || die "$settings does not exist"
 
 umask 022

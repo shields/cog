@@ -297,7 +297,7 @@ exec "$(dirname "$0")/stage_tree_real.sh" "$@"
 STUB
 
 CHECKOUT="$TMPBASE/checkout"
-mkdir -p "$CHECKOUT/lima" "$CHECKOUT/provision" "$CHECKOUT/tools"
+mkdir -p "$CHECKOUT/lima" "$CHECKOUT/guest" "$CHECKOUT/tools"
 git -C "$CHECKOUT" init -q -b main
 : > "$CHECKOUT/lima/dev.yaml"
 printf '#!/bin/bash\n' > "$CHECKOUT/provision.sh"
@@ -535,7 +535,7 @@ shell test-base sh -c printf %s \"\$HOME\"
 shell test-base sh -c set -eu; rm -rf \"\$1\"; mkdir -p \"\$1\"; tar -xf - --no-same-owner -C \"\$1\" _ $GUEST_DIR
 shell --workdir $GUEST_DIR test-base ./provision.sh none
 shell --workdir $GUEST_DIR test-base git reset --mixed --quiet HEAD
-shell test-base sudo $GUEST_DIR/guest/throwaway.sh --no-github-timer
+shell test-base sudo $GUEST_DIR/guest/throwaway.sh --claude-settings $GUEST_DIR/.claude/settings.json --no-github-timer
 shell --workdir $GUEST_DIR test-base env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin uv run --no-dev python tools/configure_codex.py /home/guest/.codex/config.toml
 shell test-base sudo truncate -s 0 /etc/machine-id
 shell test-base $GUEST_DIR/guest/reset-identity.sh

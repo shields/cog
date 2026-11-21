@@ -246,7 +246,7 @@ cmd_base() {
     # accepts an empty "$@" under set -u, unlike an empty array.
     limactl shell --workdir "$guest_dir" "$base" ./provision.sh "$@" </dev/null
     limactl shell --workdir "$guest_dir" "$base" git reset --mixed --quiet HEAD </dev/null
-    limactl shell "$base" sudo "$guest_dir/guest/throwaway.sh" --no-github-timer </dev/null
+    limactl shell "$base" sudo "$guest_dir/guest/throwaway.sh" --claude-settings "$guest_dir/.claude/settings.json" --no-github-timer </dev/null
     limactl shell --workdir "$guest_dir" "$base" env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin \
         uv run --no-dev python tools/configure_codex.py "$guest_home/.codex/config.toml" </dev/null
 
