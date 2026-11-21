@@ -27,7 +27,7 @@
 #
 set -euo pipefail
 
-usage="usage: sudo provision/throwaway.sh [--etc-dir DIR] [--user NAME | --no-github-timer]"
+usage="usage: sudo guest/throwaway.sh [--etc-dir DIR] [--user NAME | --no-github-timer]"
 
 die() {
     printf 'throwaway.sh: %s\n' "$*" >&2
@@ -99,7 +99,7 @@ jq '
 ' "$settings" >"$work/managed-settings.json" || die "cannot build the managed settings from $settings"
 
 cat >"$work/config.toml" <<'EOF'
-# Written by provision/throwaway.sh. ~/.codex/config.toml overrides these.
+# Written by guest/throwaway.sh. ~/.codex/config.toml overrides these.
 approval_policy = "never"
 default_permissions = ":danger-full-access"
 
@@ -110,7 +110,7 @@ EOF
 # Codex parses a rules file as Starlark, so every prose line in this one
 # starts with #; the first four lines are one comment, wrapped.
 cat >"$work/throwaway.rules" <<'EOF'
-# Written by provision/throwaway.sh. The git_guard.py hook refuses a gh api
+# Written by guest/throwaway.sh. The git_guard.py hook refuses a gh api
 # request that names a write method wherever the flag stands; a Codex rule
 # matches only the words that start a command, so it stops those that put the
 # flag first.
@@ -135,8 +135,8 @@ prefix_rule(
 )
 EOF
 
-cat >"$work/dotfiles-throwaway" <<'EOF'
-This machine is a throwaway environment. provision/throwaway.sh wrote this
+cat >"$work/cog-throwaway" <<'EOF'
+This machine is a throwaway environment. guest/throwaway.sh wrote this
 file, and the interactive shell reads its presence to start Claude Code
 without the sandbox and permission prompts. The agents' policy is in
 claude-code/managed-settings.json and codex/config.toml beside it.
@@ -178,7 +178,7 @@ mkdir -p "$codex_dir/rules"
 mv -f "$work/managed-settings.json" "$claude_dir/managed-settings.json"
 mv -f "$work/config.toml" "$codex_dir/config.toml"
 mv -f "$work/throwaway.rules" "$codex_dir/rules/throwaway.rules"
-mv -f "$work/dotfiles-throwaway" "$etc/dotfiles-throwaway"
+mv -f "$work/cog-throwaway" "$etc/cog-throwaway"
 
 if ((timer)); then
     units=$etc/systemd/system

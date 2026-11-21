@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 test("device flow requests one repository and checks the resulting token", async () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-device-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-device-"));
   const gh = path.join(directory, "gh");
   writeFileSync(gh, "#!/bin/sh\nprintf '4242\\n'\n");
   chmodSync(gh, 0o700);
@@ -102,7 +102,7 @@ test("device flow requests one repository and checks the resulting token", async
 });
 
 test("concurrent callers spend one refresh token and persist its replacement", async () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-auth-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-auth-"));
   let refreshes = 0;
   const upstream = createServer((request, response) => {
     refreshes++;
@@ -173,7 +173,7 @@ test("concurrent callers spend one refresh token and persist its replacement", a
 });
 
 test("a record that is not JSON is reported without quoting it", () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-corrupt-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-corrupt-"));
   try {
     const auth = new AppAuth(directory);
     for (const contents of ["ghr_leaked", '{"refresh_token":"ghr_leaked"']) {
@@ -200,7 +200,7 @@ test("a record that is not JSON is reported without quoting it", () => {
 });
 
 test("a record that cannot be read reports the read error, not an invalid record", () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-unreadable-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-unreadable-"));
   try {
     const auth = new AppAuth(directory);
     mkdirSync(

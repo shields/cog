@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# provision/reset-identity.sh runs in a VM before it is cloned. These tests run
+# guest/reset-identity.sh runs in a VM before it is cloned. These tests run
 # it against a temporary home.
 
 import json
@@ -27,7 +27,7 @@ import pytest
 type Json = dict[str, object]
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "provision" / "reset-identity.sh"
+SCRIPT = REPO / "guest" / "reset-identity.sh"
 BASH = shutil.which("bash") or "/bin/bash"
 
 pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required")

@@ -245,7 +245,7 @@ export class CloudAuthority {
         headers: {
           accept: "application/vnd.github+json",
           authorization: `Bearer ${validated.accessToken}`,
-          "user-agent": "dotfiles-vm-access",
+          "user-agent": "cog",
         },
         redirect: "manual",
       },
@@ -295,7 +295,7 @@ export class CloudAuthority {
         headers: {
           accept: "application/json",
           "content-type": "application/x-www-form-urlencoded",
-          "user-agent": "dotfiles-vm-access",
+          "user-agent": "cog",
         },
         body: new URLSearchParams({
           client_id: this.clientId,

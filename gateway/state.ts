@@ -171,7 +171,7 @@ export class State {
   register(name: string, socket: string, actor: string): Instance {
     if (
       !/^lima:[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/.test(name) ||
-      name === "lima:dotfiles-base"
+      name === "lima:cog-base"
     ) {
       throw new Error("invalid VM name");
     }

@@ -109,7 +109,7 @@ async function bodyForPolicy(
     if (!failed) {
       void reader.cancel().catch((error: unknown) => {
         console.error(
-          "vm-access: inspection stream cancellation failed",
+          "cog: inspection stream cancellation failed",
           error,
         );
       });
@@ -136,7 +136,7 @@ async function drained(request: Request, limit: number): Promise<boolean> {
     }
   } finally {
     void reader.cancel().catch((error: unknown) => {
-      console.error("vm-access: denied body cancellation failed", error);
+      console.error("cog: denied body cancellation failed", error);
     });
   }
 }
@@ -263,7 +263,7 @@ export async function handleOutbound(
     }
     if (isHealthCheck(classification)) {
       await authority.finish(requestId, 200, Date.now() - started, "completed");
-      return new Response("vm-access ready\n", { status: 200 });
+      return new Response("cog ready\n", { status: 200 });
     }
     const response = await forward(
       upstreamRequest(
@@ -285,7 +285,7 @@ export async function handleOutbound(
     return downstreamResponse(response, classification);
   } catch (error) {
     if (!(error instanceof PolicyError || error instanceof RequestBodyError)) {
-      console.error("vm-access: gateway request failed", error);
+      console.error("cog: gateway request failed", error);
     }
     const reason =
       error instanceof PolicyError ? error.message : "gateway request failed";
@@ -318,7 +318,7 @@ export async function handleOutbound(
         );
       }
     } catch (auditError) {
-      console.error("vm-access audit failure", auditError);
+      console.error("cog audit failure", auditError);
       return respond(503, "gateway audit unavailable", null);
     }
     if (

@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-bundle=$HOME/.local/share/vm-access/main.mjs
+bundle=$HOME/.local/share/cog/main.mjs
 [[ -f $bundle ]] || {
-    printf 'vm-access: %s is missing; run ./provision.sh dev\n' "$bundle" >&2
+    printf 'cog-gateway: %s is missing; run ./provision.sh dev\n' "$bundle" >&2
     exit 1
 }
 
@@ -13,5 +13,5 @@ for bun in /opt/homebrew/bin/bun /usr/local/bin/bun; do
         exec "$bun" "$bundle" "$@"
     fi
 done
-printf 'vm-access: Bun is missing; run ./provision.sh dev\n' >&2
+printf 'cog-gateway: Bun is missing; run ./provision.sh dev\n' >&2
 exit 1

@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "dotfiles-agent",
+  "name": "cog-agent",
   "main": "./worker.ts",
   "compatibility_date": "2026-10-11",
   "workers_dev": true,
@@ -19,13 +19,13 @@
     "AgentContainer": {
       "type": "durable-object",
       "storage": "sqlite",
-      "container": "dotfiles-agent"
+      "container": "cog-agent"
     },
     "Outbound": { "type": "worker" }
   },
   "containers": [
     {
-      "name": "dotfiles-agent",
+      "name": "cog-agent",
       "class_name": "AgentContainer",
       "scheduling_policy": "durable_object",
       "ssh": { "enabled": true },

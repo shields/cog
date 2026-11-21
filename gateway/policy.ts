@@ -630,7 +630,7 @@ export function classify(
     throw new PolicyError("unsupported GitHub web operation");
   }
   if (
-    url.pathname === "/__vm_access__/health" &&
+    url.pathname === "/__cog__/health" &&
     method === "GET" &&
     !url.search
   ) {

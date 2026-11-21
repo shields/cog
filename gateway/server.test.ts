@@ -136,7 +136,7 @@ interface Forwarded {
   body: Buffer;
 }
 
-const throwaway = mkdtempSync(path.join(tmpdir(), "vm-access-cert-"));
+const throwaway = mkdtempSync(path.join(tmpdir(), "cog-cert-"));
 const certificate = path.join(throwaway, "cert.pem");
 const key = path.join(throwaway, "key.pem");
 
@@ -224,7 +224,7 @@ async function startGateway(
   created: Mock<typeof https.createServer>;
   closed: () => Promise<void>;
 }> {
-  const root = mkdtempSync(path.join(tmpdir(), "vm-access-server-"));
+  const root = mkdtempSync(path.join(tmpdir(), "cog-server-"));
   defer(() => {
     rmSync(root, { recursive: true, force: true });
   });
@@ -363,7 +363,7 @@ test("the HTTPS socket injects a repo token only after checking the full push an
       await send(
         socket,
         "GET",
-        "/__vm_access__/health",
+        "/__cog__/health",
         Buffer.alloc(0),
         "api.github.com",
       )
@@ -1254,7 +1254,7 @@ test("a state failure that also stops the audit write is reported on stderr and 
   assert.match(reply.body, /gateway audit unavailable/);
   assert.deepEqual(stderr, [
     failureLine(requestIdIn(reply.body), instance, "Error: database is locked"),
-    "vm-access audit failure: Error: database is locked\n",
+    "cog audit failure: Error: database is locked\n",
   ]);
 });
 
@@ -1262,9 +1262,9 @@ test("the health path is answered locally however the target spells it", async (
   const { socket, state, incoming } = await startGateway();
   const audit = recordFinishes(state, 3);
   for (const target of [
-    "/__vm_access__/health",
-    "/x/../__vm_access__/health",
-    "/__vm_access__/./health",
+    "/__cog__/health",
+    "/x/../__cog__/health",
+    "/__cog__/./health",
   ]) {
     const response = await send(
       socket,
@@ -1274,7 +1274,7 @@ test("the health path is answered locally however the target spells it", async (
       "api.github.com",
     );
     assert.equal(response.status, 200, target);
-    assert.equal(response.body, "vm-access ready\n", target);
+    assert.equal(response.body, "cog ready\n", target);
   }
   await within("the audit rows", audit.all);
   assert.deepEqual(
@@ -1448,7 +1448,7 @@ function failureLine(
   instance: Instance,
   cause: string,
 ): string {
-  return `vm-access: gateway request failed (request ${requestId}, VM ${instance.id}): ${cause}\n`;
+  return `cog: gateway request failed (request ${requestId}, VM ${instance.id}): ${cause}\n`;
 }
 
 function failureLinePattern(
@@ -1460,7 +1460,7 @@ function failureLinePattern(
   assert.ok(row);
   assert.deepEqual(others, []);
   return new RegExp(
-    String.raw`^vm-access: gateway request failed \(request ${row.id}, VM ${instance.id}\): ${cause}\n$`,
+    String.raw`^cog: gateway request failed \(request ${row.id}, VM ${instance.id}\): ${cause}\n$`,
   );
 }
 
@@ -2577,7 +2577,7 @@ function unstartedGateway(
   gateway: Gateway;
   created: Mock<typeof https.createServer>;
 } {
-  const root = mkdtempSync(path.join(tmpdir(), "vm-access-server-"));
+  const root = mkdtempSync(path.join(tmpdir(), "cog-server-"));
   const state = new State(path.join(root, "state"));
   const secrets = path.join(root, "secrets");
   mkdirSync(secrets);

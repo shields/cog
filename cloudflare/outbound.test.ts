@@ -580,7 +580,7 @@ test("a failure after an inspected body arrived intact is still reported", async
   );
   assert.equal(response.status, 503);
   assert.deepEqual(logged.mock.calls, [
-    ["vm-access: gateway request failed", new Error("authority unavailable")],
+    ["cog: gateway request failed", new Error("authority unavailable")],
   ]);
 });
 
@@ -835,8 +835,8 @@ test("audit failure stops forwarding, is logged, and the client sees only that t
     message: "gateway audit unavailable",
   });
   assert.deepEqual(logged.mock.calls, [
-    ["vm-access: gateway request failed", new Error("audit unavailable")],
-    ["vm-access audit failure", new Error("deny unavailable")],
+    ["cog: gateway request failed", new Error("audit unavailable")],
+    ["cog audit failure", new Error("deny unavailable")],
   ]);
 });
 
@@ -862,7 +862,7 @@ test("a missing repository token stops forwarding and is logged", async () => {
   assert.deepEqual(events, ["finish:gateway-error:null"]);
   assert.deepEqual(logged.mock.calls, [
     [
-      "vm-access: gateway request failed",
+      "cog: gateway request failed",
       new Error("repository authorization is unavailable"),
     ],
   ]);
@@ -1060,7 +1060,7 @@ test("pagination links name the repository so later pages are checked like the f
 test("the health path is answered locally on api.github.com and forwarded on github.com", async () => {
   const events: string[] = [];
   const health = await handleOutbound(
-    new Request("https://api.github.com/__vm_access__/health"),
+    new Request("https://api.github.com/__cog__/health"),
     instanceId,
     authority(events),
     () => {
@@ -1068,13 +1068,13 @@ test("the health path is answered locally on api.github.com and forwarded on git
     },
   );
   assert.equal(health.status, 200);
-  assert.equal(await health.text(), "vm-access ready\n");
+  assert.equal(await health.text(), "cog ready\n");
   assert.deepEqual(events, ["allow:public.read", "finish:completed:200"]);
 
   for (const method of ["GET", "HEAD"]) {
     const forwarded: string[] = [];
     const page = await handleOutbound(
-      new Request("https://github.com/__vm_access__/health", { method }),
+      new Request("https://github.com/__cog__/health", { method }),
       instanceId,
       authority([]),
       (request) => {
@@ -1086,7 +1086,7 @@ test("the health path is answered locally on api.github.com and forwarded on git
     assert.equal(page.status, 404, method);
     assert.deepEqual(
       forwarded,
-      ["https://github.com/__vm_access__/health"],
+      ["https://github.com/__cog__/health"],
       method,
     );
   }

@@ -168,7 +168,7 @@ export class AgentContainer extends DurableObject<Env> {
       enableInternet: false,
       labels: { vm_id: instanceId },
       entrypoint: [
-        "/home/shields/src/github.com/shields/dotfiles/cloudflare/entrypoint.sh",
+        "/home/shields/src/github.com/shields/dotfiles/cloudflare/guest/entrypoint.sh",
       ],
     });
     await container.setInactivityTimeout(21_600_000);
@@ -307,7 +307,7 @@ export default {
       ) {
         return Response.json({ error: error.message }, { status: 403 });
       }
-      console.error("vm-access Cloudflare administration failed", error);
+      console.error("cog Cloudflare administration failed", error);
       return Response.json(
         { error: "administration unavailable" },
         { status: 503 },

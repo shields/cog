@@ -28,7 +28,7 @@ const serverAuth = "1.3.6.1.5.5.7.3.1";
 const certModule = path.join(import.meta.dirname, "cert.ts");
 
 function withDirectory(run: (directory: string) => void): void {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-cert-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-cert-"));
   try {
     run(directory);
   } finally {
@@ -39,7 +39,7 @@ function withDirectory(run: (directory: string) => void): void {
 let issuedDirectory = "";
 
 beforeAll(() => {
-  issuedDirectory = mkdtempSync(path.join(tmpdir(), "vm-access-cert-issued-"));
+  issuedDirectory = mkdtempSync(path.join(tmpdir(), "cog-cert-issued-"));
   ensureCertificates(issuedDirectory);
 });
 
@@ -388,7 +388,7 @@ test("a fresh directory whose path contains a dot keeps the serial file inside i
     const original = process.cwd();
     process.chdir(parent);
     try {
-      const directory = path.join(".config", "vm-access");
+      const directory = path.join(".config", "cog");
       assertConsistent(ensureCertificates(directory));
       assert.ok(existsSync(path.join(directory, "ca.srl")));
       assert.deepEqual(readdirSync(parent), [".config"]);
@@ -418,7 +418,7 @@ process.exit(status ?? 1);
 `;
 
 test("private keys and an in-directory serial file do not depend on openssl's defaults", () => {
-  const shims = mkdtempSync(path.join(tmpdir(), "vm-access-cert-libressl-"));
+  const shims = mkdtempSync(path.join(tmpdir(), "cog-cert-libressl-"));
   const originalPath = process.env.PATH;
   writeFileSync(path.join(shims, "openssl"), libreSslDefaults(realOpenssl()), {
     mode: 0o755,
@@ -429,7 +429,7 @@ test("private keys and an in-directory serial file do not depend on openssl's de
       const original = process.cwd();
       process.chdir(parent);
       try {
-        const directory = path.join(".config", "vm-access");
+        const directory = path.join(".config", "cog");
         assertConsistent(ensureCertificates(directory));
         assertKeysPrivate(directory);
         assert.ok(existsSync(path.join(directory, "ca.srl")));
@@ -561,8 +561,8 @@ function runChild(
 }
 
 test("overlapping first runs issue one CA and one leaf and all return them", async () => {
-  const shims = mkdtempSync(path.join(tmpdir(), "vm-access-cert-shim-"));
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-cert-race-"));
+  const shims = mkdtempSync(path.join(tmpdir(), "cog-cert-shim-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-cert-race-"));
   try {
     const records = path.join(shims, "records");
     mkdirSync(records);

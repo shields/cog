@@ -102,7 +102,7 @@ async function postForm(
     headers: {
       Accept: "application/json",
       "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "dotfiles-vm-access",
+      "User-Agent": "cog",
     },
     body: new URLSearchParams(form),
     redirect: "manual",
@@ -164,7 +164,7 @@ export class AppAuth {
     const file = this.file(key);
     if (!existsSync(file)) {
       throw new Error(
-        `GitHub authorization for ${key} is missing; run vm-access grant again`,
+        `GitHub authorization for ${key} is missing; run cog-gateway grant again`,
       );
     }
     const contents = readFileSync(file, "utf8");
@@ -250,7 +250,7 @@ export class AppAuth {
       }
       if (current.refresh_expires_at <= now) {
         throw new Error(
-          `GitHub authorization for ${key} expired; run vm-access grant again`,
+          `GitHub authorization for ${key} expired; run cog-gateway grant again`,
         );
       }
       const reply = await postForm(
@@ -263,7 +263,7 @@ export class AppAuth {
       );
       if (reply.error !== undefined) {
         throw new Error(
-          `GitHub refused refresh for ${key}; reauthorize with vm-access grant`,
+          `GitHub refused refresh for ${key}; reauthorize with cog-gateway grant`,
         );
       }
       const renewed = tokenReply(reply);
@@ -345,7 +345,7 @@ export class AppAuth {
         headers: {
           Accept: "application/vnd.github+json",
           Authorization: `Bearer ${tokens.access_token}`,
-          "User-Agent": "dotfiles-vm-access",
+          "User-Agent": "cog",
         },
         redirect: "manual",
         signal: AbortSignal.timeout(30_000),

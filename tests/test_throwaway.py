@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# provision/throwaway.sh writes the agents' policy for a throwaway environment.
+# guest/throwaway.sh writes the agents' policy for a throwaway environment.
 # These tests run it against a temporary etc directory, and with the settings
 # file it reads replaced by variants, so nothing here touches /etc.
 
@@ -31,7 +31,7 @@ import pytest
 type Json = dict[str, object]
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "provision" / "throwaway.sh"
+SCRIPT = REPO / "guest" / "throwaway.sh"
 BASH = shutil.which("bash") or "/bin/bash"
 HAS_JQ = shutil.which("jq") is not None
 
@@ -83,9 +83,9 @@ def tree_with_settings(tmp_path: Path, settings: Json) -> Path:
     """A copy of the script beside a .claude/settings.json of the test's choosing."""
     (tmp_path / "provision").mkdir()
     (tmp_path / ".claude").mkdir()
-    _ = shutil.copy(SCRIPT, tmp_path / "provision/throwaway.sh")
+    _ = shutil.copy(SCRIPT, tmp_path / "guest/throwaway.sh")
     _ = (tmp_path / ".claude/settings.json").write_text(json.dumps(settings))
-    return tmp_path / "provision/throwaway.sh"
+    return tmp_path / "guest/throwaway.sh"
 
 
 def files_under(root: Path) -> list[str]:
@@ -108,14 +108,14 @@ def test_writes_the_policy_and_the_timer_readable_by_everyone(etc: Path) -> None
         "claude-code/managed-settings.json",
         "codex/config.toml",
         "codex/rules/throwaway.rules",
-        "dotfiles-throwaway",
+        "cog-throwaway",
         "systemd/system/github-app-refresh.service",
         "systemd/system/github-app-refresh.timer",
         "systemd/system/timers.target.wants/github-app-refresh.timer",
     ]
     for name in files_under(etc):
         assert (etc / name).stat().st_mode & 0o777 == 0o644, name
-    assert (etc / "dotfiles-throwaway").read_text().strip() != ""
+    assert (etc / "cog-throwaway").read_text().strip() != ""
     assert result.stdout == ""
 
 
@@ -124,7 +124,7 @@ def test_leaves_no_temporary_files(etc: Path) -> None:
     assert sorted(path.name for path in etc.iterdir()) == [
         "claude-code",
         "codex",
-        "dotfiles-throwaway",
+        "cog-throwaway",
         "systemd",
     ]
 

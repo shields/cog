@@ -3,13 +3,13 @@
 set -euo pipefail
 
 [[ $(id -u) -eq 0 ]] || {
-    printf '%s\n' 'cloudflare-agent.sh: run as root' >&2
+    printf '%s\n' 'agent.sh: run as root' >&2
     exit 1
 }
 
 settings=/etc/claude-code/managed-settings.json
 [[ -f $settings ]] || {
-    printf '%s\n' 'cloudflare-agent.sh: managed settings are missing' >&2
+    printf '%s\n' 'agent.sh: managed settings are missing' >&2
     exit 1
 }
 managed=$(mktemp /etc/claude-code/.managed-settings.XXXXXX)
@@ -26,5 +26,5 @@ mv -f "$managed" "$settings"
 
 rm -f /home/shields/.codex/rules/no-push.rules
 sudo -H -u shields git config --global credential.https://github.com.helper '!/home/shields/bin/github-gateway-credential'
-printf '%s\n' cloudflare >/etc/dotfiles-github-gateway
-chmod 644 /etc/dotfiles-github-gateway
+printf '%s\n' cloudflare >/etc/cog-github-gateway
+chmod 644 /etc/cog-github-gateway

@@ -27,25 +27,25 @@ interface Locations {
 }
 
 function locations(): Locations {
-  const root = process.env.VM_ACCESS_ROOT;
+  const root = process.env.COG_ROOT;
   if (root) {
     return {
       state: path.join(root, "state"),
       secrets: path.join(root, "secrets"),
       admin: path.join(root, "state", "admin.sock"),
       profiles:
-        process.env.VM_ACCESS_PROFILES ?? path.join(root, "profiles.yaml"),
+        process.env.COG_PROFILES ?? path.join(root, "profiles.yaml"),
     };
   }
   const home = os.homedir();
-  const state = path.join(home, ".local", "state", "vm-access");
+  const state = path.join(home, ".local", "state", "cog");
   return {
     state,
-    secrets: path.join(home, ".config", "secrets", "vm-access"),
+    secrets: path.join(home, ".config", "secrets", "cog"),
     admin: path.join(state, "admin.sock"),
     profiles:
-      process.env.VM_ACCESS_PROFILES ??
-      path.join(home, ".config", "vm-access", "profiles.yaml"),
+      process.env.COG_PROFILES ??
+      path.join(home, ".config", "cog", "profiles.yaml"),
   };
 }
 
@@ -188,16 +188,16 @@ async function command(arguments_: string[]): Promise<void> {
   process.umask(0o077);
   const state = new State(location.state);
   const auth = new AppAuth(location.secrets, {
-    clientId: process.env.LIMAVM_GITHUB_CLIENT_ID,
-    webUrl: process.env.LIMAVM_GITHUB_WEB_URL,
-    apiUrl: process.env.LIMAVM_GITHUB_API_URL,
+    clientId: process.env.COG_GITHUB_CLIENT_ID,
+    webUrl: process.env.COG_GITHUB_WEB_URL,
+    apiUrl: process.env.COG_GITHUB_API_URL,
   });
   const actor = os.userInfo().username;
   try {
     switch (verb) {
       case "serve": {
         if (args.length !== 0) {
-          throw new Error("usage: vm-access serve");
+          throw new Error("usage: cog-gateway serve");
         }
         const certificates = ensureCertificates(location.secrets);
         const gateway = new Gateway(state, auth, {
@@ -233,7 +233,7 @@ async function command(arguments_: string[]): Promise<void> {
       case "register": {
         if (args.length !== 3 || args[1] !== "--lima-dir") {
           throw new Error(
-            "usage: vm-access register lima:NAME --lima-dir PATH",
+            "usage: cog-gateway register lima:NAME --lima-dir PATH",
           );
         }
         const name = required(args[0], "VM name");
@@ -262,7 +262,7 @@ async function command(arguments_: string[]): Promise<void> {
       }
       case "disable": {
         if (args.length !== 1) {
-          throw new Error("usage: vm-access disable lima:NAME");
+          throw new Error("usage: cog-gateway disable lima:NAME");
         }
         state.disable(required(args[0], "VM name"), actor);
         await adminCall(location.admin, "/sync", "POST");
@@ -270,7 +270,7 @@ async function command(arguments_: string[]): Promise<void> {
       }
       case "authorize": {
         if (args.length !== 1) {
-          throw new Error("usage: vm-access authorize OWNER/REPO");
+          throw new Error("usage: cog-gateway authorize OWNER/REPO");
         }
         await auth.authorize(required(args[0], "repository"));
         process.stdout.write("GitHub authorization stored on the Mac\n");
@@ -278,7 +278,7 @@ async function command(arguments_: string[]): Promise<void> {
       }
       case "ensure-auth": {
         if (args.length !== 1) {
-          throw new Error("usage: vm-access ensure-auth OWNER/REPO");
+          throw new Error("usage: cog-gateway ensure-auth OWNER/REPO");
         }
         const repository = normalizeRepository(required(args[0], "repository"));
         if (
@@ -294,7 +294,7 @@ async function command(arguments_: string[]): Promise<void> {
       case "grant": {
         if (args.length !== 4 || args[2] !== "--profile") {
           throw new Error(
-            "usage: vm-access grant lima:NAME OWNER/REPO --profile read|task",
+            "usage: cog-gateway grant lima:NAME OWNER/REPO --profile read|task",
           );
         }
         const name = required(args[0], "VM name");
@@ -323,7 +323,7 @@ async function command(arguments_: string[]): Promise<void> {
       }
       case "revoke": {
         if (args.length !== 2) {
-          throw new Error("usage: vm-access revoke lima:NAME OWNER/REPO");
+          throw new Error("usage: cog-gateway revoke lima:NAME OWNER/REPO");
         }
         const name = required(args[0], "VM name");
         const repository = normalizeRepository(required(args[1], "repository"));
@@ -346,19 +346,19 @@ async function command(arguments_: string[]): Promise<void> {
       }
       case "show": {
         if (args.length !== 1) {
-          throw new Error("usage: vm-access show lima:NAME");
+          throw new Error("usage: cog-gateway show lima:NAME");
         }
         show(state, auth, required(args[0], "VM name"));
         return;
       }
       case "edit": {
         if (args.length !== 1) {
-          throw new Error("usage: vm-access edit lima:NAME");
+          throw new Error("usage: cog-gateway edit lima:NAME");
         }
         const name = required(args[0], "VM name");
         const instance = active(state, name);
         const directory = mkdtempSync(
-          path.join(os.tmpdir(), "vm-access-edit-"),
+          path.join(os.tmpdir(), "cog-edit-"),
         );
         const file = path.join(directory, "policy.yaml");
         try {
@@ -366,7 +366,7 @@ async function command(arguments_: string[]): Promise<void> {
           const editor = process.env.VISUAL ?? process.env.EDITOR ?? "vi";
           const edited = spawnSync(
             "/bin/sh",
-            ["-c", `${editor} "$1"`, "vm-access-edit", file],
+            ["-c", `${editor} "$1"`, "cog-edit", file],
             { stdio: "inherit" },
           );
           if (edited.status !== 0) {
@@ -404,7 +404,7 @@ async function command(arguments_: string[]): Promise<void> {
             args[1] !== "--all")
         ) {
           throw new Error(
-            "usage: vm-access logs lima:NAME|VM-ID [--follow|--all]",
+            "usage: cog-gateway logs lima:NAME|VM-ID [--follow|--all]",
           );
         }
         const selector = required(args[0], "VM name or ID");
@@ -441,7 +441,7 @@ async function command(arguments_: string[]): Promise<void> {
       }
       default:
         throw new Error(
-          "usage: vm-access {serve|init|ca-path|health|register|disable|authorize|ensure-auth|grant|revoke|show|edit|logs}",
+          "usage: cog-gateway {serve|init|ca-path|health|register|disable|authorize|ensure-auth|grant|revoke|show|edit|logs}",
         );
     }
   } finally {
@@ -453,7 +453,7 @@ try {
   await command(process.argv.slice(2));
 } catch (error) {
   process.stderr.write(
-    `vm-access: ${error instanceof Error ? error.message : String(error)}\n`,
+    `cog-gateway: ${error instanceof Error ? error.message : String(error)}\n`,
   );
   process.exitCode = 1;
 }

@@ -17,7 +17,7 @@ import YAML from "yaml";
 import { State } from "./state.ts";
 
 test("CLI grants and edits apply live and disabled VM logs stay addressable by ID", async () => {
-  const root = mkdtempSync("/tmp/vma-");
+  const root = mkdtempSync("/tmp/cog-");
   const lima = path.join(root, "lima");
   const secrets = path.join(root, "secrets");
   mkdirSync(path.join(lima, "sock"), { recursive: true });
@@ -38,10 +38,10 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
   );
   const environment = {
     ...process.env,
-    VM_ACCESS_ROOT: root,
-    VM_ACCESS_PROFILES: path.join(
+    COG_ROOT: root,
+    COG_PROFILES: path.join(
       import.meta.dirname,
-      "../.config/vm-access/profiles.yaml",
+      "../profiles.yaml",
     ),
   };
   const main = path.join(root, "main.mjs");
@@ -172,7 +172,7 @@ interface Sandbox {
 // gh records its arguments and fails, so reaching GitHub authorization shows
 // up as a call.
 function sandbox(): Sandbox {
-  const root = mkdtempSync("/tmp/vma-");
+  const root = mkdtempSync("/tmp/cog-");
   onTestFinished(() => {
     rmSync(root, { recursive: true, force: true });
   });
@@ -201,7 +201,7 @@ function sandbox(): Sandbox {
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH ?? ""}`,
-            VM_ACCESS_ROOT: root,
+            COG_ROOT: root,
             ...extra,
           },
           encoding: "utf8",
@@ -233,10 +233,10 @@ test("grant rejects an invalid profile definition before it authorizes anything"
     writeFileSync(profiles, YAML.stringify({ read, task, [name]: profile }));
     const result = run(
       ["grant", "lima:trial", "shields/dotfiles", "--profile", "task"],
-      { VM_ACCESS_PROFILES: profiles },
+      { COG_PROFILES: profiles },
     );
     assert.equal(result.status, 1, result.stdout);
-    assert.equal(result.stderr, `vm-access: invalid profile ${name}\n`);
+    assert.equal(result.stderr, `cog-gateway: invalid profile ${name}\n`);
   }
   assert.equal(existsSync(ghCalls), false);
 });
@@ -254,10 +254,10 @@ test("grant rejects a profile name inherited from Object.prototype before it aut
   ]) {
     const result = run(
       ["grant", "lima:trial", "shields/dotfiles", "--profile", name],
-      { VM_ACCESS_PROFILES: profiles },
+      { COG_PROFILES: profiles },
     );
     assert.equal(result.status, 1, result.stdout);
-    assert.equal(result.stderr, `vm-access: unknown profile ${name}\n`);
+    assert.equal(result.stderr, `cog-gateway: unknown profile ${name}\n`);
   }
   assert.equal(existsSync(ghCalls), false);
 });
@@ -286,7 +286,7 @@ test("edit rejects an invalid policy before it authorizes anything", () => {
       REPOSITORIES: repositories,
     });
     assert.equal(result.status, 1, result.stdout);
-    assert.equal(result.stderr, `vm-access: ${message}\n`);
+    assert.equal(result.stderr, `cog-gateway: ${message}\n`);
   }
   assert.equal(existsSync(ghCalls), false);
 });
@@ -312,7 +312,7 @@ test("edit keeps the grants when repositories is a set, an ordered map, or a tim
       REPOSITORIES: repositories,
     });
     assert.equal(result.status, 1, result.stdout);
-    assert.equal(result.stderr, "vm-access: repositories must be a mapping\n");
+    assert.equal(result.stderr, "cog-gateway: repositories must be a mapping\n");
   }
   const state = new State(path.join(root, "state"));
   try {
@@ -337,7 +337,7 @@ test("edit authorizes a repository it adds", () => {
   assert.equal(result.status, 1, result.stdout);
   assert.equal(
     result.stderr,
-    "vm-access: gh cannot read shields/new; check the repository and your Mac gh login\n",
+    "cog-gateway: gh cannot read shields/new; check the repository and your Mac gh login\n",
   );
   assert.equal(
     readFileSync(ghCalls, "utf8"),
@@ -366,6 +366,6 @@ test("serve closes the listeners it opened and exits when it cannot open one for
   );
   assert.match(
     result.stderr,
-    /^vm-access: [^\n]*ENOENT[^\n]*vanished\.sock[^\n]*\n$/,
+    /^cog-gateway: [^\n]*ENOENT[^\n]*vanished\.sock[^\n]*\n$/,
   );
 }, 60_000);

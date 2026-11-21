@@ -11,7 +11,7 @@ elif [[ $# -ne 0 ]]; then
 fi
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-secret_dir=$HOME/.config/secrets/vm-access
+secret_dir=$HOME/.config/secrets/cog
 token_file=$secret_dir/cloudflare-admin-token
 install -d -m 0700 "$secret_dir"
 if [[ ! -e $token_file ]]; then
@@ -27,7 +27,7 @@ fi
     exit 1
 }
 
-stage=$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-cloudflare.XXXXXX")
+stage=$(mktemp -d "${TMPDIR:-/tmp}/cog-cloudflare.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 "$root/tools/stage_tree.sh" "$stage/tree"
 cd "$stage/tree"

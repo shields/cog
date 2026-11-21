@@ -10,7 +10,7 @@ afterEach(() => {
 });
 
 test("live grants are additive, conflict checked, and tied to immutable VM identities", () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-state-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-state-"));
   const state = new State(directory);
   try {
     const instance = state.register(
@@ -81,7 +81,7 @@ test("live grants are additive, conflict checked, and tied to immutable VM ident
 });
 
 test("a policy that repeats a repository in another case changes nothing", () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-state-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-state-"));
   const state = new State(directory);
   try {
     const instance = state.register(
@@ -110,8 +110,30 @@ test("a policy that repeats a repository in another case changes nothing", () =>
   }
 });
 
+test("the base VM and malformed names cannot be registered", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-state-"));
+  const state = new State(directory);
+  try {
+    for (const name of ["lima:cog-base", "cog-base", "lima:", "lima:a b"]) {
+      assert.throws(
+        () => state.register(name, path.join(directory, "x.sock"), "tester"),
+        /invalid VM name/,
+        name,
+      );
+    }
+    assert.equal(
+      state.register("lima:work", path.join(directory, "w.sock"), "tester")
+        .name,
+      "lima:work",
+    );
+  } finally {
+    state.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("audit record precedes a request and an interrupted request retains an unknown outcome", () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-audit-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-audit-"));
   const state = new State(directory);
   try {
     const instance = state.register(
@@ -141,7 +163,7 @@ test("audit record precedes a request and an interrupted request retains an unkn
 const day = 86_400_000;
 
 function withState(run: (state: State) => void): void {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-prune-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-prune-"));
   const state = new State(directory);
   try {
     run(state);
@@ -229,7 +251,7 @@ test("pruning deletes exactly the rows older than the retention periods", () => 
 });
 
 test("opening a database that lacks the time index adds it and keeps its rows", () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "vm-access-index-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-index-"));
   try {
     const legacy = new State(directory);
     try {

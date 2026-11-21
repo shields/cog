@@ -16,7 +16,7 @@
 REST and GraphQL (what gh asks for), and the smart-HTTP advertisement that
 git ls-remote reads.
 
-Tests import FakeGitHub. tests/test_limavm.zsh runs this file as a program with
+Tests import FakeGitHub. tests/test_cog.zsh runs this file as a program with
 a JSON scenario: python3 tests/fake_github.py CONFIG.json.
 """
 

@@ -244,7 +244,7 @@ export class Gateway {
       this.state.prune();
     } catch (error) {
       process.stderr.write(
-        `vm-access: listener refresh failed: ${String(error)}\n`,
+        `cog: listener refresh failed: ${String(error)}\n`,
       );
       throw error;
     }
@@ -360,7 +360,7 @@ export class Gateway {
         .end('{"ok":true}');
     } catch (error) {
       process.stderr.write(
-        `vm-access: listener sync failed: ${String(error)}\n`,
+        `cog: listener sync failed: ${String(error)}\n`,
       );
       response.writeHead(503).end();
     }
@@ -513,7 +513,7 @@ export class Gateway {
       if (isHealthCheck(classification)) {
         response
           .writeHead(200, { "content-type": "text/plain" })
-          .end("vm-access ready\n");
+          .end("cog ready\n");
         settlement = { upstreamStatus: 200, outcome: "completed" };
       } else {
         settlement = await this.forward(
@@ -537,7 +537,7 @@ export class Gateway {
       const aborted = error === request.errored;
       if (!aborted && !(error instanceof PolicyError)) {
         process.stderr.write(
-          `vm-access: gateway request failed (request ${requestId}, VM ${instanceId}): ${describeFailure(error)}\n`,
+          `cog: gateway request failed (request ${requestId}, VM ${instanceId}): ${describeFailure(error)}\n`,
         );
       }
       const reason =
@@ -578,7 +578,7 @@ export class Gateway {
           );
         } catch (auditError) {
           process.stderr.write(
-            `vm-access audit failure: ${String(auditError)}\n`,
+            `cog audit failure: ${String(auditError)}\n`,
           );
           respond(503, "gateway audit unavailable");
           return;

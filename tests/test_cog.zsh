@@ -26,7 +26,7 @@ done
 HERE="${0:A:h}"
 PYTHON="$(uv run --project "$HERE/.." python -c 'import sys; print(sys.executable)')"
 export PATH="${PYTHON:h}:$PATH"
-LIMAVM="$HERE/../bin/limavm"
+COG="$HERE/../bin/cog"
 FAKE_GITHUB="$HERE/fake_github.py"
 REAL_CURL="$(command -v curl)"
 REAL_GIT="$(command -v git)"
@@ -185,13 +185,13 @@ esac
 exit 0
 STUB
 
-cat > "$STUBS/vm-access" <<'STUB'
+cat > "$STUBS/cog-gateway" <<'STUB'
 #!/bin/bash
 state=$LIMA_STUB_STATE
-printf '%s\n' "$*" >> "$state/vm-access.log"
-printf 'vm-access %s\n' "$*" >> "$state/all.log"
-if [[ -n ${VM_ACCESS_STUB_FAIL:-} && $* == *"$VM_ACCESS_STUB_FAIL"* ]]; then
-    echo "vm-access: injected failure" >&2
+printf '%s\n' "$*" >> "$state/cog-gateway.log"
+printf 'cog-gateway %s\n' "$*" >> "$state/all.log"
+if [[ -n ${COG_STUB_FAIL:-} && $* == *"$COG_STUB_FAIL"* ]]; then
+    echo "cog-gateway: injected failure" >&2
     exit 1
 fi
 case $1 in
@@ -204,7 +204,7 @@ ca-path) echo "$state/gateway-ca.pem" ;;
 esac
 STUB
 
-# gh answers the one read-only call limavm makes, with the id in
+# gh answers the one read-only call cog makes, with the id in
 # $LIMA_STUB_STATE/gh-id, and fails if $LIMA_STUB_STATE/gh-fail exists.
 cat > "$STUBS/gh" <<'STUB'
 #!/bin/bash
@@ -262,11 +262,11 @@ cat > "$STUBS/sleep" <<'STUB'
 printf '%s\n' "$*" >> "$LIMA_STUB_STATE/sleep.log"
 STUB
 
-# limavm has no use for the macOS security command, so any call is a failure.
+# cog has no use for the macOS security command, so any call is a failure.
 cat > "$STUBS/security" <<'STUB'
 #!/bin/bash
 echo "called: $*" >> "$LIMA_STUB_STATE/security.log"
-echo "security: limavm must not call this" >&2
+echo "security: cog must not call this" >&2
 exit 1
 STUB
 cat > "$STUBS/gitleaks" <<'STUB'
@@ -301,8 +301,8 @@ mkdir -p "$CHECKOUT/lima" "$CHECKOUT/provision" "$CHECKOUT/tools"
 git -C "$CHECKOUT" init -q -b main
 : > "$CHECKOUT/lima/dev.yaml"
 printf '#!/bin/bash\n' > "$CHECKOUT/provision.sh"
-printf '#!/bin/bash\n' > "$CHECKOUT/provision/throwaway.sh"
-printf '#!/bin/bash\n' > "$CHECKOUT/provision/reset-identity.sh"
+printf '#!/bin/bash\n' > "$CHECKOUT/guest/throwaway.sh"
+printf '#!/bin/bash\n' > "$CHECKOUT/guest/reset-identity.sh"
 cp "$TMPBASE/stage_tree.sh" "$CHECKOUT/tools/stage_tree.sh"
 cp "$HERE/../tools/stage_tree.sh" "$CHECKOUT/tools/stage_tree_real.sh"
 chmod +x "$CHECKOUT/provision.sh" "$CHECKOUT/tools/stage_tree.sh"
@@ -343,7 +343,7 @@ new_case() {
     : > "$STATE/instances"
     (( $# == 0 )) || printf '%s\n' "$@" >> "$STATE/instances"
     : > "$STATE/limactl.log"
-    : > "$STATE/vm-access.log"
+    : > "$STATE/cog-gateway.log"
     echo 4242 > "$STATE/gh-id"
     print -r -- "$FAKE_CLAUDE" > "$STATE/prompt"
     print -r -- "TEST-GATEWAY-CA" > "$STATE/gateway-ca.pem"
@@ -351,12 +351,12 @@ new_case() {
     FAKE_URL=
     RUN_PATH=
     RUN_STDIN=
-    EXTRA_ENV=(LIMAVM_PROMPT_INPUT="$STATE/prompt")
+    EXTRA_ENV=(COG_PROMPT_INPUT="$STATE/prompt")
 }
 
 # start_fake [JSON FIELDS]: a fake GitHub on a free port for the current case,
 # with the repositories shields/dotfiles (4242) and shields/other (77), and
-# limavm aimed at it. FAKE_CLIENT_ID is the client id it accepts.
+# cog aimed at it. FAKE_CLIENT_ID is the client id it accepts.
 start_fake() {
     local fields=${1:+, $1}
     print -r -- "{\"port_file\": \"$STATE/fake.port\", \"log\": \"$STATE/fake.log\", \"client_id\": \"${FAKE_CLIENT_ID:-$CLIENT_ID}\", \"repo_ids\": {\"shields/dotfiles\": 4242, \"shields/other\": 77}$fields}" > "$STATE/fake.json"
@@ -372,7 +372,7 @@ start_fake() {
         exit 1
     fi
     FAKE_URL="http://127.0.0.1:$(<"$STATE/fake.port")"
-    EXTRA_ENV+=(LIMAVM_GITHUB_WEB_URL="$FAKE_URL" LIMAVM_GITHUB_API_URL="$FAKE_URL/api/v3")
+    EXTRA_ENV+=(COG_GITHUB_WEB_URL="$FAKE_URL" COG_GITHUB_API_URL="$FAKE_URL/api/v3")
 }
 
 # no_pbcopy_path: the test PATH with every pbcopy removed, each directory that
@@ -400,21 +400,21 @@ no_pbcopy_path() {
 # environment.
 UNREACHABLE_GITHUB=http://127.0.0.1:9
 
-# run_limavm ARGS...: sets OUT (stdout and stderr) and RC. RUN_PATH replaces
-# the stubbed PATH for one case, and RUN_STDIN names a file to give limavm on
+# run_cog ARGS...: sets OUT (stdout and stderr) and RC. RUN_PATH replaces
+# the stubbed PATH for one case, and RUN_STDIN names a file to give cog on
 # stdin instead of nothing.
-run_limavm() {
+run_cog() {
     RC=0
     OUT="$(cd "$CHECKOUT" && env PATH="${RUN_PATH:-$STUBS:$PATH}" HOME="$HOME_DIR" USER=shields \
-        LIMA_STUB_STATE="$STATE" STAGE_ARGS_LOG="$STAGE_ARGS_LOG" LIMAVM_BASE=test-base \
+        LIMA_STUB_STATE="$STATE" STAGE_ARGS_LOG="$STAGE_ARGS_LOG" COG_BASE=test-base \
         REAL_CURL="$REAL_CURL" REAL_GIT="$REAL_GIT" REAL_GITLEAKS="$REAL_GITLEAKS" \
-        NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 LIMAVM_GITHUB_WEB_URL="$UNREACHABLE_GITHUB" \
-        "${EXTRA_ENV[@]}" /bin/bash "$LIMAVM" "$@" 2>&1 <"${RUN_STDIN:-/dev/null}")" || RC=$?
+        NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 COG_GITHUB_WEB_URL="$UNREACHABLE_GITHUB" \
+        "${EXTRA_ENV[@]}" /bin/bash "$COG" "$@" 2>&1 <"${RUN_STDIN:-/dev/null}")" || RC=$?
 }
 
-# stdin_marker: a line that limavm's own stdin holds for the case, so that a
+# stdin_marker: a line that cog's own stdin holds for the case, so that a
 # stub which reads it shows up; the stubs record what they are given.
-STDIN_MARKER='limavm-stdin-marker-9f3e'
+STDIN_MARKER='cog-stdin-marker-9f3e'
 stdin_marker() {
     RUN_STDIN="$STATE/stdin"
     print -r -- "$STDIN_MARKER" > "$RUN_STDIN"
@@ -430,10 +430,10 @@ calls_reading_stdin() {
     return 0
 }
 
-# The shell that new ends in is the one limactl call that may have limavm's
+# The shell that new ends in is the one limactl call that may have cog's
 # stdin; a lookup or a clone that read it would swallow what was meant for it.
 assert_only_the_shell_reads_stdin() {
-    assert_eq "only the final shell reads limavm's stdin: $1" \
+    assert_eq "only the final shell reads cog's stdin: $1" \
         "$(limactl_log | wc -l | tr -d ' ').stdin" "$(calls_reading_stdin)"
 }
 
@@ -450,7 +450,7 @@ count_in_log() {
 }
 
 staging_dirs_left() {
-    ls "$TMPDIR" | grep -c '^limavm\.' || true
+    ls "$TMPDIR" | grep -c '^cog\.' || true
 }
 
 mode_of() {
@@ -475,58 +475,58 @@ stub_calls() {
 }
 
 # None of the secrets may show in what a stub was given as arguments or
-# environment, in the logs of the stubs, or in what limavm printed. They go over
+# environment, in the logs of the stubs, or in what cog printed. They go over
 # stdin and nowhere else.
 assert_no_secret_leak() {
     local desc="$1" leaks
-    leaks="$(cat "$STATE"/calls/*.argv(N) "$STATE"/calls/*.env(N) "$STATE/limactl.log" "$STATE/vm-access.log" \
+    leaks="$(cat "$STATE"/calls/*.argv(N) "$STATE"/calls/*.env(N) "$STATE/limactl.log" "$STATE/cog-gateway.log" \
         "$STATE"/gh.log "$STATE"/open.log "$STATE"/sleep.log 2>/dev/null |
         grep -c -e "$FAKE_CLAUDE" -e "$FAKE_CODEX" -e "$FAKE_FIREWORKS" "${GITHUB_SECRETS[@]}" || true)"
     assert_eq "$desc: no secret in any recorded argv, environment or log" 0 "$leaks"
-    assert_eq "$desc: no secret in limavm's output" 0 \
+    assert_eq "$desc: no secret in cog's output" 0 \
         "$(printf '%s' "$OUT" | grep -c -e "$FAKE_CLAUDE" -e "$FAKE_CODEX" -e "$FAKE_FIREWORKS" "${GITHUB_SECRETS[@]}" || true)"
 }
 
 # --- 1. Static checks ---
 assert_eq "no bash 4 constructs" "" \
-    "$(grep -vE '^[[:space:]]*#' "$LIMAVM" | grep -nE 'mapfile|readarray|declare +-A|local +-n|\$\{[A-Za-z_0-9]+(,,|\^\^|@[LUu])' || true)"
-assert_eq "limavm is run by the system bash" "#!/bin/bash" "$(head -1 "$LIMAVM")"
-assert_eq "no eval" 0 "$(grep -cE '(^|[^a-z_])eval ' "$LIMAVM" || true)"
-assert_eq "limavm is executable" yes "$([[ -x $LIMAVM ]] && echo yes || echo no)"
-assert_eq "limavm does not use the Keychain" 0 "$(grep -ciE 'keychain|need security|find-generic-password' "$LIMAVM" || true)"
+    "$(grep -vE '^[[:space:]]*#' "$COG" | grep -nE 'mapfile|readarray|declare +-A|local +-n|\$\{[A-Za-z_0-9]+(,,|\^\^|@[LUu])' || true)"
+assert_eq "cog is run by the system bash" "#!/bin/bash" "$(head -1 "$COG")"
+assert_eq "no eval" 0 "$(grep -cE '(^|[^a-z_])eval ' "$COG" || true)"
+assert_eq "cog is executable" yes "$([[ -x $COG ]] && echo yes || echo no)"
+assert_eq "cog does not use the Keychain" 0 "$(grep -ciE 'keychain|need security|find-generic-password' "$COG" || true)"
 
 # --- 2. help and bad invocations ---
 new_case
-run_limavm help
+run_cog help
 assert_eq "help succeeds" 0 "$RC"
-assert_contains "help lists base" "limavm base" "$OUT"
-assert_contains "help lists new" "limavm new" "$OUT"
-assert_contains "help lists github" "limavm github NAME [OWNER/REPO]" "$OUT"
+assert_contains "help lists base" "cog base" "$OUT"
+assert_contains "help lists new" "cog new" "$OUT"
+assert_contains "help lists github" "cog github NAME [OWNER/REPO]" "$OUT"
 assert_contains "help names --repo" "--repo OWNER/REPO" "$OUT"
 assert_contains "help names --no-repo" "--no-repo" "$OUT"
 assert_contains "help names --no-claude-token" "--no-claude-token" "$OUT"
 assert_contains "help names --no-codex-auth" "--no-codex-auth" "$OUT"
 assert_contains "help says where Codex keeps its login" 'cli_auth_credentials_store = "file"' "$OUT"
-assert_contains "help lists claude-token" "limavm claude-token" "$OUT"
+assert_contains "help lists claude-token" "cog claude-token" "$OUT"
 assert_contains "help names the Fireworks key file" ".config/secrets/FIREWORKS_API_KEY" "$OUT"
 assert_contains "help describes the Mac gateway" "Credentials" "$OUT"
-run_limavm
+run_cog
 assert_eq "no command fails" 2 "$RC"
 RC=0
-OUT="$(cd "$CHECKOUT" && env -u HOME PATH="$STUBS:$PATH" LIMA_STUB_STATE="$STATE" LIMAVM_BASE=test-base /bin/bash "$LIMAVM" help 2>&1)" || RC=$?
+OUT="$(cd "$CHECKOUT" && env -u HOME PATH="$STUBS:$PATH" LIMA_STUB_STATE="$STATE" COG_BASE=test-base /bin/bash "$COG" help 2>&1)" || RC=$?
 assert_eq "help without HOME fails" 1 "$RC"
-assert_contains "help without HOME says so" "limavm: HOME is not set" "$OUT"
-run_limavm frobnicate
+assert_contains "help without HOME says so" "cog: HOME is not set" "$OUT"
+run_cog frobnicate
 assert_eq "unknown command fails" 2 "$RC"
-run_limavm new a b
+run_cog new a b
 assert_eq "new with two names fails" 1 "$RC"
-run_limavm list
+run_cog list
 assert_eq "list succeeds" 0 "$RC"
 assert_eq "list is limactl list" "list" "$(limactl_log)"
 
 # --- 3. base on a fresh machine ---
 new_case
-run_limavm base none
+run_cog base none
 assert_eq "base succeeds" 0 "$RC"
 assert_eq "base call order" "list -q test-base
 start --tty=false --name=test-base CHECKOUT/lima/dev.yaml
@@ -535,20 +535,20 @@ shell test-base sh -c printf %s \"\$HOME\"
 shell test-base sh -c set -eu; rm -rf \"\$1\"; mkdir -p \"\$1\"; tar -xf - --no-same-owner -C \"\$1\" _ $GUEST_DIR
 shell --workdir $GUEST_DIR test-base ./provision.sh none
 shell --workdir $GUEST_DIR test-base git reset --mixed --quiet HEAD
-shell test-base sudo $GUEST_DIR/provision/throwaway.sh --no-github-timer
+shell test-base sudo $GUEST_DIR/guest/throwaway.sh --no-github-timer
 shell --workdir $GUEST_DIR test-base env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin uv run --no-dev python tools/configure_codex.py /home/guest/.codex/config.toml
 shell test-base sudo truncate -s 0 /etc/machine-id
-shell test-base $GUEST_DIR/provision/reset-identity.sh
+shell test-base $GUEST_DIR/guest/reset-identity.sh
 stop --tty=false test-base
 edit --tty=false test-base --shell /usr/bin/zsh
 protect test-base" "$(limactl_log)"
 assert_eq "base stages into a directory outside the checkout" 1 \
-    "$([[ "$(<"$STAGE_ARGS_LOG")" == "$TMPDIR"/limavm.*/tree ]] && echo 1 || echo 0)"
+    "$([[ "$(<"$STAGE_ARGS_LOG")" == "$TMPDIR"/cog.*/tree ]] && echo 1 || echo 0)"
 assert_eq "base streams the staged tree as a tar archive" "./provision.sh" \
     "$(tar -tf "$STATE/calls/5.stdin" | grep -x './provision.sh')"
 assert_eq "base removes its staging directory" 0 "$(staging_dirs_left)"
 assert_eq "base leaves the VM protected" 1 "$([[ -e "$STATE/protected-test-base" ]] && echo 1 || echo 0)"
-assert_contains "base says what to do next" "limavm new" "$OUT"
+assert_contains "base says what to do next" "cog new" "$OUT"
 assert_eq "base preserves the commit history" "$(git -C "$CHECKOUT" log --format=%H)" \
     "$(git -C "$STATE/guest" log --format=%H 2>/dev/null || true)"
 assert_eq "base preserves the branch" main "$(git -C "$STATE/guest" branch --show-current)"
@@ -563,7 +563,7 @@ new_case
 printf 'edited\n' > "$CHECKOUT/tracked.txt"
 printf 'untracked\n' > "$CHECKOUT/new.txt"
 rm "$CHECKOUT/obsolete.txt"
-run_limavm base none
+run_cog base none
 assert_eq "base with local changes succeeds" 0 "$RC"
 assert_eq "base keeps local edits" edited "$(<"$STATE/guest/tracked.txt")"
 assert_eq "base keeps untracked files" untracked "$(<"$STATE/guest/new.txt")"
@@ -575,7 +575,7 @@ rm "$CHECKOUT/new.txt"
 
 new_case
 git -C "$CHECKOUT" checkout -q --detach
-run_limavm base none
+run_cog base none
 assert_eq "base with a detached HEAD succeeds" 0 "$RC"
 assert_eq "base preserves a detached HEAD" "" "$(git -C "$STATE/guest" branch --show-current)"
 assert_eq "base preserves the detached commit" "$(git -C "$CHECKOUT" rev-parse HEAD)" \
@@ -587,7 +587,7 @@ git -C "$CHECKOUT" worktree add -q -b worktree "$TMPBASE/worktree"
 MAIN_CHECKOUT=$CHECKOUT
 CHECKOUT="$TMPBASE/worktree"
 printf 'worktree\n' > "$CHECKOUT/tracked.txt"
-run_limavm base none
+run_cog base none
 assert_eq "base from a linked worktree succeeds" 0 "$RC"
 assert_eq "base preserves the worktree branch" worktree "$(git -C "$STATE/guest" branch --show-current)"
 assert_eq "base preserves the worktree's changes" worktree "$(<"$STATE/guest/tracked.txt")"
@@ -598,13 +598,13 @@ CHECKOUT=$MAIN_CHECKOUT
 for origin in https://github.com/shields/dotfiles.git ssh://git@github.com/shields/dotfiles.git; do
     new_case
     git -C "$CHECKOUT" remote set-url origin "$origin"
-    run_limavm base none
+    run_cog base none
     assert_eq "base accepts a credential-free origin" 0 "$RC"
     assert_eq "base configures the HTTPS origin" https://github.com/shields/dotfiles.git \
         "$(git -C "$STATE/guest" remote get-url origin)"
 done
 
-origin_marker=LIMAVM_ORIGIN_CREDENTIAL
+origin_marker=COG_ORIGIN_CREDENTIAL
 for origin in \
     "https://user:$origin_marker@github.com/shields/dotfiles.git" \
     "https://$origin_marker@github.com/shields/dotfiles.git" \
@@ -614,7 +614,7 @@ for origin in \
     "https://github.com/shields/dotfiles.git#$origin_marker"; do
     new_case test-base
     git -C "$CHECKOUT" remote set-url origin "$origin"
-    run_limavm base none
+    run_cog base none
     assert_eq "base rejects an origin that can carry credentials" 1 "$RC"
     assert_contains "base explains the origin rejection" "origin must not contain" "$OUT"
     assert_eq "a rejected origin touches no VM" "" "$(limactl_log)"
@@ -636,7 +636,7 @@ new_history_case() {
 [[rules]]
 id = "history-marker"
 description = "Lima history regression marker"
-regex = '''LIMAVM_HISTORY_SENTINEL'''
+regex = '''COG_HISTORY_SENTINEL'''
 EOF
     EXTRA_ENV+=(GITLEAKS_CONFIG="$STATE/gitleaks.toml")
 }
@@ -648,7 +648,7 @@ assert_history_rejected() {
     assert_contains "$desc reports the history scan failure" "gitleaks found secrets in the repository history, or failed" "$OUT"
     assert_eq "$desc touches no VM" "" "$(limactl_log)"
     assert_eq "$desc leaves no staging directory" 0 "$(staging_dirs_left)"
-    assert_eq "$desc is redacted" no "$([[ $OUT == *LIMAVM_HISTORY_SENTINEL* ]] && echo yes || echo no)"
+    assert_eq "$desc is redacted" no "$([[ $OUT == *COG_HISTORY_SENTINEL* ]] && echo yes || echo no)"
 }
 
 new_history_case
@@ -661,29 +661,29 @@ printf 'main\n' > "$CHECKOUT/main.txt"
 git -C "$CHECKOUT" add main.txt
 git -C "$CHECKOUT" commit -qm main
 git -C "$CHECKOUT" merge --no-ff --no-commit merge-side >/dev/null 2>&1
-printf 'LIMAVM_HISTORY_SENTINEL\n' > "$CHECKOUT/merge-only.txt"
+printf 'COG_HISTORY_SENTINEL\n' > "$CHECKOUT/merge-only.txt"
 git -C "$CHECKOUT" add merge-only.txt
 git -C "$CHECKOUT" commit -qm merge
 git -C "$CHECKOUT" rm -q merge-only.txt
 git -C "$CHECKOUT" commit -qm remove
-run_limavm base none
+run_cog base none
 assert_history_rejected "a secret introduced only by a merge and then removed" merge-only.txt
 CHECKOUT=$MAIN_CHECKOUT
 
 new_history_case
 git -C "$CHECKOUT" checkout -qb unmerged
-printf 'LIMAVM_HISTORY_SENTINEL\n' > "$CHECKOUT/unmerged-only.txt"
+printf 'COG_HISTORY_SENTINEL\n' > "$CHECKOUT/unmerged-only.txt"
 git -C "$CHECKOUT" add unmerged-only.txt
 git -C "$CHECKOUT" commit -qm unmerged
 git -C "$CHECKOUT" checkout -q main
 git -C "$CHECKOUT" remote remove origin
-run_limavm base none
+run_cog base none
 assert_history_rejected "a secret on an unmerged branch with no origin" unmerged-only.txt
 CHECKOUT=$MAIN_CHECKOUT
 
 new_case
 git -C "$CHECKOUT" remote remove origin
-run_limavm base none
+run_cog base none
 assert_eq "base accepts a safe repository without an origin" 0 "$RC"
 assert_eq "a source without an origin leaves no host remote in the guest" "" "$(git -C "$STATE/guest" remote)"
 assert_eq "base without an origin preserves history" "$(git -C "$CHECKOUT" log --format=%H)" \
@@ -692,28 +692,28 @@ git -C "$CHECKOUT" remote add origin git@github.com:shields/dotfiles.git
 
 # --- 4. base passes modules and sizes through ---
 new_case
-run_limavm base dev data
+run_cog base dev data
 assert_contains "base passes the modules" "./provision.sh dev data" "$(limactl_log)"
 assert_eq "base without a size passes none" 0 "$(count_in_log '--cpus')"
 new_case
-EXTRA_ENV+=(LIMAVM_CPUS=4 LIMAVM_MEMORY=8)
-run_limavm base none
+EXTRA_ENV+=(COG_CPUS=4 COG_MEMORY=8)
+run_cog base none
 assert_contains "base passes the size to start" \
     "start --tty=false --name=test-base --cpus 4 --memory 8 CHECKOUT/lima/dev.yaml" "$(limactl_log)"
 new_case
-EXTRA_ENV+=(LIMAVM_CPUS=many)
-run_limavm base none
-assert_eq "a bad LIMAVM_CPUS fails" 1 "$RC"
-assert_eq "a bad LIMAVM_CPUS touches no VM" "" "$(limactl_log)"
+EXTRA_ENV+=(COG_CPUS=many)
+run_cog base none
+assert_eq "a bad COG_CPUS fails" 1 "$RC"
+assert_eq "a bad COG_CPUS touches no VM" "" "$(limactl_log)"
 new_case
-EXTRA_ENV+=(LIMAVM_MEMORY=8GiB)
-run_limavm base none
-assert_eq "a bad LIMAVM_MEMORY fails" 1 "$RC"
+EXTRA_ENV+=(COG_MEMORY=8GiB)
+run_cog base none
+assert_eq "a bad COG_MEMORY fails" 1 "$RC"
 
 # --- 5. base replaces an existing protected base ---
 new_case test-base other
 : > "$STATE/protected-test-base"
-run_limavm base none
+run_cog base none
 assert_eq "base over a protected base succeeds" 0 "$RC"
 assert_eq "base unprotects before deleting" "list -q test-base
 list --format {{.Protected}} test-base
@@ -725,14 +725,14 @@ assert_eq "base leaves other VMs alone" 1 "$(grep -cx other "$STATE/instances")"
 new_case
 RC=0
 OUT="$(cd "$TMPBASE" && env PATH="$STUBS:$PATH" HOME="$HOME_DIR" LIMA_STUB_STATE="$STATE" \
-    REAL_GIT="$REAL_GIT" LIMAVM_BASE=test-base /bin/bash "$LIMAVM" base 2>&1 </dev/null)" || RC=$?
+    REAL_GIT="$REAL_GIT" COG_BASE=test-base /bin/bash "$COG" base 2>&1 </dev/null)" || RC=$?
 assert_eq "base outside a repository fails" 1 "$RC"
 assert_contains "base outside a repository says so" "inside a dotfiles checkout" "$OUT"
 mkdir "$TMPBASE/other-repo"
 git -C "$TMPBASE/other-repo" init -q
 RC=0
 OUT="$(cd "$TMPBASE/other-repo" && env PATH="$STUBS:$PATH" HOME="$HOME_DIR" LIMA_STUB_STATE="$STATE" \
-    REAL_GIT="$REAL_GIT" LIMAVM_BASE=test-base /bin/bash "$LIMAVM" base 2>&1 </dev/null)" || RC=$?
+    REAL_GIT="$REAL_GIT" COG_BASE=test-base /bin/bash "$COG" base 2>&1 </dev/null)" || RC=$?
 assert_eq "base in another repository fails" 1 "$RC"
 assert_contains "base in another repository says so" "is not a dotfiles checkout" "$OUT"
 assert_eq "neither touched limactl" "" "$(limactl_log)"
@@ -740,14 +740,14 @@ assert_eq "neither touched limactl" "" "$(limactl_log)"
 # --- 7. base failures ---
 new_case
 EXTRA_ENV+=(STAGE_STUB_FAIL=1)
-run_limavm base none
+run_cog base none
 assert_eq "a staging failure fails base" 1 "$RC"
 assert_eq "a staging failure starts no VM" "" "$(limactl_log)"
 assert_eq "a staging failure removes the staging directory" 0 "$(staging_dirs_left)"
 
 new_case test-base
 EXTRA_ENV+=(HISTORY_SCAN_FAIL=1)
-run_limavm base none
+run_cog base none
 assert_eq "a history scan failure fails base" 1 "$RC"
 assert_eq "a history scan failure touches no VM" "" "$(limactl_log)"
 assert_eq "a history scan failure removes the staging directory" 0 "$(staging_dirs_left)"
@@ -755,14 +755,14 @@ assert_contains "a history scan failure says why" "gitleaks found secrets in the
 
 new_case
 echo 3 > "$STATE/mounts"
-run_limavm base none
+run_cog base none
 assert_eq "a mounted base fails" 1 "$RC"
 assert_contains "a mounted base says why" "mounts 3 host directories" "$OUT"
 assert_eq "a mounted base runs no provisioning" 0 "$(count_in_log provision)"
 
 new_case
 EXTRA_ENV+=(LIMA_STUB_FAIL=./provision.sh)
-run_limavm base none
+run_cog base none
 assert_eq "a provisioning failure fails base" 1 "$RC"
 assert_eq "a provisioning failure stops before the identity reset and the protection" 0 \
     "$(grep -cE 'machine-id|reset-identity|protect|stop' "$STATE/limactl.log" || true)"
@@ -772,7 +772,7 @@ assert_eq "a provisioning failure removes the staging directory" 0 "$(staging_di
 
 new_case
 : > "$STATE/guest-home-unknown"
-run_limavm base none
+run_cog base none
 assert_eq "an unknown guest home fails base" 1 "$RC"
 assert_contains "an unknown guest home in base says so" "cannot tell the home directory in test-base" "$OUT"
 assert_eq "an unknown guest home in base runs no provisioning" 0 "$(count_in_log provision)"
@@ -780,15 +780,15 @@ assert_contains "an unknown guest home in base keeps the VM for inspection" "lef
 assert_eq "an unknown guest home in base removes the staging directory" 0 "$(staging_dirs_left)"
 
 new_case test-base
-run_limavm new t1 --repo shields/dotfiles
+run_cog new t1 --repo shields/dotfiles
 assert_eq "new with a repository succeeds" 0 "$RC"
-assert_contains "authorization happens before the clone" "vm-access ensure-auth shields/dotfiles" "$(<"$STATE/all.log")"
-assert_contains "new registers the VM" "register lima:t1 --lima-dir $HOME_DIR/.lima/t1" "$(<"$STATE/vm-access.log")"
-assert_contains "new installs reverse socket forwarding" 'guestSocket":"/tmp/vm-access-github.sock' "$(<"$STATE/limactl.log")"
+assert_contains "authorization happens before the clone" "cog-gateway ensure-auth shields/dotfiles" "$(<"$STATE/all.log")"
+assert_contains "new registers the VM" "register lima:t1 --lima-dir $HOME_DIR/.lima/t1" "$(<"$STATE/cog-gateway.log")"
+assert_contains "new installs reverse socket forwarding" 'guestSocket":"/tmp/cog-github.sock' "$(<"$STATE/limactl.log")"
 assert_contains "new starts the VM after configuring its socket" "edit --tty=false --set" "$(<"$STATE/limactl.log")"
 assert_contains "new installs guest trust and relay" "setup-github-gateway 01234567-89ab-4cde-8fab-0123456789ab" "$(<"$STATE/limactl.log")"
-assert_contains "new probes the guest relay" "/__vm_access__/health" "$(<"$STATE/limactl.log")"
-assert_contains "new grants task access" "grant lima:t1 shields/dotfiles --profile task" "$(<"$STATE/vm-access.log")"
+assert_contains "new probes the guest relay" "/__cog__/health" "$(<"$STATE/limactl.log")"
+assert_contains "new grants task access" "grant lima:t1 shields/dotfiles --profile task" "$(<"$STATE/cog-gateway.log")"
 assert_contains "new verifies the granted repository" "https://api.github.com/repos/shields/dotfiles" "$(<"$STATE/limactl.log")"
 assert_eq "new sends no GitHub authorization to the guest" 0 "$(count_in_log GITHUB_APP_AUTH)"
 assert_eq "new reuses the base checkout" 0 "$(count_in_log 'git clone')"
@@ -802,9 +802,9 @@ assert_eq "the Codex login reaches only setup-secrets stdin" "${CODEX_JSON%$'\n'
 assert_no_secret_leak "new with a repository"
 
 new_case test-base
-run_limavm new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude-token --no-codex-auth
 assert_eq "new without a repository succeeds" 0 "$RC"
-assert_eq "new without a repository makes no grant" 0 "$(grep -c '^grant ' "$STATE/vm-access.log" || true)"
+assert_eq "new without a repository makes no grant" 0 "$(grep -c '^grant ' "$STATE/cog-gateway.log" || true)"
 assert_eq "new without a repository still installs the gateway" 1 "$(count_in_log setup-github-gateway)"
 assert_eq "new without a repository sends no GitHub secret" 0 "$(count_in_log GITHUB_APP_AUTH)"
 assert_eq "--no-claude-token skips the Claude secret" 0 "$(count_in_log CLAUDE_CODE_OAUTH_TOKEN)"
@@ -814,7 +814,7 @@ assert_eq "no Fireworks key file means no Fireworks secret" 0 "$(count_in_log FI
 new_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 print -r -- "  $FAKE_FIREWORKS  " > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_limavm new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude-token --no-codex-auth
 assert_eq "new installs the saved Fireworks key" 0 "$RC"
 fireworks_call=$(grep -n 'FIREWORKS_API_KEY' "$STATE/limactl.log" | head -1 | cut -d: -f1)
 assert_eq "the Fireworks key reaches only setup-secrets stdin, trimmed" "$FAKE_FIREWORKS" "$(stdin_of "$fireworks_call")"
@@ -823,7 +823,7 @@ assert_no_secret_leak "new with a Fireworks key"
 new_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 print -r -- "$FAKE_FIREWORKS other" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_limavm new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude-token --no-codex-auth
 assert_eq "a Fireworks key file with two words fails" 1 "$RC"
 assert_contains "a Fireworks key file with two words says so" "more than one word" "$OUT"
 assert_eq "a Fireworks key file with two words creates no VM" 0 "$(count_in_log clone)"
@@ -832,14 +832,14 @@ assert_no_secret_leak "a Fireworks key file with two words"
 new_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 : > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_limavm new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude-token --no-codex-auth
 assert_eq "an empty Fireworks key file fails" 1 "$RC"
 assert_eq "an empty Fireworks key file creates no VM" 0 "$(count_in_log clone)"
 
 new_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 ln -s "$HOME_DIR/.config/secrets/missing" "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_limavm new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude-token --no-codex-auth
 assert_eq "a dangling Fireworks key link fails" 1 "$RC"
 assert_contains "a dangling Fireworks key link says it is not a regular file" "is not a regular file" "$OUT"
 assert_eq "a dangling Fireworks key link creates no VM" 0 "$(count_in_log clone)"
@@ -847,7 +847,7 @@ assert_eq "a dangling Fireworks key link creates no VM" 0 "$(count_in_log clone)
 new_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 print -r -- "$FAKE_FIREWORKS other" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_limavm new t1 --no-repo --no-codex-auth
+run_cog new t1 --no-repo --no-codex-auth
 assert_eq "a bad Fireworks key file fails with the Claude token still to ask for" 1 "$RC"
 assert_contains "a bad Fireworks key file is reported" "more than one word" "$OUT"
 assert_eq "a bad Fireworks key file is reported before the Claude token is asked for" 0 \
@@ -857,68 +857,68 @@ assert_no_secret_leak "a bad Fireworks key file before the Claude prompt"
 new_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 print -r -- "$FAKE_CLAUDE" > "$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN"
-run_limavm new t1 --no-repo --no-codex-auth
+run_cog new t1 --no-repo --no-codex-auth
 assert_eq "new reuses the saved Claude token" 0 "$RC"
 claude_call=$(grep -n 'CLAUDE_CODE_OAUTH_TOKEN' "$STATE/limactl.log" | head -1 | cut -d: -f1)
 assert_eq "the saved Claude token reaches setup-secrets" "$FAKE_CLAUDE" "$(stdin_of "$claude_call")"
 
 new_case test-base
 print -r -- '[]' > "$HOME_DIR/.codex/auth.json"
-run_limavm new t1 --no-repo
+run_cog new t1 --no-repo
 assert_eq "invalid Codex login fails before cloning" 1 "$RC"
 assert_eq "invalid Codex login creates no VM" 0 "$(count_in_log clone)"
 
 new_case test-base
-EXTRA_ENV+=(LIMAVM_GITHUB_WEB_URL=https://github.com)
-run_limavm new t1 --no-claude-token --no-codex-auth
+EXTRA_ENV+=(COG_GITHUB_WEB_URL=https://github.com)
+run_cog new t1 --no-claude-token --no-codex-auth
 assert_eq "new infers the GitHub origin" 0 "$RC"
-assert_contains "the inferred repository is authorized" "ensure-auth shields/dotfiles" "$(<"$STATE/vm-access.log")"
+assert_contains "the inferred repository is authorized" "ensure-auth shields/dotfiles" "$(<"$STATE/cog-gateway.log")"
 
 new_case test-base
-EXTRA_ENV+=(VM_ACCESS_STUB_FAIL=health)
-run_limavm new t1 --repo shields/dotfiles
+EXTRA_ENV+=(COG_STUB_FAIL=health)
+run_cog new t1 --repo shields/dotfiles
 assert_eq "an unavailable gateway stops new" 1 "$RC"
 assert_eq "an unavailable gateway creates no VM" 0 "$(count_in_log clone)"
 
 new_case test-base
-EXTRA_ENV+=(VM_ACCESS_STUB_FAIL=register)
-run_limavm new t1 --repo shields/dotfiles
+EXTRA_ENV+=(COG_STUB_FAIL=register)
+run_cog new t1 --repo shields/dotfiles
 assert_eq "a failed registration stops new" 1 "$RC"
 assert_contains "a failed registration deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 
 new_case test-base
 EXTRA_ENV+=(LIMA_STUB_FAIL=setup-github-gateway)
-run_limavm new t1 --repo shields/dotfiles
+run_cog new t1 --repo shields/dotfiles
 assert_eq "a failed guest setup stops new" 1 "$RC"
-assert_contains "a failed guest setup disables gateway access" "disable lima:t1" "$(<"$STATE/vm-access.log")"
+assert_contains "a failed guest setup disables gateway access" "disable lima:t1" "$(<"$STATE/cog-gateway.log")"
 assert_contains "a failed guest setup deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 
 new_case test-base
-EXTRA_ENV+=(LIMA_STUB_FAIL=__vm_access__/health)
-run_limavm new t1 --repo shields/dotfiles
+EXTRA_ENV+=(LIMA_STUB_FAIL=__cog__/health)
+run_cog new t1 --repo shields/dotfiles
 assert_eq "a failed relay probe stops new" 1 "$RC"
-assert_contains "a failed relay probe disables gateway access" "disable lima:t1" "$(<"$STATE/vm-access.log")"
+assert_contains "a failed relay probe disables gateway access" "disable lima:t1" "$(<"$STATE/cog-gateway.log")"
 
 new_case test-base t1
-run_limavm github t1 shields/other
+run_cog github t1 shields/other
 assert_eq "github adds an additional repository" 0 "$RC"
-assert_contains "github uses the host policy" "grant lima:t1 shields/other --profile task" "$(<"$STATE/vm-access.log")"
+assert_contains "github uses the host policy" "grant lima:t1 shields/other --profile task" "$(<"$STATE/cog-gateway.log")"
 assert_eq "github does not copy a credential into the guest" 0 "$(count_in_log setup-secrets)"
 assert_eq "github does not start a stopped VM" 0 "$(count_in_log start)"
 
 new_case test-base
-run_limavm github missing shields/other
+run_cog github missing shields/other
 assert_eq "github refuses a missing VM" 1 "$RC"
-assert_eq "github leaves policy unchanged for a missing VM" 0 "$(wc -l < "$STATE/vm-access.log" | tr -d ' ')"
+assert_eq "github leaves policy unchanged for a missing VM" 0 "$(wc -l < "$STATE/cog-gateway.log" | tr -d ' ')"
 
 new_case test-base t1
-run_limavm rm test-base
+run_cog rm test-base
 assert_eq "rm refuses the base" 1 "$RC"
-run_limavm rm t1
+run_cog rm t1
 assert_eq "rm succeeds" 0 "$RC"
-assert_contains "rm disables the grant" "disable lima:t1" "$(<"$STATE/vm-access.log")"
+assert_contains "rm disables the grant" "disable lima:t1" "$(<"$STATE/cog-gateway.log")"
 assert_contains "rm deletes the VM" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
-first_disable=$(grep -n '^vm-access disable lima:t1$' "$STATE/all.log" | head -1 | cut -d: -f1)
+first_disable=$(grep -n '^cog-gateway disable lima:t1$' "$STATE/all.log" | head -1 | cut -d: -f1)
 first_delete=$(grep -n '^limactl delete --tty=false --force t1$' "$STATE/all.log" | head -1 | cut -d: -f1)
 assert_eq "rm revokes before deleting" 1 "$(( first_disable < first_delete ))"
 

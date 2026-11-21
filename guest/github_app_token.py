@@ -16,13 +16,13 @@
 
 """Keep a GitHub App user token fresh in a throwaway VM (Linux only).
 
-bin/limavm runs the device flow on the Mac and sends the result here through
-bin/setup-secrets. The access token lasts 8 hours and the refresh token 6 months,
-and GitHub rotates the refresh token on every use, so each refresh writes the
-new pair to ~/.config/github-app/auth.json before anything else sees the new
-access token, and an exclusive lock keeps two callers from spending one refresh
-token. A systemd timer (provision/throwaway.sh) runs refresh-if-needed, and the
-git credential helper below refreshes on demand. After a refresh gh is logged in
+guest/setup-secrets installs the device-flow result here. The access token
+lasts 8 hours and the refresh token 6 months, and GitHub rotates the refresh
+token on every use, so each refresh writes the new pair to
+~/.config/github-app/auth.json before anything else sees the new access token,
+and an exclusive lock keeps two callers from spending one refresh token. A
+systemd timer (guest/throwaway.sh) runs refresh-if-needed, and the git
+credential helper below refreshes on demand. After a refresh gh is logged in
 again with the new access token, because the old one stops working at once.
 
 This must run on the system Python of Debian 13 (3.13) as well as Homebrew's,
@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 
 DEFAULT_WEB_URL = "https://github.com"
 DEFAULT_API_URL = "https://api.github.com"
-USER_AGENT = "dotfiles-github-app-token"
+USER_AGENT = "cog-github-app-token"
 MARGIN = 600
 LOCK_TIMEOUT = 120
 HTTP_TIMEOUT = 30
@@ -112,7 +112,7 @@ def directory() -> Path:
 def reauthorize(repository: str) -> str:
     host = socket.gethostname()
     name = host.removeprefix("lima-") if host.startswith("lima-") else "NAME"
-    return f"limavm github {name} {repository}"
+    return f"cog github {name} {repository}"
 
 
 def clean_url(value: object, field: str) -> str:
@@ -230,7 +230,7 @@ def load() -> Record:
         fail(
             sentence(
                 f"{path} does not exist, so this machine has no GitHub authorization;",
-                "run limavm github NAME OWNER/REPO on the Mac",
+                "run cog github NAME OWNER/REPO on the Mac",
             )
         )
     return parse_record(text)

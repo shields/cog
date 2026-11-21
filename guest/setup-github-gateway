@@ -19,28 +19,28 @@ guest_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 
 ca='' managed='' claude_md='' requirements=''
 trap 'rm -f "$ca" "$managed" "$claude_md" "$requirements"' EXIT
-ca=$(mktemp /usr/local/share/ca-certificates/.dotfiles-github-gateway.XXXXXX)
+ca=$(mktemp /usr/local/share/ca-certificates/.cog-github-gateway.XXXXXX)
 managed=$(mktemp /etc/claude-code/.managed-settings.XXXXXX)
 claude_md=$(mktemp /etc/claude-code/.CLAUDE.md.XXXXXX)
 requirements=$(mktemp /etc/codex/.requirements.toml.XXXXXX)
 cat >"$ca"
 openssl x509 -noout -in "$ca" >/dev/null || die "invalid gateway CA certificate"
 chmod 644 "$ca"
-mv -f "$ca" /usr/local/share/ca-certificates/dotfiles-github-gateway.crt
+mv -f "$ca" /usr/local/share/ca-certificates/cog-github-gateway.crt
 update-ca-certificates >/dev/null
 
-if ! grep -qx '127.0.0.1 github.com api.github.com # dotfiles-vm-access' /etc/hosts; then
-    printf '%s\n' '127.0.0.1 github.com api.github.com # dotfiles-vm-access' >>/etc/hosts
+if ! grep -qx '127.0.0.1 github.com api.github.com # cog' /etc/hosts; then
+    printf '%s\n' '127.0.0.1 github.com api.github.com # cog' >>/etc/hosts
 fi
 
-cat >/etc/systemd/system/dotfiles-github-gateway.service <<'EOF'
+cat >/etc/systemd/system/cog-github-gateway.service <<'EOF'
 [Unit]
 Description=Relay GitHub HTTPS through the Lima gateway
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:443,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/tmp/vm-access-github.sock
+ExecStart=/usr/bin/socat TCP-LISTEN:443,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/tmp/cog-github.sock
 Restart=always
 RestartSec=1
 NoNewPrivileges=yes
@@ -88,8 +88,8 @@ mv -f "$requirements" /etc/codex/requirements.toml
 
 rm -f "$guest_home/.codex/rules/no-push.rules"
 sudo -H -u "$SUDO_USER" git config --global credential.https://github.com.helper "!$guest_home/bin/github-gateway-credential"
-printf '%s\n' "$1" >/etc/dotfiles-github-gateway
-chmod 644 /etc/dotfiles-github-gateway
+printf '%s\n' "$1" >/etc/cog-github-gateway
+chmod 644 /etc/cog-github-gateway
 
 systemctl daemon-reload
-systemctl enable --now dotfiles-github-gateway.service
+systemctl enable --now cog-github-gateway.service

@@ -772,7 +772,7 @@ test("REST reads can be anonymous and API writes have no classification", () => 
       {
         host: "api.github.com",
         method: "GET",
-        target: "/__vm_access__/health",
+        target: "/__cog__/health",
       },
       id,
     ).operation,
@@ -986,9 +986,9 @@ test("repository web pages are always anonymous and accept only reads", () => {
 
 test("the health path is the only public read without a repository, however the target spells it", () => {
   for (const target of [
-    "/__vm_access__/health",
-    "/x/../__vm_access__/health",
-    "/__vm_access__/./health",
+    "/__cog__/health",
+    "/x/../__cog__/health",
+    "/__cog__/./health",
   ]) {
     assert.deepEqual(
       classify({ host: "api.github.com", method: "GET", target }, id),
@@ -1058,7 +1058,7 @@ test("only the health path classifies as a health check", () => {
         {
           host: "api.github.com",
           method: "GET",
-          target: "/__vm_access__/health",
+          target: "/__cog__/health",
         },
         id,
       ),

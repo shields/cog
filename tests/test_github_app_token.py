@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# These tests also run in the Linux image, which has gh and openssl but no
-# limactl.
-
 import ast
 import importlib.util
 import json
@@ -39,7 +36,7 @@ if TYPE_CHECKING:
 type Json = dict[str, object]
 
 REPO = Path(__file__).resolve().parents[1]
-TOOL = REPO / "bin" / "github_app_token.py"
+TOOL = REPO / "guest" / "github_app_token.py"
 CLIENT_ID = "Iv-test-client"
 REPOSITORIES = {"owner/repo": 101, "owner/other": 102}
 GH_STUB = """\
@@ -130,7 +127,7 @@ def make_record(
     access_ttl: int = 28800,
     web_url: str | None = None,
 ) -> Json:
-    """A record as limavm builds it from a device-flow token."""
+    """A record as guest/setup-secrets installs it from a device-flow token."""
     issued = fake.issue(repository, access_ttl=access_ttl)
     now = int(time.time())
     return {
@@ -435,7 +432,7 @@ def test_an_expired_refresh_token_is_refused_without_asking_github(
     result = machine.install(record)
     assert result.returncode == 1
     assert "expired" in result.stderr
-    assert "limavm github" in result.stderr
+    assert "cog github" in result.stderr
     assert "owner/repo" in result.stderr
     assert fake.refresh_requests() == []
     assert_no_token(result, *tokens(record))
@@ -451,7 +448,7 @@ def test_bad_refresh_token_says_to_reauthorize_and_to_suspect_a_leak(
     assert result.returncode == 1
     assert result.stdout == ""
     assert "bad_refresh_token" in result.stderr
-    assert "limavm github" in result.stderr
+    assert "cog github" in result.stderr
     assert "owner/repo" in result.stderr
     assert "de-authorize" in result.stderr
     assert "github.com/settings/apps/authorizations" in result.stderr
@@ -475,9 +472,9 @@ def test_the_reauthorize_command_names_the_vm_after_lima_(
 ) -> None:
     reauthorize = cast("Callable[[str], str]", load_tool().reauthorize)
     monkeypatch.setattr(socket, "gethostname", lambda: "lima-w3b-final")
-    assert reauthorize("owner/repo") == "limavm github w3b-final owner/repo"
+    assert reauthorize("owner/repo") == "cog github w3b-final owner/repo"
     monkeypatch.setattr(socket, "gethostname", lambda: "debian")
-    assert reauthorize("owner/repo") == "limavm github NAME owner/repo"
+    assert reauthorize("owner/repo") == "cog github NAME owner/repo"
 
 
 def test_the_tool_parses_as_python_3_13() -> None:
@@ -525,7 +522,7 @@ def test_without_a_record_every_command_says_to_authorize(machine: Machine) -> N
     for args in (("refresh-if-needed",), ("status",)):
         result = machine.run(*args)
         assert result.returncode == 1
-        assert "limavm github" in result.stderr
+        assert "cog github" in result.stderr
     result = machine.run(
         "credential", "get", stdin="protocol=https\nhost=github.com\n\n"
     )

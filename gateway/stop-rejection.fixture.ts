@@ -31,7 +31,7 @@ process.on("unhandledRejection", (reason) => {
   reported.resolve(undefined);
 });
 
-const root = mkdtempSync(path.join(tmpdir(), "vm-access-rejection-"));
+const root = mkdtempSync(path.join(tmpdir(), "cog-rejection-"));
 const state = new State(path.join(root, "state"));
 try {
   const secrets = path.join(root, "secrets");
@@ -142,7 +142,7 @@ try {
     resume.resolve(undefined);
     const [host, target] =
       scenario === "health"
-        ? ["api.github.com", "/__vm_access__/health"]
+        ? ["api.github.com", "/__cog__/health"]
         : [
             "github.com",
             "/shields/dotfiles.git/info/refs?service=git-upload-pack",

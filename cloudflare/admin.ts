@@ -12,8 +12,8 @@ import {
 import type { CloudInstance } from "./authority.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const configDir = path.join(os.homedir(), ".config", "vm-access");
-const secretDir = path.join(os.homedir(), ".config", "secrets", "vm-access");
+const configDir = path.join(os.homedir(), ".config", "cog");
+const secretDir = path.join(os.homedir(), ".config", "secrets", "cog");
 const urlFile = path.join(configDir, "cloudflare-url");
 const tokenFile = path.join(secretDir, "cloudflare-admin-token");
 const wranglerConfig = path.join(root, "cloudflare", "wrangler.jsonc");
@@ -80,7 +80,7 @@ async function api<T>(
 function profile(name: string): Grant {
   const contents: unknown = YAML.parse(
     readFileSync(
-      path.join(root, ".config", "vm-access", "profiles.yaml"),
+      path.join(root, "profiles.yaml"),
       "utf8",
     ),
   );

@@ -134,7 +134,7 @@ function issueAuthority(scratch: string, { ca, caKey }: Paths): void {
     "3650",
     "-sha256",
     "-subj",
-    "/CN=dotfiles-vm-access",
+    "/CN=cog",
     "-addext",
     "basicConstraints=critical,CA:TRUE",
     "-addext",

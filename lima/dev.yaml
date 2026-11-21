@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The throwaway development VM; bin/limavm builds and clones it.
+# The throwaway development VM; bin/cog builds and clones it.
 
 minimumLimaVersion: 2.2.1
 
@@ -24,7 +24,7 @@ vmType: vz
 cpus: 6
 memory: 16GiB
 
-# Lima appends mounts from ~/.lima/_config; bin/limavm checks that none arrived.
+# Lima appends mounts from ~/.lima/_config; bin/cog checks that none arrived.
 mounts: []
 
 containerd:
@@ -102,7 +102,7 @@ provision:
 
 probes:
   - mode: readiness
-    description: the egress filter, DNS behind it and the packages bin/limavm needs
+    description: the egress filter, DNS behind it and the packages bin/cog needs
     script: |
       #!/bin/bash
       set -eux -o pipefail
