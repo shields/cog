@@ -1,0 +1,527 @@
+# cog
+
+cog makes throwaway machines where Claude Code and Codex run with no sandbox and
+no permission prompts, and keeps what those agents can reach outside the machine
+small. A machine is a Debian 13 VM on a Mac (Lima 2.2.1 or later, vz, arm64) or
+a Cloudflare container. Its GitHub access goes through a gateway that holds the
+GitHub App tokens on the Mac or in a Cloudflare Worker, so the machine itself
+never has one.
+
+cog isolates, and does not hide, what the agents can do inside the machine:
+the agents run with full access there, and anything with root can undo the
+network rules. What remains is limited to state outside it: the deny rules, the
+`git_guard.py` hook from dotfiles, the GitHub gateway and the network isolation
+described below.
+
+The VM and gateway files come from shields/dotfiles, where they started. A base VM and the Cloudflare image are built from a dotfiles checkout:
+cog runs that checkout's `provision.sh`, then layers the throwaway policy, the
+GitHub relay and the secrets on top.
+
+## What exists now
+
+The command is two bash programs, `bin/cog` for VMs and `bin/cog-gateway` for
+the gateway. A TypeScript `cog` that replaces both is not written, so these
+names and commands will change. `install.sh` is not written either, so nothing
+installs the gateway: `bin/cog-gateway` runs the bundle
+`~/.local/share/cog/main.mjs` with Bun from `/opt/homebrew/bin` or
+`/usr/local/bin` and fails naming `./install.sh` when either is missing, and no
+launchd agent starts the daemon. `Library/LaunchAgents/` still holds the plist
+carried over from dotfiles, which starts `~/bin/vm-access` under its old label
+and does not work. `bun gateway/main.ts VERB` in a checkout runs the same
+program as `cog-gateway VERB`, which is the way to try it before installation.
+`cog new` needs `cog-gateway` on `PATH` and a running daemon, so it does not
+work until `install.sh` exists.
+
+`bin/cog` finds its resources (`lima/dev.yaml`, `guest/`, `tools/stage_tree.sh`)
+from the checkout it lives in, following symlinks, wherever it is run from.
+
+## Installing
+
+`install.sh` is not written yet. It will check the tools cog needs, build the
+program, link it from `~/bin` and start the gateway.
+
+The Mac needs `limactl`, `git`, `tar`, `gitleaks`, `jq` and `bun`. The Homebrew
+modules in dotfiles (`brew/*.Brewfile` there) install them; cog installs none
+itself, because `brew bundle cleanup` in dotfiles' `provision.sh` would remove
+it again. Run `make setup` for the
+dependencies of the tests.
+
+Homebrew has an unrelated formula named `cog`. While `~/bin` comes before
+Homebrew's directory on `PATH`, as dotfiles' `.zshrc` arranges, `~/bin/cog`
+shadows it and the formula shadows nothing; do not install the formula where
+this `PATH` order does not hold.
+
+## Commands
+
+```
+cog base [--dotfiles DIR] [MODULE...]
+cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
+cog github NAME [OWNER/REPO]
+cog claude-token
+cog rm NAME
+cog list
+```
+
+`cog base` builds the base VM `cog-base` once, and again to refresh it; it takes
+tens of minutes. `cog new` makes a VM from a clone of the base, installs the
+secrets and the repository, and opens a shell in it. `cog github` adds a
+repository grant to a running VM. `cog claude-token` keeps the Claude token on
+the Mac for every later `new`. `cog rm` disables the VM's GitHub access and
+deletes it, and refuses the base. `cog list` is `limactl list`. `ssh lima-NAME`
+also works, through `~/.lima/*/ssh.config`.
+
+`cog base` takes the dotfiles checkout from `--dotfiles DIR`, or else
+`~/src/github.com/shields/dotfiles`; it never infers it from the current
+directory. The directory must be the top level of a git checkout with an
+executable `provision.sh`, `.claude/settings.json` and
+`tools/configure_codex.py`, and with a commit. It also fails, before any VM is
+created or deleted, when the staged copy of a marker reader
+listed under "The contract with dotfiles" does not name the markers that cog
+writes, which is what a checkout from before the split looks like. It prints
+the checkout and commit it uses.
+
+The build copies the checkout with `tools/stage_tree.sh --source DIR`, which
+includes files that are not committed and keeps the local branch, commit
+history and tags, so local changes appear as unstaged or untracked files after
+provisioning. Gitleaks scans the copy, the history (before the origin is
+removed) and the copy of `guest/`, and a finding stops the build. The origin is
+rewritten to HTTPS and refused with credentials, a query, a fragment or control
+characters. The build then:
+
+1. replaces any existing `cog-base`, and starts one from `lima/dev.yaml` in the
+   cog checkout, refusing it if `~/.lima/_config` has added a host mount;
+2. copies the dotfiles tree to `~/src/github.com/shields/dotfiles` in the guest;
+3. installs `guest/` into `/usr/local/lib/cog` with `sudo tar -x` and the
+   options `--no-same-owner --no-same-permissions`, then sets root ownership and
+   no group or other write permission;
+4. runs `./provision.sh MODULE...` there (with no module, the checkout's own
+   default);
+5. runs `/usr/local/lib/cog/throwaway.sh` with `--claude-settings` naming the
+   checkout's `.claude/settings.json` and `--no-github-timer`, then the
+   checkout's `tools/configure_codex.py` against `~/.codex/config.toml`;
+6. empties `/etc/machine-id`, runs `reset-identity.sh` to forget the
+   identifiers the agents stored, stops the VM, sets the shell to zsh and
+   protects the VM from deletion.
+
+If a build fails, the half-built VM stays for inspection with
+`limactl shell cog-base`, and the next `cog base` replaces it.
+
+`cog new` clones the base (an APFS copy-on-write clone, so it needs little
+disk), registers the clone with the gateway, upgrades the Claude Code and Codex
+casks before any secret is present, installs the gateway CA, relay and
+instructions, grants the repository, and only then installs the secrets with
+`/usr/local/lib/cog/setup-secrets`, which reads each value from stdin. A
+failure or signal after the clone disables the registration and deletes the VM.
+`COG_CPUS` and `COG_MEMORY` (a whole number of GiB) override the size in
+`lima/dev.yaml` (6 CPUs and 16 GiB), and `COG_BASE` replaces the name
+`cog-base`.
+
+Tests replace the terminal and the gateway locations with `COG_PROMPT_INPUT`
+(a file read instead of the Claude token prompt) and `COG_ROOT`; the program
+honours both outside tests.
+
+## GitHub access
+
+The gateway is a daemon on the Mac, `cog-gateway serve`, which runs under Bun.
+It holds the GitHub App access and refresh tokens under
+`~/.config/secrets/cog/` and its state and admin socket under
+`~/.local/state/cog/`. A Lima guest receives only a public CA certificate and an
+immutable VM ID, never a GitHub token. Its HTTPS requests for `github.com` and
+`api.github.com` go to a relay on `127.0.0.1:443` in the guest, which sends them
+through the per-VM Unix socket `/tmp/cog-github.sock` (a reverse forward, one
+per VM) to the Mac. The gateway chooses the repository's token after checking
+the current grant and request. It refreshes tokens on demand; a refresh failure
+denies the request. The guest's git credential helper
+(`/usr/local/lib/cog/github-gateway-credential`) and `GH_TOKEN` use a fixed
+dummy value, `cog`, that the gateway discards.
+
+`cog new NAME --repo OWNER/REPO` grants repository reads, including pull request
+reads, and pushes to `cog/VM-ID/*`. It then clones the repository over HTTPS
+into `~/src/github.com/OWNER/REPO` and opens a shell there. The base already
+holds `shields/dotfiles` with the checkout's local changes, so a VM for that
+repository reuses that checkout. With no explicit repository, `cog new` infers
+one from a GitHub `origin` of the current directory; `--no-repo` creates a VM
+with no grants. `cog github NAME [OWNER/REPO]` adds another repository without
+stopping the VM or removing its existing grants, inferring the repository from
+the current directory if the argument is omitted. `COG_GITHUB_WEB_URL`,
+`COG_GITHUB_API_URL` and `COG_GITHUB_CLIENT_ID` replace GitHub's addresses and
+the app's client ID.
+
+Public repositories, including those under `github.com/shields`, are readable
+without a grant, even in a VM created with `--no-repo`. Git clone/fetch and
+repository REST GET/HEAD requests use anonymous access when the repository has
+no grant. Repository web pages and downloads always use anonymous access. The
+gateway strips guest credentials and cookies, and GitHub denies anonymous reads
+of private repositories. Anonymous API reads use GitHub's unauthenticated rate
+limits.
+
+Granted repositories use their token for Git and REST reads. The `cog` profile
+also permits pushes to the VM's namespace `cog/VM-ID/*`, including force
+pushes. The gateway checks every ref update before forwarding a push; deletions
+and push options are denied. GraphQL queries still require exactly one granted
+repository because GitHub requires authentication. The `/user` identity read
+uses a granted repository token. GitHub API writes, PR creation and updates,
+cross-repository GraphQL queries, search queries and other unlisted operations
+are denied. `gh pr list` with search filters may therefore fail; basic
+repository and PR reads work through the supported routes. GitHub's REST
+pagination links name the repository by numeric ID; the gateway rewrites them to
+`/repos/OWNER/REPO`, so each page is checked like the first. Other requests by
+repository ID are denied, including GitHub's redirect from a renamed or
+transferred repository's old name, so use its current name. There is no approval
+queue.
+
+`profiles.yaml` defines the two capability templates, `read` (reads only) and
+`cog` (reads and pushes to `cog/VM-ID/*`). The daemon reads the file named by
+`COG_PROFILES`, or else `~/.config/cog/profiles.yaml`, and fails a grant when
+either profile is missing; nothing copies it there yet. A grant stores a copy of
+its profile, so editing the profile changes future grants only. The profile key
+that enables pushes is still named `pushTaskBranches`, because stored grants
+carry it. Use these commands on the Mac to change a running VM immediately:
+
+```
+cog-gateway show lima:NAME
+cog-gateway grant lima:NAME OWNER/REPO --profile read|cog
+cog-gateway revoke lima:NAME OWNER/REPO
+cog-gateway edit lima:NAME
+cog-gateway logs lima:NAME|VM-ID [--follow|--all]
+cog-gateway authorize OWNER/REPO
+```
+
+`edit` opens the full YAML policy in `$VISUAL`, `$EDITOR` or `vi`; it rejects a
+stale revision. Adding a repository runs the GitHub authorization on the Mac
+before applying the edit. `grant` also authorizes a repository if needed. The
+gateway reads grants for every request, so changes take effect without a VM
+restart. `cog rm` disables access before deleting the VM. A new VM with the same
+display name receives a new ID and no old grants. `cog-gateway logs VM-ID` can
+inspect a deleted VM's retained history. The gateway also has `serve`, `init`
+(create the CA and server certificate), `ca-path`, `health`, `register`,
+`disable` and `ensure-auth`, which `cog` calls itself. The gateway refuses to
+register `lima:cog-base`.
+
+The GitHub App uses device flow with expiring user tokens and no private key.
+For your own app, grant repository Contents read/write, and Pull requests,
+Actions, Checks and Commit statuses read; the gateway denies PR writes even if
+an app has broader permissions. The default public client ID is
+`Iv23lim5x4MdkNNgv28z`; set `COG_GITHUB_CLIENT_ID` for your own app. The Mac's
+`gh` login reads the repository ID; the device flow requests that
+`repository_id` to scope the app token, and the gateway verifies that token can
+read the intended repository. The device code and URL are printed on the Mac for
+you to complete. To replace an expired or revoked authorization, run
+`cog-gateway authorize OWNER/REPO` on the Mac; policy grants remain in place.
+Revoking the app authorization at GitHub invalidates all its tokens. The gateway
+keeps the rotating refresh tokens on the Mac and never sends them to a VM.
+
+Every request decision is logged with VM ID, repository, operation, permitted
+refs, policy revision, result, upstream status and duration. Headers, bodies and
+raw queries are not logged. Policy changes are separately audited with the actor
+and old/new revision. Request logs are kept for 30 days and policy events for
+one year; requests fail closed if the audit database cannot be written.
+`cog-gateway logs lima:NAME --follow` streams recent entries, and `--all` prints
+the retained history.
+
+## Other secrets
+
+Every secret travels over stdin to `/usr/local/lib/cog/setup-secrets NAME`, in
+the guest, and never in an argument list, an environment or a message.
+
+### Claude Code
+
+`cog claude-token` asks, without echo, for the token that `claude setup-token`
+prints (run that in another terminal first and paste the result) and keeps it in
+`~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN` on the Mac (directory 0700, file
+0600, written atomically). `cog new` installs the token from that file when it
+exists, and fails, naming the file, when it is not a regular file, empty,
+unreadable or holds more than one word; without the file it asks the same way
+and reminds you of `claude-token`. In the VM the token goes to the same path,
+which dotfiles' `.zshrc` exports only on Linux in interactive shells, and
+Claude's sandbox on the Mac denies reads under `~/.config/secrets`. It is never
+taken from the command line or the environment. An empty answer is an error;
+`--no-claude-token` skips the token, file or prompt, for a VM where you will run
+`claude auth login`.
+
+### The rest
+
+- `~/.config/secrets/FIREWORKS_API_KEY`, the key `cg` uses, goes to the same
+  path in the VM when the file exists on the Mac. `cog new` never asks for it,
+  and fails before it makes the VM when the file is not a regular file, empty,
+  unreadable or holds more than one word. A base built before `setup-secrets`
+  knew the name makes `cog new` fail after the other secrets and delete the VM,
+  until `cog base` rebuilds the base.
+- Codex's login on the Mac, `~/.codex/auth.json` (the file OpenAI documents
+  copying to a headless machine), goes to `setup-secrets CODEX_AUTH`, which
+  checks that it is a JSON object and writes it to the same path in the VM
+  (directory 0700, file 0600). `cog new` fails before it makes the VM when the
+  file is missing, not a regular file, unreadable, empty or not a JSON object.
+  The file exists only when `cli_auth_credentials_store` in
+  `~/.codex/config.toml` is `file`: with `keyring` or `auto` Codex keeps the
+  login in the Keychain, and OpenAI says the copy does not apply then. So set
+  `cli_auth_credentials_store = "file"` and run `codex login` on the Mac first.
+  `--no-codex-auth` skips it, and then says to run `codex login --device-auth`
+  in the VM, after you turn on device code login in ChatGPT's security
+  settings.
+
+## What is isolated
+
+Isolated, with `lima/dev.yaml` as the source:
+
+- No host directory is mounted. `lima/dev.yaml` sets `mounts: []`, and
+  `cog base` fails if `~/.lima/_config` has added any.
+- No guest port is forwarded to the Mac. Lima still opens `127.0.0.1` ports on
+  the Mac for SSH and for its DNS resolver, which other programs on the Mac can
+  reach. The GitHub gateway has one reverse Unix socket forward per VM.
+- The SSH agent is not forwarded, and the proxy environment is not propagated.
+- An nftables filter in the guest rejects connections to the Mac
+  (`192.168.5.2`, also `host.lima.internal`, whose other ports reach the Mac's
+  loopback), to the private ranges `10.0.0.0/8`, `172.16.0.0/12` and
+  `192.168.0.0/16`, to `100.64.0.0/10`, to `169.254.0.0/16` and to `fc00::/7`.
+  The VM may use only DNS and DHCP at `192.168.5.2`. The rules load before the
+  network comes up on every boot, and Lima rewrites them on every boot.
+
+Not isolated:
+
+- The internet. The agents need it, so HTTPS and every other public address
+  work, and so does DNS, through Lima's resolver on the Mac.
+- Anything with root in the VM. `sudo` needs no password, so a process there can
+  delete the filter or the GitHub hosts mapping. These controls stop ordinary
+  clients, not a determined attacker.
+- Direct connections to GitHub IPs, other GitHub hostnames or a new outbound
+  proxy. General internet access is unrestricted, so the gateway cannot force
+  every possible GitHub connection through itself. It does keep its app tokens
+  off the VM; the policy is a boundary around those tokens, not around arbitrary
+  network traffic or credentials acquired by the guest.
+- The Claude token, Codex login and Fireworks key in the VM. Agents can read and
+  send those to public addresses. The VM has no GitHub App token or refresh
+  token.
+- The Mac's own public address, if it has one. Only the private ranges are
+  rejected.
+
+## What the agents may do
+
+`guest/throwaway.sh --claude-settings FILE` makes a machine a throwaway
+environment (`--user NAME` and the GitHub token timer are for machines without
+the gateway; `--no-github-timer` leaves the timer out, as `cog base` does). It
+creates `/etc/cog-throwaway`, which dotfiles' `.zshrc` tests (without a fork)
+and only on Linux; the Mac and a persistent Linux box have no such file and keep
+their sandboxed, prompting behavior.
+
+- Claude Code gets `/etc/claude-code/managed-settings.json`, which no other
+  settings file overrides. It starts in `bypassPermissions` mode and disables
+  the sandbox. In that mode ask rules and a hook's ask still prompt, so managed
+  settings are the only source of permission rules and hooks, and carry the
+  `permissions.deny` rules, the `git_guard.py` hook and the status line from the
+  settings file given. The ask rules (package installs) and `dependency_guard.py`
+  therefore do not apply, and neither do hooks from a project's own
+  `.claude/settings.json`. In dotfiles' `c`, the usual `--permission-mode=auto`
+  and sandbox settings are left out, because they would override managed
+  settings.
+- Codex gets `/etc/codex/config.toml` with `approval_policy = "never"` and
+  `default_permissions = ":danger-full-access"`, and a rules file that forbids
+  `gh api` write methods. `~/.codex/config.toml` overrides any key it sets, so
+  the dotfiles checkout's `tools/configure_codex.py` detects
+  `/etc/cog-throwaway` and selects the same full-access profile there. The
+  network proxy is disabled in both configs. Lima bases and Cloudflare agent
+  images run the configuration script after installing the throwaway policy.
+  Re-provisioning preserves these settings. `cx` is plain `codex`.
+- In a gateway VM, `git_guard.py` and the installed deny rules allow `git push`;
+  the gateway checks the destinations against `cog/VM-ID/*`. The hook still
+  stops `git commit --no-verify`, and the agent policies still refuse the listed
+  `gh` write commands. The hook also refuses `gh api` with a method other than
+  GET or HEAD, and with `-f`, `-F` or `--input` unless it names GET or HEAD; a
+  GraphQL query is exempt. The deny rules refuse `gh api` write methods as well,
+  and Claude Code's matcher also looks inside a quoted `$(...)`, which the hook
+  does not. The gateway is the final check for API calls.
+- In a Lima VM, `setup-github-gateway` removes the five `git push` deny rules
+  from the managed settings and fails if it removes none. It tells the agents
+  about `cog/VM-ID/*` in system-wide instructions that re-provisioning leaves in
+  place: Claude Code's `/etc/claude-code/CLAUDE.md` and Codex's
+  `/etc/codex/requirements.toml` (`additional_developer_instructions`). It
+  deletes `~/.codex/rules/no-push.rules`, writes the VM ID to
+  `/etc/cog-github-gateway`, and installs the CA, the `/etc/hosts` mapping of
+  the GitHub hosts to `127.0.0.1` and the relay unit `cog-github-gateway`. A
+  Cloudflare VM gets neither instruction file, so its agents are not told the
+  namespace.
+
+## Checks to run once with real credentials
+
+These need a working gateway, so they wait for `install.sh`. After installing,
+`cog base` and `cog new t1 --repo OWNER/REPO`, which shows a device code and
+authorization URL on the Mac:
+
+- `zsh -ic exit` prints nothing, `git --version` is 2.54 or later, and
+  `git hook list pre-commit` lists gitleaks.
+- `stat /usr/local/lib/cog` shows it root-owned and not writable by group or
+  other.
+- In a fresh repository under `~/src`, `c` opens with no dialogs and shows
+  bypass-permissions mode, and `/sandbox` shows that the sandbox is off.
+- In the VM, `gh api repos/OWNER/REPO`, `gh run list`, `gh run view --log` and
+  `git pull` work, and `codex debug prompt-input hi` shows the `cog/VM-ID/`
+  instructions. A push to `cog/VM-ID/check` succeeds, including a forced update,
+  a push of more than 1 MiB and a push from a `--depth 1` clone. A push to
+  `main`, a branch deletion, a PR write, and a read of an ungranted private
+  repository fail. `cog-gateway logs lima:t1` on the Mac records each decision.
+- `cog github t1 OTHER/REPO` adds a grant while the VM runs; revoking it with
+  `cog-gateway revoke lima:t1 OTHER/REPO` takes effect on the next request.
+- Replacing an expiring access token happens on the Mac on demand. After a
+  revoked or expired refresh token, `cog-gateway authorize OWNER/REPO` restores
+  the authorization; the VM never receives it.
+- `claude` runs without a login (with the token from `cog claude-token` or the
+  `cog new` prompt), and so does `codex` (with the Mac's `codex login`;
+  `codex login status` says so).
+- `emacs -nw` starts and exits.
+- With a Fireworks key, `cg -p hi` answers on the Mac and in the VM, `/status`
+  in `cg` names the Fireworks URL and the drop-in among the setting sources, and
+  the status line's cost after a few requests matches the Fireworks dashboard.
+- From the VM, `curl -m3 host.lima.internal:PORT` fails at once for a server on
+  the Mac, and `lsof -nP -iTCP -sTCP:LISTEN` on the Mac shows only Lima's
+  `127.0.0.1` ports.
+
+## Cloudflare containers
+
+`cloudflare/deploy.sh [--worker-only] [--dotfiles DIR]` stages this checkout,
+scans it for secrets, builds the agent image from a dotfiles checkout chosen the
+way `cog base` chooses it, deploys the Worker `cog-agent`, and installs a
+randomly generated admin secret kept in
+`~/.config/secrets/cog/cloudflare-admin-token`. It adds this Mac's
+`~/.ssh/id_ed25519.pub` to the staged Wrangler configuration for SSH access,
+and needs `bun`, `jq`, `openssl` and `gitleaks`.
+
+The image context is assembled by `cloudflare/context.sh DEST [--dotfiles DIR]`
+in a temporary directory outside both checkouts: `dotfiles/` (a staged and
+scanned copy, a git repository with an index and no commit), `guest/` and
+`cloudflare/` (from `cloudflare/guest/`). `cloudflare/Dockerfile` copies the
+dotfiles tree to `/home/shields/src/github.com/shields/dotfiles`, provisions it
+(`MODULES`, `dev` by default), copies the guest scripts root-owned to
+`/usr/local/lib/cog`, and runs `throwaway.sh`, `configure_codex.py`,
+`reset-identity.sh` and `cloudflare/guest/agent.sh --user shields` in that
+order. `agent.sh` removes the `git push` deny rules and `no-push.rules`, writes
+`cloudflare` to `/etc/cog-github-gateway`, and installs the same dummy
+credential helper. The Worker starts `/usr/local/lib/cog/cloudflare/entrypoint.sh`,
+which installs Cloudflare's runtime CA. With `--worker-only` no dotfiles tree is
+staged, the image is reused without building or rolling out containers, and
+`--dotfiles` is an error.
+
+The Worker URL appears in Wrangler's deployment output. Save it once with
+`bun run cloudflare/admin.ts config https://NAME.SUBDOMAIN.workers.dev`, which
+writes `~/.config/cog/cloudflare-url`. Run the admin command from the checkout,
+after `make setup`:
+
+```sh
+bun run cloudflare/admin.ts authorize OWNER/REPO
+bun run cloudflare/admin.ts new NAME
+bun run cloudflare/admin.ts grant VM-ID OWNER/REPO read|cog
+bun run cloudflare/admin.ts start VM-ID
+bun run cloudflare/admin.ts show VM-ID
+bun run cloudflare/admin.ts logs VM-ID
+bun run cloudflare/admin.ts events VM-ID
+bun run cloudflare/admin.ts revoke VM-ID OWNER/REPO
+bun run cloudflare/admin.ts delete VM-ID
+bun run cloudflare/admin.ts list
+bun run cloudflare/admin.ts containers
+bun run cloudflare/admin.ts instances APPLICATION-ID
+bun run cloudflare/admin.ts ssh CONTAINER-ID
+```
+
+`authorize` starts a separate GitHub App device flow for the cloud authority; it
+does not save that authorization on the Mac. A grant uses the same `read` and
+`cog` profiles as Lima, and a revision check prevents overwriting another policy
+edit. Grants and revocations take effect for the next GitHub request without
+restarting the VM. `list` shows registered VM IDs. `containers`, `instances` and
+`ssh` wrap the corresponding Wrangler commands. After connecting, clone a
+granted repository with Git and log in to the agents in the disposable VM as
+needed.
+
+The VM receives only a dummy GitHub credential. Its outbound HTTP and HTTPS
+requests pass through the Worker, which checks GitHub operations against the
+current VM grants and supplies the repository's short-lived token. The Worker
+forwards each request to the URL as it parsed it, so a GitHub request goes to
+exactly the URL that was checked. A request to any other host is forwarded as it
+arrived when its URL is already canonical; otherwise it is re-serialized from
+the parsed URL, which percent-encodes a `'` in a query, folds `%2e%2e`, and
+turns a backslash into a slash. A request whose URL does not parse is denied and
+logged. The refresh token stays in Durable Object storage. GitHub access logs
+record the VM, repository, operation, refs, decision, policy revision, upstream
+status, and duration without credentials; policy events record before and after
+grants. Access logs are retained for 30 days and policy events for 365 days. The
+container's filesystem is disposable. An instance has 1 vCPU, 4 GiB of memory
+and 20 GB of disk, to leave workspace room around the installed toolchain, and
+its inactivity timeout is six hours.
+
+## The contract with dotfiles
+
+cog needs from a dotfiles checkout:
+
+- a git work tree with an executable `./provision.sh [MODULE...]` that honours
+  `DOTFILES_KEEP_BREW_DOWNLOADS` and leaves Homebrew at
+  `/home/linuxbrew/.linuxbrew` with `uv`, `gh` and the `claude-code@latest` and
+  `codex` casks;
+- `.claude/settings.json` with a non-empty `permissions.deny` that includes the
+  five `git push` rules the gateway setup removes (`Bash(git push*)`,
+  `Bash(git -C * push*)`, `Bash(git -c * push*)`, `Bash(git --git-dir* push*)`
+  and `Bash(git --work-tree* push*)`), a `PreToolUse` hook whose command
+  contains `git_guard.py`, and optionally `statusLine`;
+- `tools/configure_codex.py`, which cog runs again after it writes the
+  throwaway marker;
+- `~/.codex/rules/no-push.rules`, which cog removes in a gateway guest.
+
+dotfiles reads two marker files that cog writes in the guest:
+`/etc/cog-throwaway`, whose presence makes the machine a throwaway VM, and
+`/etc/cog-github-gateway`, one line holding the VM's UUID, or `cloudflare`. The
+readers are `.zshrc`, `.zshenv`, `.zsh.d/wt.zsh`, `.codex/hooks/git_guard.py`,
+`tools/configure_codex.py` and `provision.sh`. Where the second file holds a
+UUID, dotfiles' `wt` names a new worktree's branch `cog/UUID/worktree-NAME`,
+since the gateway accepts pushes only to `cog/UUID/*`. `cog base` and
+`cloudflare/context.sh` refuse a checkout whose readers do not name the markers.
+The dotfiles README states the same contract, and `tests/test_cog_contract.py`
+there checks it from its side.
+
+## Migrating from dotfiles
+
+Before the split, dotfiles held `limavm`, `vm-access` and the Cloudflare agent.
+A base or VM built before the rename carries the old markers and the old
+`~/bin` scripts, so rebuild it with `cog base` and `cog new`; re-provisioning it
+does not rename them. On a Mac that ran the old tools, in this order:
+
+1. With the old agent still installed, run `vm-access disable lima:NAME` for
+   every VM the gateway still registers (its state may name a VM whose Lima
+   directory is gone), `limavm rm NAME` for each VM, and delete cloud VMs with
+   the old `admin.ts`.
+2. Merge the dotfiles branch that reads the new markers into the checkout that
+   `cog base` reads by default and run its `./provision.sh`. A `provision.sh`
+   from before the split would reinstall the old agent.
+3. Remove the old agent and move its state, which keeps the GitHub App
+   authorizations and the audit log:
+
+   ```sh
+   launchctl bootout "gui/$(id -u)/com.msrl.dotfiles.vm-access"
+   rm ~/Library/LaunchAgents/com.msrl.dotfiles.vm-access.plist
+   rm -f ~/Library/Logs/com.msrl.dotfiles.vm-access.out \
+         ~/Library/Logs/com.msrl.dotfiles.vm-access.err
+   rm ~/bin/limavm ~/bin/vm-access
+   rm -r ~/.local/share/vm-access ~/.config/vm-access
+   mv ~/.local/state/vm-access ~/.local/state/cog
+   mv ~/.config/secrets/vm-access ~/.config/secrets/cog
+   rm -f ~/.config/secrets/cog/{ca.pem,ca-key.pem,github.pem,github-key.pem,ca.srl}
+   ```
+
+   The CA is regenerated, so every VM needs the new one: rebuild them.
+
+4. Run `./install.sh` in cog (not written yet), then `cog-gateway health`.
+5. `cog base`, then `cog new t1 --repo OWNER/REPO` and the checks above.
+6. Delete the old `dotfiles-base` VM (`limactl unprotect dotfiles-base`, then
+   `limactl delete dotfiles-base`), run `cloudflare/deploy.sh`, then
+   `bun run cloudflare/admin.ts config URL` and `authorize`, and delete the
+   old `dotfiles-agent` Worker.
+
+## History
+
+The commits before "Move the files to their places in this repository" come
+from shields/dotfiles, filtered to the files that moved here. Each shows only
+that part of its original change, names the old paths (`bin/limavm`,
+`bin/vm-access`, `.config/vm-access/`, `provision/throwaway.sh` and so on), and
+refers to dotfiles pull requests as `shields/dotfiles#N`. `git log --follow`
+follows a file across the move.
+
+## Development
+
+`make setup lint build test` is what CI runs, after `make ci-tools`. See
+AGENTS.md for the layout and the rules for changing the code.
