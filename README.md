@@ -39,7 +39,7 @@ The Mac needs `limactl`, `git`, `tar`, `gitleaks` 8.19 or newer, `jq`, `socat`,
 `bun` and `openssl` (macOS ships one). It also needs `gh` logged in to GitHub:
 the gateway runs `gh api repos/OWNER/REPO --jq .id` whenever a repository needs an
 authorization (the first `cog new --repo` or `cog grant` for it,
-`cog authorize`, and `cloudflare/admin.ts authorize`). The Homebrew
+`cog authorize`, and `cog cloud authorize`). The Homebrew
 modules in dotfiles (`brew/*.Brewfile` there) install them; cog installs none
 itself, because `brew bundle cleanup` in dotfiles' `provision.sh` would remove
 it again. Run `make setup` for the dependencies of the tests.
@@ -51,7 +51,7 @@ this `PATH` order does not hold.
 
 ## Commands
 
-`cog help` lists the VM and gateway commands.
+`cog help` lists the VM, gateway and Cloudflare commands.
 
 ```
 cog base [--dotfiles DIR] [MODULE...]
@@ -162,7 +162,7 @@ the new token can read the repository). Cog also reads `COG_GITHUB_WEB_URL`, to 
 origin and to build the clone URL. The relay is not affected: the gateway always
 sends a VM's requests to `github.com` and `api.github.com`, so a token issued by
 another server would be sent to GitHub. The Cloudflare commands ignore all
-three; `admin.ts authorize` uses the built-in client ID, and the Worker uses
+three; `cog cloud authorize` uses the built-in client ID, and the Worker uses
 `GITHUB_CLIENT_ID` from `cloudflare/wrangler.jsonc`.
 
 Public repositories, including those under `github.com/shields`, are readable
@@ -190,8 +190,7 @@ queue.
 
 `profiles.yaml` defines the two capability templates, `read` (reads only) and
 `cog` (reads and pushes to `cog/VM-ID/*`). `cog grant` reads the file named by `COG_PROFILES`, or uses the embedded file
-when it is unset. `cloudflare/admin.ts grant` reads the checkout's own
-`profiles.yaml`.
+when it is unset. `cog cloud grant` always uses the embedded profiles.
 A grant stores a copy of its profile, so editing the profile changes future
 grants only. The profile key that enables pushes is `pushCogBranches`. Use
 these commands on the Mac to change a running VM immediately:
@@ -438,34 +437,42 @@ Dockerfile's `COPY dotfiles/`. `deploy.sh` replaces both in a staged copy with
 the context that `context.sh` assembles.
 
 The Worker URL appears in Wrangler's deployment output. Save it once with
-`bun run cloudflare/admin.ts config https://NAME.SUBDOMAIN.workers.dev`, which
-writes `~/.config/cog/cloudflare-url`. Run the admin command from the checkout,
-after `make setup`:
+`cog cloud config https://NAME.SUBDOMAIN.workers.dev`, which writes
+`~/.config/cog/cloudflare-url`. `cog cloud` can run outside the checkout. It
+accepts only a bare HTTPS origin and sends the admin token from its file in the
+Authorization header, without following redirects.
 
 ```sh
-bun run cloudflare/admin.ts authorize OWNER/REPO
-bun run cloudflare/admin.ts new NAME
-bun run cloudflare/admin.ts grant VM-ID OWNER/REPO read|cog
-bun run cloudflare/admin.ts start VM-ID
-bun run cloudflare/admin.ts show VM-ID
-bun run cloudflare/admin.ts logs VM-ID
-bun run cloudflare/admin.ts events VM-ID
-bun run cloudflare/admin.ts revoke VM-ID OWNER/REPO
-bun run cloudflare/admin.ts delete VM-ID
-bun run cloudflare/admin.ts list
-bun run cloudflare/admin.ts containers
-bun run cloudflare/admin.ts instances APPLICATION-ID
-bun run cloudflare/admin.ts ssh CONTAINER-ID
+cog cloud authorize OWNER/REPO
+cog cloud new NAME
+cog cloud grant VM-ID OWNER/REPO [--profile read|cog]
+cog cloud start VM-ID
+cog cloud show VM-ID
+cog cloud logs VM-ID
+cog cloud events VM-ID
+cog cloud revoke VM-ID OWNER/REPO
+cog cloud rm VM-ID
+cog cloud list
 ```
 
 `authorize` starts a separate GitHub App device flow for the cloud authority; it
-does not save that authorization on the Mac. A grant uses the same `read` and
-`cog` profiles as Lima, and a revision check prevents overwriting another policy
-edit. Grants and revocations take effect for the next GitHub request without
-restarting the VM. `list` shows registered VM IDs. `containers`, `instances` and
-`ssh` wrap the corresponding Wrangler commands. After connecting, clone a
-granted repository with Git and log in to the agents in the disposable VM as
-needed.
+does not save that authorization on the Mac. A grant uses the embedded `read`
+and `cog` profiles and defaults to `cog`. A revision check prevents overwriting
+another policy edit. Grants and revocations take effect for the next GitHub
+request without restarting the VM. `list` shows registered VM IDs, and `rm`
+disables the VM and stops its container.
+
+To find a running container and connect, run Wrangler from the checkout after
+`make setup`:
+
+```sh
+bunx wrangler containers list --json --config cloudflare/wrangler.jsonc
+bunx wrangler containers instances APPLICATION-ID --json --config cloudflare/wrangler.jsonc
+bunx wrangler containers ssh CONTAINER-ID --config cloudflare/wrangler.jsonc
+```
+
+After connecting, clone a granted repository with Git and log in to the agents
+in the disposable VM as needed.
 
 The VM receives only a dummy GitHub credential. Its outbound HTTP and HTTPS
 requests pass through the Worker, which checks GitHub operations against the
@@ -544,8 +551,8 @@ does not rename them. On a Mac that ran the old tools, in this order:
 5. `cog base`, then `cog new t1 --repo OWNER/REPO` and the checks above.
 6. Delete the old `dotfiles-base` VM (`limactl unprotect dotfiles-base`, then
    `limactl delete dotfiles-base`), run `cloudflare/deploy.sh`, then
-   `bun run cloudflare/admin.ts config URL` and `authorize`, and delete the
-   old `dotfiles-agent` Worker.
+   `cog cloud config HTTPS-WORKER-URL` and `cog cloud authorize OWNER/REPO`,
+   and delete the old `dotfiles-agent` Worker.
 
 ## History
 

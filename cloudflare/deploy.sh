@@ -55,20 +55,36 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 secret_dir=$HOME/.config/secrets/cog
 token_file=$secret_dir/cloudflare-admin-token
 install -d -m 0700 "$secret_dir"
-if [[ ! -e $token_file ]]; then
-    (umask 077 && openssl rand -hex 32 >"$token_file")
+if [[ ! -e $token_file && ! -L $token_file ]]; then
+    (
+        umask 077
+        pending=$(mktemp "$secret_dir/.cloudflare-admin-token.XXXXXX")
+        trap 'rm -f "$pending"' EXIT
+        openssl rand -hex 32 >"$pending"
+        if ! link "$pending" "$token_file" 2>/dev/null && [[ ! -e $token_file ]]; then
+            printf '%s\n' 'Cannot store Cloudflare admin token' >&2
+            exit 1
+        fi
+    )
 fi
-[[ $(stat -c %a "$token_file" 2>/dev/null || stat -f %Lp "$token_file") == 600 ]] || {
-    printf '%s\n' 'Cloudflare admin token must have mode 0600' >&2
-    exit 1
-}
-[[ $(wc -c <"$token_file") -eq 65 ]] || {
-    printf '%s\n' 'Cloudflare admin token is invalid' >&2
+[[ -f $token_file && ! -L $token_file && $(stat -c %a "$token_file" 2>/dev/null || stat -f %Lp "$token_file") == 600 ]] || {
+    printf '%s\n' 'Cloudflare admin token must be a regular file with mode 0600' >&2
     exit 1
 }
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/cog-cloudflare.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
+(
+    set +x
+    umask 077
+    export LC_ALL=C
+    token_pattern=$'^[0-9a-f]{64}\n$'
+    if IFS= read -r -d '' -n 66 admin_token || [[ ! $admin_token =~ $token_pattern ]]; then
+        printf '%s\n' 'Cloudflare admin token is invalid' >&2
+        exit 1
+    fi
+    printf 'ADMIN_TOKEN=%s' "$admin_token" >"$stage/admin.env"
+) <"$token_file"
 "$root/tools/stage_tree.sh" "$stage/tree"
 if ((worker_only)); then
     context=$stage/tree
@@ -90,12 +106,10 @@ jq --arg key "$public_key" --arg dockerfile "$stage/tree/cloudflare/Dockerfile" 
 mv "$stage/wrangler.jsonc" cloudflare/wrangler.jsonc
 bun install --frozen-lockfile
 umask 077
-{
-    printf 'ADMIN_TOKEN='
-    cat "$token_file"
-} >"$stage/admin.env"
 set -- --config cloudflare/wrangler.jsonc --secrets-file "$stage/admin.env"
 if [[ $worker_only == 1 ]]; then
     set -- "$@" --containers-rollout=none
 fi
 bunx wrangler deploy "$@"
+printf '%s\n' 'Save the HTTPS URL from Wrangler with cog cloud config HTTPS-WORKER-URL.'
+printf '%s\n' 'Run cog cloud authorize OWNER/REPO for each repository the Worker should serve.'

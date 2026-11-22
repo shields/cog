@@ -14,6 +14,7 @@
 
 import { Control, controlOptions, locations } from "../gateway/control.ts";
 import { baseVM } from "./commands/base.ts";
+import { cloudCommand } from "./commands/cloud.ts";
 import { gatewayCommand } from "./commands/gateway.ts";
 import type { Context } from "./commands/context.ts";
 import { claudeToken, grant, list, remove } from "./commands/lifecycle.ts";
@@ -30,7 +31,6 @@ function usage(config: Config): string {
   const {
     base,
     defaultDotfiles,
-    githubWebUrl,
     claudeTokenFile,
     codexAuthFile,
     fireworksKeyFile,
@@ -53,6 +53,8 @@ function usage(config: Config): string {
        cog gateway serve|health|disable NAME
                               the daemon that launchd runs, its health check, and
                               the removal of a VM's registration
+       cog cloud config|authorize|new|list|show|start|logs|events|grant|revoke|rm
+                              administer Cloudflare containers
        cog claude-token       keep the token that claude setup-token prints, for every later new
        cog rm NAME            delete a VM (${base} is refused)
        cog list               list the VMs
@@ -63,17 +65,16 @@ directory. It must be the top level of a git checkout with provision.sh,
 hooks must read the markers that cog writes. MODULE is a Brewfile module for
 provision.sh (dev by default).
 COG_CPUS and COG_MEMORY (in GiB) override the size in lima/dev.yaml, and
-COG_BASE replaces the name ${base}. COG_GITHUB_CLIENT_ID, COG_GITHUB_WEB_URL
-and COG_GITHUB_API_URL change the GitHub App authorization that cog
-performs, and cog reads COG_GITHUB_WEB_URL to recognize an origin and to build
-the clone URL; the gateway still relays a VM's requests to github.com.
-COG_PROFILES names a file of grant profiles in place of the built-in read and
-cog profiles.
+COG_BASE replaces the name ${base}. For Lima, COG_GITHUB_CLIENT_ID,
+COG_GITHUB_WEB_URL and COG_GITHUB_API_URL change the GitHub App authorization.
+COG_GITHUB_WEB_URL also determines which origins cog recognizes and which host
+it uses to clone; the gateway still relays a VM's requests to github.com.
+COG_PROFILES overrides the built-in read and cog grant profiles for Lima only.
 
 The repository is --repo's, or else the one that the git origin of the current
-directory names, when it is on ${githubWebUrl}. The Mac gateway performs the
-GitHub App device flow when that repository lacks an authorization. Credentials
-stay on the Mac. new clones the repository in the VM at
+directory names, if the origin uses the configured GitHub host. The Mac gateway
+performs the GitHub App device flow when that repository lacks authorization.
+Credentials stay on the Mac. new clones the repository in the VM at
 ~/src/github.com/OWNER/REPO (${dotfilesRepo} is already in ${base}), and opens
 the shell there. With no repository, or with --no-repo, the VM has no GitHub
 grant. Use cog show or cog edit to inspect or change grants while a VM runs.
@@ -141,6 +142,9 @@ async function dispatch(
     case "gateway":
       await gatewayCommand(args, context);
       return 0;
+    case "cloud":
+      say(JSON.stringify(await cloudCommand(args, context.config), null, 2));
+      return 0;
     default:
       note(usage(context.config).trimEnd());
       return 2;
@@ -152,7 +156,14 @@ async function main(argv: string[], env: Env): Promise<number> {
   let lima: Lima | undefined;
   try {
     const config = loadConfig(env);
-    validName(config.base);
+    const [verb, ...args] = argv;
+    if (verb !== "cloud") {
+      validName(config.base);
+    }
+    if (verb === undefined) {
+      note(usage(config).trimEnd());
+      return 2;
+    }
     const context: Context = {
       config,
       env,
@@ -166,11 +177,6 @@ async function main(argv: string[], env: Env): Promise<number> {
         return control;
       },
     };
-    const [verb, ...args] = argv;
-    if (verb === undefined) {
-      note(usage(config).trimEnd());
-      return 2;
-    }
     return await dispatch(verb, args, context);
   } catch (error) {
     try {

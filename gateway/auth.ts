@@ -107,11 +107,17 @@ function recordFrom(payload: unknown, repository: string): AuthRecord {
   return record as unknown as AuthRecord;
 }
 
+type AuthRequest = (
+  url: string,
+  init: BunFetchRequestInit,
+) => Promise<Response>;
+
 async function postForm(
   url: string,
   form: Record<string, string>,
+  request: AuthRequest = fetch,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(url, {
+  const response = await request(url, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -292,9 +298,19 @@ export class AppAuth {
     });
   }
 
-  async issue(repository: string): Promise<AuthRecord> {
+  async issue(
+    repository: string,
+    {
+      hostname,
+      request = fetch,
+    }: { hostname?: string; request?: AuthRequest } = {},
+  ): Promise<AuthRecord> {
     const key = normalizeRepository(repository);
-    const gh = spawnSync("gh", ["api", `repos/${key}`, "--jq", ".id"], {
+    const args = ["api", `repos/${key}`, "--jq", ".id"];
+    if (hostname !== undefined) {
+      args.push("--hostname", hostname);
+    }
+    const gh = spawnSync("gh", args, {
       encoding: "utf8",
       timeout: 30_000,
     });
@@ -309,14 +325,16 @@ export class AppAuth {
         `gh cannot read ${key}; check the repository and your Mac gh login`,
       );
     }
-    const request = await postForm(`${this.webUrl}/login/device/code`, {
-      client_id: this.clientId,
-    });
-    const deviceCode = request.device_code;
-    const userCode = request.user_code;
-    const verificationUri = request.verification_uri;
-    let interval = request.interval;
-    const expiresIn = request.expires_in;
+    const device = await postForm(
+      `${this.webUrl}/login/device/code`,
+      { client_id: this.clientId },
+      request,
+    );
+    const deviceCode = device.device_code;
+    const userCode = device.user_code;
+    const verificationUri = device.verification_uri;
+    let interval = device.interval;
+    const expiresIn = device.expires_in;
     if (
       typeof deviceCode !== "string" ||
       !/^[A-Za-z0-9_-]+$/.test(deviceCode) ||
@@ -340,12 +358,16 @@ export class AppAuth {
     while (Date.now() < deadline) {
       await delay(Number(interval) * 1000);
       const now = Math.floor(Date.now() / 1000);
-      const reply = await postForm(`${this.webUrl}/login/oauth/access_token`, {
-        client_id: this.clientId,
-        device_code: deviceCode,
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        repository_id: repositoryId,
-      });
+      const reply = await postForm(
+        `${this.webUrl}/login/oauth/access_token`,
+        {
+          client_id: this.clientId,
+          device_code: deviceCode,
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          repository_id: repositoryId,
+        },
+        request,
+      );
       if (reply.error === "authorization_pending") {
         continue;
       }
@@ -360,7 +382,7 @@ export class AppAuth {
         throw new Error(`GitHub device authorization for ${key} failed`);
       }
       const tokens = tokenReply(reply);
-      const verification = await fetch(`${this.apiUrl}/repos/${key}`, {
+      const verification = await request(`${this.apiUrl}/repos/${key}`, {
         headers: {
           Accept: "application/vnd.github+json",
           Authorization: `Bearer ${tokens.access_token}`,

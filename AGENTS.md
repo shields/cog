@@ -60,12 +60,14 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   rollback, disable, grant, revoke, the profile parser and the policy
   document); it opens the state and the authorizations on first use, and
   `State` refuses to register `lima:cog-base` and the VM that `COG_BASE`
-  names. `cloudflare/` holds the Worker
-  (`worker.ts`), the authority Durable Object, the outbound interceptor, which
-  applies `gateway/policy.ts`, and `admin.ts`. The container gets no GitHub
-  token. `profiles.yaml` holds the `read` and `cog` templates; the persisted
-  grant field that enables pushes is `pushCogBranches`. `COG_PROFILES` replaces
-  the embedded profiles for `cog grant`.
+  names. `cloudflare/` holds the Worker (`worker.ts`), the authority Durable
+  Object and the outbound interceptor, which applies `gateway/policy.ts`. The
+  container gets no GitHub token. `cog/commands/cloud.ts` administers the Worker
+  using the HTTPS origin saved by `cog cloud config` and the admin token file
+  written by `cloudflare/deploy.sh`. It refuses redirects and does not depend
+  on the checkout. `profiles.yaml` holds the `read` and `cog` templates; the
+  persisted grant field that enables pushes is `pushCogBranches`. `cog cloud`
+  uses the embedded profiles; `COG_PROFILES` only overrides the Lima profiles.
 - Names: the push namespace is `cog/VM-ID/*`; the markers are
   `/etc/cog-throwaway` and `/etc/cog-github-gateway`; the base is `cog-base`
   (`COG_BASE`); the guest socket is `/tmp/cog-github.sock`; the health path is
