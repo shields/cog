@@ -40,6 +40,7 @@ const interruptions = {
 // throws Interrupted so that the cleanup in the callers' finally blocks runs.
 export class Signals {
   #status: number | null = null;
+  #cleaning = false;
   readonly #rejecters = new Set<(error: Interrupted) => void>();
   readonly #handlers = new Map<string, () => void>();
 
@@ -73,8 +74,17 @@ export class Signals {
   }
 
   check(): void {
-    if (this.#status !== null) {
+    if (this.#status !== null && !this.#cleaning) {
       throw new Interrupted(this.#status);
+    }
+  }
+
+  async cleanup(work: () => Promise<void>): Promise<void> {
+    this.#cleaning = true;
+    try {
+      await work();
+    } finally {
+      this.#cleaning = false;
     }
   }
 

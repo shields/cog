@@ -64,8 +64,11 @@ test("a file with a missing or invalid profile is refused", () => {
   });
   const file = path.join(dir, "profiles.yaml");
   writeFileSync(file, "read: {read: true, pushCogBranches: false}\n");
-  assert.throws(
-    () => loadProfiles(config(file)),
-    /read and cog profiles are required/,
-  );
+  assert.throws(() => loadProfiles(config(file)), {
+    message: "invalid COG_PROFILES; define valid read and cog profiles",
+  });
+  writeFileSync(file, 'read: ["not a real secret"');
+  assert.throws(() => loadProfiles(config(file)), {
+    message: "invalid COG_PROFILES; define valid read and cog profiles",
+  });
 });

@@ -73,6 +73,7 @@ exit "\${STUB_STATUS:-0}"
 test("each method makes the call that bin/cog makes", async () => {
   const { limactl, calls } = stub();
   const lima = createLima(limactl);
+  await lima.list();
   await lima.unprotect("b");
   await lima.remove("b");
   await lima.create("b", ["--cpus", "4"], "/s/dev.yaml");
@@ -86,6 +87,7 @@ test("each method makes the call that bin/cog makes", async () => {
   await lima.shell("t1", ["sudo", "x"]);
   await lima.shell("t1", ["./provision.sh", "dev"], { workdir: "/g" });
   assert.deepEqual(calls(), [
+    ["list"],
     ["unprotect", "b"],
     ["delete", "--tty=false", "--force", "b"],
     ["start", "--tty=false", "--name=b", "--cpus", "4", "/s/dev.yaml"],
@@ -206,6 +208,56 @@ test("a pipe feeds a producer into limactl shell", async () => {
     "t1",
     "a",
   ]);
+});
+
+test("the terminal and PID survive handoff to the interactive shell", async () => {
+  const { limactl } = stub();
+  writeFileSync(
+    limactl,
+    `#!/bin/sh
+set -eu
+[ -t 0 ] && [ -t 1 ] && [ -t 2 ]
+[ "$*" = "shell --workdir /work t1" ]
+printf 'ready:%s\\n' "$$"
+IFS= read -r input
+[ "$input" = 'from terminal' ]
+exit 17
+`,
+  );
+  const { promise, resolve } = Promise.withResolvers<boolean>();
+  let output = "";
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "-e",
+      `import { createLima } from ${JSON.stringify(path.join(import.meta.dirname, "lima.ts"))};
+    process.exitCode = await createLima(${JSON.stringify(limactl)}).enter("t1", "/work");`,
+    ],
+    {
+      terminal: {
+        data: (_terminal, bytes) => {
+          output += Buffer.from(bytes).toString("utf8");
+          if (/ready:\d+\r?\n/.test(output)) {
+            resolve(true);
+          }
+        },
+      },
+    },
+  );
+  onTestFinished(() => {
+    child.kill();
+    child.terminal?.close();
+  });
+  const exitedEarly = async (): Promise<never> => {
+    const status = await child.exited;
+    assert.fail(`shell exited before reading: ${String(status)} (${output})`);
+  };
+  await Promise.race([promise, exitedEarly()]);
+  assert.match(output, new RegExp(String.raw`ready:${String(child.pid)}\r?\n`));
+  assert.ok(child.terminal);
+  child.terminal.write("from terminal\n");
+  assert.equal(await child.exited, 17, output);
 });
 
 test("findLimactl resolves through PATH once, to an absolute path", () => {

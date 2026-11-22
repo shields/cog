@@ -13,13 +13,18 @@
 // limitations under the License.
 
 import { Control, controlOptions, locations } from "../gateway/control.ts";
+import { baseVM } from "./commands/base.ts";
 import { gatewayCommand } from "./commands/gateway.ts";
 import type { Context } from "./commands/context.ts";
+import { claudeToken, grant, list, remove } from "./commands/lifecycle.ts";
+import { newVM } from "./commands/new.ts";
 import { authorize, edit, logs, revoke, show } from "./commands/policy.ts";
 import { loadConfig, type Config, type Env } from "./config.ts";
-import { CogError, exitStatus } from "./errors.ts";
+import { exitStatus } from "./errors.ts";
+import { createLima, findLimactl, type Lima } from "./lima.ts";
 import { validName } from "./names.ts";
 import { note, say } from "./output.ts";
+import { promptClaudeToken } from "./secrets.ts";
 
 function usage(config: Config): string {
   const { base, defaultDotfiles } = config;
@@ -54,8 +59,6 @@ cog profiles.
 `;
 }
 
-const planned = new Set(["base", "new", "grant", "claude-token", "rm", "list"]);
-
 async function dispatch(
   verb: string,
   args: string[],
@@ -66,6 +69,23 @@ async function dispatch(
     case "-h":
     case "--help":
       say(usage(context.config).trimEnd());
+      return 0;
+    case "base":
+      await baseVM(args, context);
+      return 0;
+    case "new":
+      return await newVM(args, context);
+    case "list":
+      await list(args, context);
+      return 0;
+    case "claude-token":
+      await claudeToken(args, context);
+      return 0;
+    case "rm":
+      await remove(args, context);
+      return 0;
+    case "grant":
+      await grant(args, context);
       return 0;
     case "show":
       show(args, context);
@@ -86,9 +106,6 @@ async function dispatch(
       await gatewayCommand(args, context);
       return 0;
     default:
-      if (planned.has(verb)) {
-        throw new CogError(`${verb} is not implemented yet`);
-      }
       note(usage(context.config).trimEnd());
       return 2;
   }
@@ -96,12 +113,18 @@ async function dispatch(
 
 async function main(argv: string[], env: Env): Promise<number> {
   let control: Control | undefined;
+  let lima: Lima | undefined;
   try {
     const config = loadConfig(env);
     validName(config.base);
     const context: Context = {
       config,
       env,
+      get lima() {
+        lima ??= createLima(findLimactl());
+        return lima;
+      },
+      prompt: promptClaudeToken,
       gateway: () => {
         control ??= new Control(locations(env), controlOptions(env));
         return control;

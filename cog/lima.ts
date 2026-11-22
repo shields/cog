@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import path from "node:path";
 import { CogError } from "./errors.ts";
 import {
   capture,
@@ -31,6 +32,7 @@ export interface ShellOptions {
 // The calls to limactl, one method each. Every call reads no standard input
 // unless a method says otherwise.
 export interface Lima {
+  list(): Promise<void>;
   // limactl list exits non-zero when no instance matches the name.
   exists(name: string): Promise<boolean>;
   isProtected(name: string): Promise<boolean>;
@@ -69,7 +71,7 @@ export interface Lima {
     options?: { producer?: RunOptions },
   ): Promise<void>;
   // The final shell takes over this process.
-  enter(name: string, workdir?: string): never;
+  enter(name: string, workdir?: string): Promise<number>;
 }
 
 export function findLimactl(): string {
@@ -77,7 +79,7 @@ export function findLimactl(): string {
   if (found === null) {
     throw new CogError("limactl is not installed");
   }
-  return found;
+  return path.resolve(found);
 }
 
 export function createLima(limactl: string): Lima {
@@ -114,6 +116,7 @@ export function createLima(limactl: string): Lima {
     options: ShellOptions = {},
   ): string[] => [limactl, "shell", ...shellArgs(name, command, options)];
   return {
+    list: () => call("list", []),
     exists: async (name) =>
       (await runStatus([limactl, "list", "-q", name], { quiet: true })) === 0,
     isProtected: async (name) =>
@@ -157,7 +160,17 @@ export function createLima(limactl: string): Lima {
         ...(options.producer ? { producer: options.producer } : {}),
         consumer: label("shell"),
       }),
-    enter: (name, workdir) =>
-      replace(shellArgv(name, [], workdir === undefined ? {} : { workdir })),
+    enter: async (name, workdir) => {
+      const argv = shellArgv(
+        name,
+        [],
+        workdir === undefined ? {} : { workdir },
+      );
+      try {
+        replace(argv);
+      } catch {
+        return await runStatus(argv, { ...label("shell"), stdin: "inherit" });
+      }
+    },
   };
 }

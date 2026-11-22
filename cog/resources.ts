@@ -47,7 +47,7 @@ function write(file: string, text: string, mode: number): void {
 }
 
 // Writes the embedded files into a directory that the caller made private:
-// DIRECTORY/dev.yaml, DIRECTORY/stage_tree.sh and DIRECTORY/guest/*, with
+// DIRECTORY/dev.yaml, DIRECTORY/embedded/tools/stage_tree.sh and DIRECTORY/guest/*, with
 // explicit modes, whatever the umask.
 export function writeResources(directory: string): {
   limaTemplate: string;
@@ -60,9 +60,14 @@ export function writeResources(directory: string): {
   for (const file of guestFiles) {
     write(path.join(guest, file.name), file.text, 0o755);
   }
+  // The stager refuses destinations in its own checkout.
+  const tools = path.join(directory, "embedded", "tools");
+  mkdirSync(tools, { recursive: true, mode: 0o700 });
+  chmodSync(path.dirname(tools), 0o700);
+  chmodSync(tools, 0o700);
   const paths = {
     limaTemplate: path.join(directory, "dev.yaml"),
-    stageTree: path.join(directory, "stage_tree.sh"),
+    stageTree: path.join(tools, "stage_tree.sh"),
     guest,
   };
   write(paths.limaTemplate, limaTemplate, 0o644);

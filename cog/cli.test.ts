@@ -22,6 +22,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -423,6 +424,51 @@ test("no command, or an unknown one, prints the usage to stderr and exits 2", ()
   }
 });
 
+test("the moved executable ignores dotenv and Bun preloads in the current directory", () => {
+  const { root } = sandbox();
+  const binary = path.join(root, "cog-built");
+  const build = spawnSync(
+    process.execPath,
+    [
+      "build",
+      main,
+      "--compile",
+      "--no-compile-autoload-dotenv",
+      "--no-compile-autoload-bunfig",
+      "--outfile",
+      binary,
+    ],
+    { encoding: "utf8", timeout: 30_000 },
+  );
+  assert.equal(build.status, 0, build.stderr);
+  const cwd = path.join(root, "checkout");
+  mkdirSync(cwd);
+  const installed = path.join(root, "cog-installed");
+  renameSync(binary, installed);
+  writeFileSync(
+    path.join(cwd, ".env"),
+    "COG_GITHUB_WEB_URL=https://untrusted.example.invalid\n",
+  );
+  writeFileSync(path.join(cwd, "bunfig.toml"), 'preload = ["./preload.ts"]\n');
+  writeFileSync(path.join(cwd, "preload.ts"), "process.exit(89);\n");
+  const limactl = path.join(root, "limactl");
+  writeFileSync(
+    limactl,
+    '#!/bin/sh\n[ "$*" = list ] || exit 90\nprintf "%s\\n" "${COG_GITHUB_WEB_URL:-clean}"\n',
+    { mode: 0o700 },
+  );
+  chmodSync(limactl, 0o700);
+  const result = spawnSync(installed, ["list"], {
+    cwd,
+    env: { HOME: root, PATH: root },
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "clean\n");
+  assert.equal(result.stderr, "");
+}, 60_000);
+
 test("help prints the usage to stdout and exits 0", () => {
   const { run } = sandbox();
   for (const word of ["help", "-h", "--help"]) {
@@ -458,12 +504,22 @@ test("an invalid COG_BASE is refused before anything runs", () => {
   assert.equal(result.stderr, "cog: invalid VM name: not a name\n");
 });
 
-test("verbs that are not ported yet say so", () => {
+test("lifecycle verbs reject invalid arguments before using a VM", () => {
   const { run } = sandbox();
-  for (const verb of ["base", "new", "grant", "claude-token", "rm", "list"]) {
-    const result = run([verb]);
-    assert.equal(result.status, 1, verb);
-    assert.equal(result.stderr, `cog: ${verb} is not implemented yet\n`);
+  for (const [args, message] of [
+    [
+      ["base", "dev", "--dotfiles", "/unused"],
+      "option --dotfiles must come before the modules",
+    ],
+    [["new", "invalid name"], "invalid VM name: invalid name"],
+    [["grant"], "usage: cog grant NAME [OWNER/REPO] [--profile read|cog]"],
+    [["claude-token", "x"], "usage: cog claude-token"],
+    [["rm"], "usage: cog rm NAME"],
+    [["list", "x"], "usage: cog list"],
+  ] as const) {
+    const result = run([...args]);
+    assert.equal(result.status, 1, args.join(" "));
+    assert.equal(result.stderr, `cog: ${message}\n`);
   }
 });
 

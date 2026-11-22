@@ -30,5 +30,11 @@ export function loadProfiles(config: Config): Record<string, Grant> {
   } catch {
     throw new CogError("cannot read COG_PROFILES");
   }
-  return parseProfiles(text);
+  try {
+    return parseProfiles(text);
+  } catch {
+    throw new CogError(
+      "invalid COG_PROFILES; define valid read and cog profiles",
+    );
+  }
 }

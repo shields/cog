@@ -14,11 +14,23 @@
 
 import type { Control } from "../../gateway/control.ts";
 import type { Config, Env } from "../config.ts";
+import type { Lima } from "../lima.ts";
+import type { promptClaudeToken } from "../secrets.ts";
 
 // What a command needs. The gateway is opened on first use, so a command that
 // does not touch it creates no directory.
 export interface Context {
   readonly config: Config;
   readonly env: Env;
+  readonly lima: Lima;
   readonly gateway: () => Control;
+  readonly prompt: typeof promptClaudeToken;
 }
+
+export type LifecycleContext<
+  L extends keyof Lima,
+  G extends keyof Control = never,
+> = Pick<Context, "config" | "prompt"> & {
+  readonly lima: Pick<Lima, L>;
+  readonly gateway: () => Pick<Control, G>;
+};
