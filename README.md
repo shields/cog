@@ -139,30 +139,53 @@ Tests replace the terminal and the gateway locations with `COG_PROMPT_INPUT`
 
 1. Apply the `tag:cog` policy in `shields/tailscale-config`. That tailnet
    uses MagicDNS. The SSH rule lets `shields@msrl.com` sign in as `shields`.
-2. In the Tailscale admin console, create a dedicated **OAuth client** with
-   **Auth Keys** (`auth_keys`) and **Devices / Core** (`devices:core`) write
-   access, restricted to `tag:cog`. Run `cog tailscale config CLIENT-ID` on
-   the Mac and paste the client secret at the hidden prompt. Cog saves it in
-   `~/.config/secrets/cog/tailscale-oauth.json` with mode 0600.
-3. After updating cog, rebuild an older base once with `cog base`. Run
-   `cog new demo`. The Mac issues a short-lived, single-use key and the clone
-   joins as its own persistent device. Cog prints the login and the assigned
-   MagicDNS hostname, including any suffix Tailscale added.
-4. Connect the phone to the same tailnet. In Herdr mobile, add the printed
+2. Create a dedicated cog client on the Tailscale [Trust credentials][console]
+   page. Select **Credential → OAuth** and set **Keys → Auth Keys** to
+   **Write** (`auth_keys`) so the Mac can issue join keys. Select only
+   `tag:cog`.
+3. Choose the **Devices → Core** permission and leave all other scopes off.
+
+   - **Read** (`devices:core:read`) lets `cog new` look up the VM's MagicDNS
+     name and check that Tailscale reports SSH ready. The client can read the
+     whole tailnet's device inventory. If `cog rm` or rollback needs to
+     remove an enrolled device, the local VM can be gone while the tailnet
+     device remains. Cog keeps cleanup pending and blocks reuse of the VM name.
+   - **Write** (`devices:core`) also lets `cog rm` and rollback delete the
+     enrolled device. The `tag:cog` selection limits the tags on issued join
+     keys. Anyone holding the OAuth secret can use device write access to
+     delete devices with other tags. See [Tailscale issue #10702].
+
+4. Select **Generate credential** and keep that page open. On the Mac, run
+   `cog tailscale config CLIENT-ID` with the displayed client ID. Paste the
+   client secret at the hidden prompt before closing the page. Cog saves it
+   in `~/.config/secrets/cog/tailscale-oauth.json` with mode 0600. Creating
+   the client manually keeps the secret out of OpenTofu's R2 state.
+5. After updating cog, rebuild an older base once with `cog base`. Run
+   `cog new demo`. The clone receives a single-use join key valid for ten
+   minutes and joins as its own persistent device. Cog prints the login and
+   the assigned MagicDNS hostname, including any suffix Tailscale added.
+6. Connect the phone to the same tailnet. In Herdr mobile, add the printed
    hostname on port 22 and enter the printed username. Tailscale SSH uses the
    phone's sign-in. The same address works in a phone SSH client.
 
-The Mac must be awake and the VM running for a connection. A VM keeps its
-address through stops and restarts. `cog rm NAME` removes its device even
-when the VM is stopped. If cleanup fails, restore connectivity or the
-credential and repeat `cog rm NAME`. Cog keeps the device ID on the Mac until
-cleanup succeeds.
+The Mac must be awake and the VM running for a connection. After a Mac reboot,
+log in and run `limactl start NAME`. Cog starts the gateway at login. The VM
+keeps its Tailscale identity and address on restart, even after the join key
+expires. Tailscale normally removes an [ephemeral node] after 30–60 minutes
+offline, so cog uses persistent nodes. With device write access, `cog rm NAME`
+removes its device even when the VM is stopped. If cleanup is pending, check
+connectivity and the credential's permissions, then repeat `cog rm NAME`.
+Cog keeps the cleanup record on the Mac until it succeeds.
 
 Enrollment starts with new Lima clones created after configuration. On a
 Mac without the credential, `cog new` creates local VMs as usual. Removing
 the credential turns off enrollment. Cleaning up enrolled VMs still requires
 a credential. To rotate it, run the configuration command again with a client
 for the same tailnet.
+
+[console]: https://console.tailscale.com/admin/settings/trust-credentials
+[Tailscale issue #10702]: https://github.com/tailscale/tailscale/issues/10702
+[ephemeral node]: https://tailscale.com/docs/features/ephemeral-nodes
 
 ## GitHub access
 

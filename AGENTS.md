@@ -94,11 +94,14 @@ shell, so that none swallows what was typed for the shell; `tests/test_cog.zsh`
 holds a line in cog's stdin and checks that only the final shell reads it.
 `cog base` never reads cog's stdin, including during staging.
 
-Tailscale enrollment uses a dedicated Mac OAuth client with `auth_keys` and
-`devices:core` write access scoped to `tag:cog`. Only a one-use auth key
-enters a clone, on stdin. The base masks tailscaled. The gateway database
-records the auth key ID and stable node ID by instance UUID so cleanup works
-after a VM stops or is deleted. The SSH rule lives in `shields/tailscale-config`.
+Tailscale enrollment uses a dedicated Mac OAuth client with `auth_keys` write
+access for `tag:cog` join keys and at least `devices:core:read` to verify SSH.
+Automatic cleanup requires `devices:core` write access, which permits deleting
+devices with other tags (see the README's "Connect from your phone"). Only a
+one-use auth key enters a clone, on stdin. The base masks tailscaled. The
+gateway database records the auth key ID and stable node ID by instance UUID
+so cleanup works after a VM stops or is deleted. The SSH rule lives in
+`shields/tailscale-config`.
 
 ## Contract with dotfiles
 
