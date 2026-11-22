@@ -32,7 +32,7 @@ if [[ ! -e $token_file ]]; then
     umask 077
     openssl rand -hex 32 >"$token_file"
 fi
-[[ $(stat -f %Lp "$token_file" 2>/dev/null || stat -c %a "$token_file") == 600 ]] || {
+[[ $(stat -c %a "$token_file" 2>/dev/null || stat -f %Lp "$token_file") == 600 ]] || {
     printf '%s\n' 'Cloudflare admin token must have mode 0600' >&2
     exit 1
 }
