@@ -113,7 +113,7 @@ test("live grants and revocations use immutable VM IDs", async () => {
   const granted = await state.update(
     instance.id,
     0,
-    { "shields/dotfiles": { read: true, pushTaskBranches: true } },
+    { "shields/dotfiles": { read: true, pushCogBranches: true } },
     "owner",
   );
   assert.equal(granted.revision, 1);
@@ -146,7 +146,7 @@ test("live grants and revocations use immutable VM IDs", async () => {
   assert.equal(events.length, 4);
   assert.deepEqual(events.find((event) => event.newRevision === 1)?.changes, {
     previous: {},
-    current: { "shields/dotfiles": { read: true, pushTaskBranches: true } },
+    current: { "shields/dotfiles": { read: true, pushCogBranches: true } },
   });
 });
 
@@ -181,7 +181,7 @@ test("refresh is shared across concurrent calls and never appears in logs", asyn
   await state.update(
     instance.id,
     0,
-    { "shields/dotfiles": { read: true, pushTaskBranches: false } },
+    { "shields/dotfiles": { read: true, pushCogBranches: false } },
     "owner",
   );
   const classification = {
@@ -256,7 +256,7 @@ test("revoking a grant removes credentials while preserving anonymous reads", as
     instance.id,
     0,
     {
-      "shields/dotfiles": { read: true, pushTaskBranches: true },
+      "shields/dotfiles": { read: true, pushCogBranches: true },
     },
     "owner",
   );
@@ -293,8 +293,8 @@ test("identity reads use the first granted repository in code-unit order", async
     instance.id,
     0,
     {
-      "owner/a_b": { read: true, pushTaskBranches: false },
-      "owner/a-b": { read: true, pushTaskBranches: false },
+      "owner/a_b": { read: true, pushCogBranches: false },
+      "owner/a-b": { read: true, pushCogBranches: false },
     },
     "owner",
   );
@@ -315,7 +315,7 @@ test("stale policy revisions and missing authorization fail closed", async () =>
     state.update(
       instance.id,
       0,
-      { "shields/dotfiles": { read: true, pushTaskBranches: false } },
+      { "shields/dotfiles": { read: true, pushCogBranches: false } },
       "owner",
     ),
     /authorization.*missing/,
@@ -324,7 +324,7 @@ test("stale policy revisions and missing authorization fail closed", async () =>
   await state.update(
     instance.id,
     0,
-    { "shields/dotfiles": { read: true, pushTaskBranches: false } },
+    { "shields/dotfiles": { read: true, pushCogBranches: false } },
     "owner",
   );
   await assert.rejects(
@@ -346,7 +346,7 @@ test("grants that are not a mapping of valid grants are rejected", async () => {
   const state = authority();
   await state.installAuthorization(authorization());
   const instance = await state.register("work", "owner");
-  const grant = { read: true, pushTaskBranches: false };
+  const grant = { read: true, pushCogBranches: false };
   const rejected: [unknown, string][] = [
     [null, "repositories must be a mapping"],
     [{ "shields/dotfiles": "read" }, "invalid grant for shields/dotfiles"],
@@ -390,7 +390,7 @@ test("revocation during token refresh prevents forwarding", async () => {
     vm.id,
     0,
     {
-      "shields/dotfiles": { read: true, pushTaskBranches: false },
+      "shields/dotfiles": { read: true, pushCogBranches: false },
     },
     "owner",
   );

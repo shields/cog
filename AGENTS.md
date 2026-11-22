@@ -48,7 +48,7 @@
   (`worker.ts`), the authority Durable Object, the outbound interceptor, which
   applies `gateway/policy.ts`, and `admin.ts`. The container gets no GitHub
   token. `profiles.yaml` holds the `read` and `cog` templates; the persisted
-  grant field that enables pushes is still `pushTaskBranches`, so keep the name.
+  grant field that enables pushes is `pushCogBranches`.
 - Names: the push namespace is `cog/VM-ID/*`; the markers are
   `/etc/cog-throwaway` and `/etc/cog-github-gateway`; the base is `cog-base`
   (`COG_BASE`); the guest socket is `/tmp/cog-github.sock`; the health path is

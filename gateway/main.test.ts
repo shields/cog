@@ -121,13 +121,13 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
       /revision 1/,
     );
     const initial = YAML.parse(call(["show", "lima:trial"])) as {
-      repositories: Record<string, { pushTaskBranches: boolean }>;
+      repositories: Record<string, { pushCogBranches: boolean }>;
     };
-    assert.equal(initial.repositories[repository]?.pushTaskBranches, true);
+    assert.equal(initial.repositories[repository]?.pushCogBranches, true);
     const editor = path.join(root, "editor");
     writeFileSync(
       editor,
-      '#!/bin/sh\nset -eu\nsed \'s/pushTaskBranches: true/pushTaskBranches: false/\' "$1" > "$1.tmp"\nmv "$1.tmp" "$1"\n',
+      '#!/bin/sh\nset -eu\nsed \'s/pushCogBranches: true/pushCogBranches: false/\' "$1" > "$1.tmp"\nmv "$1.tmp" "$1"\n',
     );
     chmodSync(editor, 0o700);
     assert.match(
@@ -135,9 +135,9 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
       /revision 2/,
     );
     const edited = YAML.parse(call(["show", "lima:trial"])) as {
-      repositories: Record<string, { pushTaskBranches: boolean }>;
+      repositories: Record<string, { pushCogBranches: boolean }>;
     };
-    assert.equal(edited.repositories[repository]?.pushTaskBranches, false);
+    assert.equal(edited.repositories[repository]?.pushCogBranches, false);
     call(["disable", "lima:trial"]);
     const state = new State(path.join(root, "state"));
     try {
@@ -234,11 +234,11 @@ function repositoriesEditor(root: string): string {
 
 test("grant rejects an invalid profile definition before it authorizes anything", () => {
   const { root, ghCalls, run } = sandbox();
-  const read = { read: true, pushTaskBranches: false };
-  const cog = { read: true, pushTaskBranches: true };
+  const read = { read: true, pushCogBranches: false };
+  const cog = { read: true, pushCogBranches: true };
   const profiles = path.join(root, "profiles.yaml");
   for (const [name, profile] of [
-    ["cog", { ...cog, pushTaskBranches: "false" }],
+    ["cog", { ...cog, pushCogBranches: "false" }],
     ["Cog", cog],
   ] as const) {
     writeFileSync(profiles, YAML.stringify({ read, cog, [name]: profile }));
@@ -254,7 +254,7 @@ test("grant rejects an invalid profile definition before it authorizes anything"
 
 test("grant rejects a profile name inherited from Object.prototype before it authorizes anything", () => {
   const { root, ghCalls, run } = sandbox();
-  const grant = { read: true, pushTaskBranches: false };
+  const grant = { read: true, pushCogBranches: false };
   const profiles = path.join(root, "profiles.yaml");
   writeFileSync(profiles, YAML.stringify({ read: grant, cog: grant }));
   for (const name of [
@@ -276,10 +276,10 @@ test("grant rejects a profile name inherited from Object.prototype before it aut
 test("edit rejects an invalid policy before it authorizes anything", () => {
   const { root, ghCalls, run } = sandbox();
   const editor = repositoriesEditor(root);
-  const valid = "{read: true, pushTaskBranches: false}";
+  const valid = "{read: true, pushCogBranches: false}";
   for (const [repositories, message] of [
     [
-      "{shields/new: {read: true, pushTaskBranches: maybe}}",
+      "{shields/new: {read: true, pushCogBranches: maybe}}",
       "invalid grant for shields/new",
     ],
     [
@@ -304,7 +304,7 @@ test("edit rejects an invalid policy before it authorizes anything", () => {
 
 test("edit keeps the grants when repositories is a set, an ordered map, or a timestamp", () => {
   const { root, ghCalls, run } = sandbox();
-  const read = { read: true, pushTaskBranches: false };
+  const read = { read: true, pushCogBranches: false };
   const seeded = new State(path.join(root, "state"));
   try {
     seeded.update("lima:trial", 0, { "shields/dotfiles": read }, "tester");
@@ -314,7 +314,7 @@ test("edit keeps the grants when repositories is a set, an ordered map, or a tim
   const editor = repositoriesEditor(root);
   for (const repositories of [
     "!!set {shields/dotfiles}",
-    "!!omap [{shields/dotfiles: {read: true, pushTaskBranches: false}}]",
+    "!!omap [{shields/dotfiles: {read: true, pushCogBranches: false}}]",
     "!!timestamp 2001-12-14",
   ]) {
     const result = run(["edit", "lima:trial"], {
@@ -346,7 +346,7 @@ test("edit authorizes a repository it adds", () => {
   const result = run(["edit", "lima:trial"], {
     EDITOR: editor,
     VISUAL: editor,
-    REPOSITORIES: "{shields/new: {read: true, pushTaskBranches: false}}",
+    REPOSITORIES: "{shields/new: {read: true, pushCogBranches: false}}",
   });
   assert.equal(result.status, 1, result.stdout);
   assert.equal(

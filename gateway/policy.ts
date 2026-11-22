@@ -26,7 +26,7 @@ import {
 export type Profile = "read" | "cog";
 export interface Grant {
   read: boolean;
-  pushTaskBranches: boolean;
+  pushCogBranches: boolean;
 }
 export type Access = "anonymous" | "authenticated";
 export type Operation =
@@ -189,13 +189,13 @@ export function parseGrant(input: unknown): Grant | null {
   if (
     keys.length !== 2 ||
     !keys.includes("read") ||
-    !keys.includes("pushTaskBranches")
+    !keys.includes("pushCogBranches")
   ) {
     return null;
   }
-  const { read, pushTaskBranches } = input as Record<string, unknown>;
-  return read === true && typeof pushTaskBranches === "boolean"
-    ? { read, pushTaskBranches }
+  const { read, pushCogBranches } = input as Record<string, unknown>;
+  return read === true && typeof pushCogBranches === "boolean"
+    ? { read, pushCogBranches }
     : null;
 }
 
@@ -722,7 +722,7 @@ export function authorize(grant: Grant | null, operation: Operation): Access {
     }
     throw new PolicyError("repository is not granted to this VM");
   }
-  if (operation === "git.push" && !grant.pushTaskBranches) {
+  if (operation === "git.push" && !grant.pushCogBranches) {
     throw new PolicyError(
       "cog-branch pushes are not granted for this repository",
     );

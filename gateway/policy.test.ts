@@ -798,7 +798,7 @@ test("REST reads can be anonymous and API writes have no classification", () => 
     "identity.read",
   );
   assert.doesNotThrow(() => {
-    authorize({ read: true, pushTaskBranches: false }, read.operation);
+    authorize({ read: true, pushCogBranches: false }, read.operation);
   });
   assert.equal(authorize(null, read.operation), "anonymous");
   assert.throws(() => {
@@ -822,10 +822,10 @@ test("REST reads can be anonymous and API writes have no classification", () => 
     );
   }, /unsupported/);
   assert.throws(() => {
-    authorize({ read: true, pushTaskBranches: false }, "git.push");
+    authorize({ read: true, pushCogBranches: false }, "git.push");
   }, /not granted/);
   assert.doesNotThrow(() => {
-    authorize({ read: true, pushTaskBranches: true }, "git.push");
+    authorize({ read: true, pushCogBranches: true }, "git.push");
   });
 });
 
@@ -894,7 +894,7 @@ test("anonymous access covers repository reads without granting writes or identi
   for (const operation of ["git.read", "api.read", "public.read"] as const) {
     assert.equal(authorize(null, operation), "anonymous");
     assert.equal(
-      authorize({ read: false, pushTaskBranches: true }, operation),
+      authorize({ read: false, pushCogBranches: true }, operation),
       "anonymous",
     );
   }
@@ -906,11 +906,11 @@ test("anonymous access covers repository reads without granting writes or identi
     assert.throws(() => authorize(null, operation), /not granted/);
   }
   assert.equal(
-    authorize({ read: true, pushTaskBranches: false }, "api.read"),
+    authorize({ read: true, pushCogBranches: false }, "api.read"),
     "authenticated",
   );
   assert.equal(
-    authorize({ read: true, pushTaskBranches: true }, "public.read"),
+    authorize({ read: true, pushCogBranches: true }, "public.read"),
     "anonymous",
   );
 });
@@ -942,7 +942,7 @@ test("Git discovery separates fetches from pushes with and without a .git suffix
           assert.throws(
             () =>
               authorize(
-                { read: true, pushTaskBranches: false },
+                { read: true, pushCogBranches: false },
                 classification.operation,
               ),
             /not granted/,
@@ -1159,13 +1159,13 @@ test("a request target is a path on the requested host and never names an author
   }
 });
 
-test("a grant has exactly read true and a boolean pushTaskBranches", () => {
-  for (const pushTaskBranches of [true, false]) {
-    const input = { pushTaskBranches, read: true };
+test("a grant has exactly read true and a boolean pushCogBranches", () => {
+  for (const pushCogBranches of [true, false]) {
+    const input = { pushCogBranches, read: true };
     const grant = parseGrant(input);
-    assert.deepEqual(grant, { read: true, pushTaskBranches });
+    assert.deepEqual(grant, { read: true, pushCogBranches });
     assert.notEqual(grant, input);
-    assert.deepEqual(Object.keys(grant), ["read", "pushTaskBranches"]);
+    assert.deepEqual(Object.keys(grant), ["read", "pushCogBranches"]);
   }
 });
 
@@ -1179,10 +1179,10 @@ test("non-objects, arrays, and functions are not grants", () => {
     "read",
     [],
     [true, true],
-    [{ read: true, pushTaskBranches: true }],
-    () => ({ read: true, pushTaskBranches: true }),
-    Object.assign([], { read: true, pushTaskBranches: true }),
-    Object.assign(() => 0, { read: true, pushTaskBranches: true }),
+    [{ read: true, pushCogBranches: true }],
+    () => ({ read: true, pushCogBranches: true }),
+    Object.assign([], { read: true, pushCogBranches: true }),
+    Object.assign(() => 0, { read: true, pushCogBranches: true }),
   ]) {
     assert.equal(parseGrant(input), null);
   }
@@ -1192,21 +1192,21 @@ test("a grant with a missing, extra, or mistyped field is rejected", () => {
   const rejected: unknown[] = [
     {},
     { read: true },
-    { pushTaskBranches: true },
-    { read: true, pushTaskBranches: true, extra: true },
-    { read: true, pushTaskBranches: true, extra: undefined },
-    { read: false, pushTaskBranches: true },
-    { read: "true", pushTaskBranches: true },
-    { read: 1, pushTaskBranches: true },
-    { read: null, pushTaskBranches: true },
-    { read: undefined, pushTaskBranches: true },
-    { read: true, pushTaskBranches: "true" },
-    { read: true, pushTaskBranches: 1 },
-    { read: true, pushTaskBranches: 0 },
-    { read: true, pushTaskBranches: null },
-    { read: true, pushTaskBranches: undefined },
+    { pushCogBranches: true },
+    { read: true, pushCogBranches: true, extra: true },
+    { read: true, pushCogBranches: true, extra: undefined },
+    { read: false, pushCogBranches: true },
+    { read: "true", pushCogBranches: true },
+    { read: 1, pushCogBranches: true },
+    { read: null, pushCogBranches: true },
+    { read: undefined, pushCogBranches: true },
+    { read: true, pushCogBranches: "true" },
+    { read: true, pushCogBranches: 1 },
+    { read: true, pushCogBranches: 0 },
+    { read: true, pushCogBranches: null },
+    { read: true, pushCogBranches: undefined },
     { read: true, push: true },
-    { read: true, pushTaskBranches: [true] },
+    { read: true, pushCogBranches: [true] },
   ];
   for (const input of rejected) {
     assert.equal(parseGrant(input), null);
@@ -1214,7 +1214,7 @@ test("a grant with a missing, extra, or mistyped field is rejected", () => {
 });
 
 test("inherited and special keys do not make a grant", () => {
-  const inherited = { read: true, pushTaskBranches: true };
+  const inherited = { read: true, pushCogBranches: true };
   assert.equal(parseGrant(Object.create(inherited)), null);
   assert.equal(
     parseGrant(Object.assign(Object.create(inherited), { read: true })),
@@ -1226,7 +1226,7 @@ test("inherited and special keys do not make a grant", () => {
   );
   assert.equal(
     parseGrant(
-      Object.assign(Object.create({ pushTaskBranches: true }), {
+      Object.assign(Object.create({ pushCogBranches: true }), {
         read: true,
         extra: 1,
       }),
@@ -1235,21 +1235,21 @@ test("inherited and special keys do not make a grant", () => {
   );
   assert.equal(
     parseGrant(
-      JSON.parse('{"read":true,"pushTaskBranches":true,"__proto__":{}}'),
+      JSON.parse('{"read":true,"pushCogBranches":true,"__proto__":{}}'),
     ),
     null,
   );
   assert.equal(
     parseGrant(
-      JSON.parse('{"read":true,"__proto__":{"pushTaskBranches":true}}'),
+      JSON.parse('{"read":true,"__proto__":{"pushCogBranches":true}}'),
     ),
     null,
   );
 });
 
 test("one key that joins both field names does not make a grant", () => {
-  const joined = "pushTaskBranches,read";
-  const inherited = { read: true, pushTaskBranches: true };
+  const joined = "pushCogBranches,read";
+  const inherited = { read: true, pushCogBranches: true };
   assert.equal(parseGrant({ [joined]: true }), null);
   assert.equal(
     parseGrant(Object.assign(Object.create(inherited), { [joined]: true })),
@@ -1259,7 +1259,7 @@ test("one key that joins both field names does not make a grant", () => {
     parseGrant(
       Object.defineProperties(
         { [joined]: true },
-        { read: { value: true }, pushTaskBranches: { value: true } },
+        { read: { value: true }, pushCogBranches: { value: true } },
       ),
     ),
     null,
@@ -1273,39 +1273,39 @@ test("each field of a grant is read once", () => {
       reads.push("read");
       return true;
     },
-    get pushTaskBranches() {
-      reads.push("pushTaskBranches");
+    get pushCogBranches() {
+      reads.push("pushCogBranches");
       return false;
     },
   };
-  assert.deepEqual(parseGrant(input), { read: true, pushTaskBranches: false });
-  assert.deepEqual(reads, ["read", "pushTaskBranches"]);
+  assert.deepEqual(parseGrant(input), { read: true, pushCogBranches: false });
+  assert.deepEqual(reads, ["read", "pushCogBranches"]);
 });
 
 test("repositories are a plain mapping of valid grants", () => {
-  const grant = { read: true, pushTaskBranches: false };
+  const grant = { read: true, pushCogBranches: false };
   assert.deepEqual(parseGrants({}), {});
   assert.deepEqual(parseGrants(Object.create(null)), {});
   assert.deepEqual(parseGrants({ "Shields/Dotfiles": grant }), {
     "shields/dotfiles": grant,
   });
-  const reordered = { pushTaskBranches: false, read: true };
+  const reordered = { pushCogBranches: false, read: true };
   const parsed = parseGrants({ "shields/dotfiles": reordered });
   assert.notEqual(parsed["shields/dotfiles"], reordered);
   assert.equal(
     JSON.stringify(parsed),
-    '{"shields/dotfiles":{"read":true,"pushTaskBranches":false}}',
+    '{"shields/dotfiles":{"read":true,"pushCogBranches":false}}',
   );
   assert.deepEqual(
     parseGrants(
-      JSON.parse('{"shields/dotfiles":{"read":true,"pushTaskBranches":false}}'),
+      JSON.parse('{"shields/dotfiles":{"read":true,"pushCogBranches":false}}'),
     ),
     { "shields/dotfiles": grant },
   );
   assert.throws(
     () =>
       parseGrants(
-        JSON.parse('{"__proto__":{"read":true,"pushTaskBranches":false}}'),
+        JSON.parse('{"__proto__":{"read":true,"pushCogBranches":false}}'),
       ),
     { name: "PolicyError", message: "repository must be OWNER/REPO" },
   );

@@ -56,7 +56,7 @@ try {
   state.update(
     "lima:work",
     0,
-    { "shields/dotfiles": { read: true, pushTaskBranches: true } },
+    { "shields/dotfiles": { read: true, pushCogBranches: true } },
     "tester",
   );
   const events: string[] = [];

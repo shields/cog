@@ -36,7 +36,7 @@ test("live grants are additive, conflict checked, and tied to immutable VM ident
       state.update(
         "lima:work",
         0,
-        { "shields/dotfiles": { read: true, pushTaskBranches: true } },
+        { "shields/dotfiles": { read: true, pushCogBranches: true } },
         "tester",
       ),
       1,
@@ -47,7 +47,7 @@ test("live grants are additive, conflict checked, and tied to immutable VM ident
         1,
         {
           ...state.grants(instance.id),
-          "shields/library": { read: true, pushTaskBranches: false },
+          "shields/library": { read: true, pushCogBranches: false },
         },
         "tester",
       ),
@@ -55,15 +55,15 @@ test("live grants are additive, conflict checked, and tied to immutable VM ident
     );
     assert.deepEqual(state.grant(instance.id, "SHIELDS/LIBRARY"), {
       read: true,
-      pushTaskBranches: false,
+      pushCogBranches: false,
     });
     assert.throws(
       () => state.update("lima:work", 1, {}, "tester"),
       /policy changed/,
     );
     assert.deepEqual(state.grants(instance.id), {
-      "shields/dotfiles": { read: true, pushTaskBranches: true },
-      "shields/library": { read: true, pushTaskBranches: false },
+      "shields/dotfiles": { read: true, pushCogBranches: true },
+      "shields/library": { read: true, pushCogBranches: false },
     });
     assert.throws(
       () =>
@@ -73,7 +73,7 @@ test("live grants are additive, conflict checked, and tied to immutable VM ident
           {
             "shields/new": "invalid" as unknown as {
               read: true;
-              pushTaskBranches: true;
+              pushCogBranches: true;
             },
           },
           "tester",
@@ -103,8 +103,8 @@ test("a policy that repeats a repository in another case changes nothing", () =>
       path.join(directory, "work.sock"),
       "tester",
     );
-    const read = { read: true, pushTaskBranches: false };
-    const cog = { read: true, pushTaskBranches: true };
+    const read = { read: true, pushCogBranches: false };
+    const cog = { read: true, pushCogBranches: true };
     state.update("lima:work", 0, { "shields/dotfiles": read }, "tester");
     assert.throws(
       () =>
@@ -299,7 +299,7 @@ test("opening a database that lacks the time index adds it and keeps its rows", 
 test("a policy that is not a mapping is rejected and leaves the grants in place", () => {
   withState((state) => {
     const instance = state.register("lima:work", "work.sock", "tester");
-    const read = { read: true, pushTaskBranches: false };
+    const read = { read: true, pushCogBranches: false };
     state.update("lima:work", 0, { "shields/dotfiles": read }, "tester");
     for (const grants of [5, true, "", [], null, undefined]) {
       assert.throws(

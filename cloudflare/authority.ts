@@ -203,8 +203,8 @@ export class CloudAuthority {
         Object.entries(grants).every(
           ([repository, grant]) =>
             instance.grants[repository]?.read === grant.read &&
-            instance.grants[repository].pushTaskBranches ===
-              grant.pushTaskBranches,
+            instance.grants[repository].pushCogBranches ===
+              grant.pushCogBranches,
         )
       ) {
         return instance;

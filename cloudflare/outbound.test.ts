@@ -72,7 +72,7 @@ function authority(events: string[]): OutboundAuthority {
       events.push(`allow:${classification.operation}`);
       const access = authorize(
         classification.repository === "shields/dotfiles"
-          ? { read: true, pushTaskBranches: true }
+          ? { read: true, pushCogBranches: true }
           : null,
         classification.operation,
       );

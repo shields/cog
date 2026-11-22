@@ -197,9 +197,8 @@ named by `COG_PROFILES`, or else `~/.config/cog/profiles.yaml`, and fails when
 either profile is missing; the daemon never reads it, nothing copies it there
 yet, and `cloudflare/admin.ts grant` reads the checkout's own `profiles.yaml`.
 A grant stores a copy of its profile, so editing the profile changes future
-grants only. The profile key that enables pushes is still named
-`pushTaskBranches`, because stored grants carry it. Use these commands on the
-Mac to change a running VM immediately:
+grants only. The profile key that enables pushes is `pushCogBranches`. Use
+these commands on the Mac to change a running VM immediately:
 
 ```
 cog-gateway show lima:NAME
