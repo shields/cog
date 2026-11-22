@@ -16,11 +16,29 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, mock, spyOn, test } from "bun:test";
 import { State } from "./state.ts";
 
 afterEach(() => {
   mock.restore();
+});
+
+test("state waits for locks before changing the journal mode", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-state-"));
+  const exec = spyOn(DatabaseSync.prototype, "exec");
+  try {
+    const state = new State(directory);
+    state.close();
+    const statements = exec.mock.calls.map(([sql]) => sql);
+    const timeout = statements.indexOf("PRAGMA busy_timeout = 5000;");
+    const journal = statements.findIndex((sql) =>
+      sql.includes("PRAGMA journal_mode"),
+    );
+    assert.ok(timeout !== -1 && journal > timeout);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("live grants are additive, conflict checked, and tied to immutable VM identities", () => {

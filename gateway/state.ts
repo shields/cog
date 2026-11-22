@@ -84,9 +84,8 @@ export class State {
     chmodSync(directory, 0o700);
     this.db = new DatabaseSync(path.join(directory, "state.sqlite"));
     chmodSync(path.join(directory, "state.sqlite"), 0o600);
-    this.db.exec(
-      "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
-    );
+    this.db.exec("PRAGMA busy_timeout = 5000;");
+    this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS instances (
         id TEXT PRIMARY KEY,
