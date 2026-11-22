@@ -33,6 +33,15 @@ program as `cog-gateway VERB`, which is the way to try it before installation.
 `cog new` needs `cog-gateway` on `PATH` and a running daemon, so it does not
 work until `install.sh` exists.
 
+`cog/` holds the TypeScript `cog` as it is written. `bun cog/main.ts VERB` in a
+checkout runs `show`, `edit`, `revoke`, `logs`, `authorize` and
+`gateway serve|health|disable` on `gateway/control.ts`, with a bare VM NAME
+where `cog-gateway` takes `lima:NAME`; the other verbs answer that they are not
+implemented yet. Its `help` prints the usage, which exits 2 when there is no
+command or an unknown one. `COG_PROFILES` names a file of grant profiles, and
+the program embeds the checkout's `profiles.yaml` otherwise. Nothing in `bin/`
+or the daemon's launcher calls it yet.
+
 `bin/cog` finds its resources (`lima/dev.yaml`, `guest/`, `tools/stage_tree.sh`)
 from the checkout it lives in, following symlinks, wherever it is run from.
 

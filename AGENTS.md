@@ -26,7 +26,12 @@
   `~/.local/share/cog/main.mjs` with Bun; nothing builds or installs that bundle
   yet (`install.sh` is not written), and `gateway/main.ts` is the same program
   run directly. A TypeScript `cog` that replaces both is being written in
-  `cog/`; `bin/` does not call it yet. Its modules never use a host shell,
+  `cog/`; `bin/` does not call it yet. `cog/main.ts` dispatches `show`, `edit`,
+  `revoke`, `logs`, `authorize` and `gateway serve|health|disable` through
+  `cog/commands/` on `gateway/control.ts`; VMs are bare `NAME` there and
+  `lima:NAME` in the gateway (`gatewayName`), and the other verbs say they are
+  not implemented. Only `gateway serve` sets a umask. Its modules never use a
+  host shell,
   give a child no standard input unless it is meant for it, inherit the
   environment unchanged, read `HOME` from the environment, set no umask, write
   every file with an explicit mode, and use fixed error texts that never quote
@@ -118,7 +123,11 @@ marker. The `cog/UUID/*` branch names come from dotfiles' `wt`.
   and files whose contents a parse error could quote.
   `tests/test_setup_secrets.zsh` uses stubs and runs anywhere.
   `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
-  refresh, live grants, audit and the HTTPS Unix socket. `tests/fake_github.py`
+  refresh, live grants, audit and the HTTPS Unix socket. `cog/*.test.ts` cover
+  the foundation modules (the no-echo prompt runs under a pseudo-terminal and
+  needs `stty`), and `cog/cli.test.ts` runs `cog/main.ts` against a real daemon
+  built into a bundle; `gateway/main.ts` has no test of its own besides the zsh
+  suite. `tests/fake_github.py`
   and `tests/test_github_app_token.py` cover `guest/github_app_token.py`, which
   no `cog` flow uses.
 - No automated test covers what only a running VM shows: the network isolation,
