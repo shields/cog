@@ -519,42 +519,6 @@ since the gateway accepts pushes only to `cog/UUID/*`. `cog base` and
 The dotfiles README states the same contract, and `tests/test_cog_contract.py`
 there checks it from its side.
 
-## Migrating from dotfiles
-
-Before the split, dotfiles held `limavm`, `vm-access` and the Cloudflare agent.
-A base or VM built before the rename carries the old markers and the old
-`~/bin` scripts, so rebuild it with `cog base` and `cog new`; re-provisioning it
-does not rename them. On a Mac that ran the old tools, in this order:
-
-1. With the old agent still installed, run `vm-access disable lima:NAME` for
-   every VM the gateway still registers (its state may name a VM whose Lima
-   directory is gone), `limavm rm NAME` for each VM, and delete cloud VMs with
-   the old `admin.ts`.
-2. Merge the dotfiles branch that reads the new markers into the checkout that
-   `cog base` reads by default and run its `./provision.sh`. A `provision.sh`
-   from before the split would reinstall the old agent.
-3. Remove the old agent and its state. cog starts with a new CA and fresh
-   state; do not copy over the old authorizations or database:
-
-   ```sh
-   launchctl bootout "gui/$(id -u)/com.msrl.dotfiles.vm-access"
-   rm ~/Library/LaunchAgents/com.msrl.dotfiles.vm-access.plist
-   rm -f ~/Library/Logs/com.msrl.dotfiles.vm-access.out \
-         ~/Library/Logs/com.msrl.dotfiles.vm-access.err
-   rm ~/bin/limavm ~/bin/vm-access
-   rm -r ~/.local/share/vm-access ~/.config/vm-access
-   rm -r ~/.local/state/vm-access ~/.config/secrets/vm-access
-   ```
-
-   Authorize repositories again through the device flow and recreate the VMs.
-
-4. Run `./install.sh` in cog, then `cog gateway health`.
-5. `cog base`, then `cog new t1 --repo OWNER/REPO` and the checks above.
-6. Delete the old `dotfiles-base` VM (`limactl unprotect dotfiles-base`, then
-   `limactl delete dotfiles-base`), run `cloudflare/deploy.sh`, then
-   `cog cloud config HTTPS-WORKER-URL` and `cog cloud authorize OWNER/REPO`,
-   and delete the old `dotfiles-agent` Worker.
-
 ## History
 
 The commits before "Move the files to their places in this repository" come
