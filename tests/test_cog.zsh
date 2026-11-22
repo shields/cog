@@ -23,6 +23,10 @@ for var in $(git rev-parse --local-env-vars); do
     unset "$var"
 done
 
+# The caller's COG_CPUS or COG_MEMORY would change what cog passes to limactl;
+# unset -m returns 1 when nothing matches.
+unset -m 'COG_*' || true
+
 HERE="${0:A:h}"
 PYTHON="$(uv run --project "$HERE/.." python -c 'import sys; print(sys.executable)')"
 export PATH="${PYTHON:h}:$PATH"
