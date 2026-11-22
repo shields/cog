@@ -6,9 +6,10 @@
 - **Checks**: `make lint build test`. `COG_FAIL_ON_SKIP=1` makes any skipped
   pytest test fail the run, so a test that needs a tool needs it added to
   `tools/install_ci_tools.sh`, not a skip. Bun and zsh tests have no skip
-  mechanism; keep it that way. The Python tests that need `codex`, `limactl`,
-  `jq` or `python3.13` fail when it is missing, so a Mac needs all four on
-  `PATH` too (`brew install python@3.13` provides the last). `make lint` also
+  mechanism; keep it that way. The Python tests that need `codex`, `limactl`
+  or `jq` fail when it is missing, so a Mac needs all three on `PATH` too. The
+  token tool's Python 3.13 check runs through `uv`, which fetches that
+  interpreter itself. `make lint` also
   needs the `gh actions-lock` extension, which `make actions-lock-install`
   installs.
 - **Formatting**: `make fmt` runs Prettier, Ruff and shfmt; `make lint` checks

@@ -19,8 +19,8 @@
 #
 # It changes the machine it runs on (sudo apt-get, Homebrew, ~/.local), so it
 # refuses to run anywhere but a runner. Every test must run: the tests fail
-# when codex, limactl, jq or python3.13 is missing, and COG_FAIL_ON_SKIP turns
-# any skip into a failure.
+# when codex, limactl or jq is missing, and COG_FAIL_ON_SKIP turns any skip into
+# a failure.
 #
 # Lima is not from Homebrew because its formula pulls in qemu; it is pinned with
 # a checksum and bumped by hand. Everything else floats: the Homebrew formulae
@@ -75,10 +75,9 @@ retry sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install
     libarchive-tools zsh
 
 # Homebrew is on the image but not on PATH. shfmt 3.14 is newer than
-# Ubuntu's, gitleaks must have `gitleaks dir`, and python@3.13 is what
-# tests/test_github_app_token.py parses the token tool under.
+# Ubuntu's, and gitleaks must have `gitleaks dir`.
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
-retry "$brew_prefix/bin/brew" install gitleaks python@3.13 shfmt
+retry "$brew_prefix/bin/brew" install gitleaks shfmt
 retry "$brew_prefix/bin/brew" install --cask codex
 export PATH="$brew_prefix/bin:$local_prefix/bin:$PATH"
 printf '%s\n' "$brew_prefix/bin" "$local_prefix/bin" >>"$GITHUB_PATH"
@@ -93,4 +92,3 @@ tar -xzf "$work_dir/lima.tar.gz" -C "$local_prefix"
 codex --version
 limactl --version
 bsdtar --version
-python3.13 --version

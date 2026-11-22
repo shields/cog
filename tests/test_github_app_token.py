@@ -478,16 +478,26 @@ def test_the_reauthorize_command_names_the_vm_after_lima_(
 
 
 def test_the_tool_parses_as_python_3_13() -> None:
-    """Homebrew's python3 may not be first on a PATH, and Debian's is 3.13."""
+    """The guest runs the tool under Debian's system Python, 3.13."""
     _ = ast.parse(TOOL.read_text(), feature_version=(3, 13))
-    python = shutil.which("python3.13")
-    assert python is not None, "python3.13 is required"
+    uv = shutil.which("uv")
+    assert uv is not None, "uv is required"
     result = subprocess.run(
-        [python, str(TOOL), "--help"],
+        [
+            uv,
+            "run",
+            "--no-project",
+            "--no-config",
+            "--python",
+            "3.13",
+            "python",
+            str(TOOL),
+            "--help",
+        ],
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        timeout=300,
     )
     assert result.returncode == 0, result.stderr
 
