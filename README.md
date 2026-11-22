@@ -120,9 +120,10 @@ If a build fails, the half-built VM stays for inspection with
 disk), registers the clone with the gateway, upgrades the Claude Code and Codex
 casks before any secret is present, installs the gateway CA, relay and
 instructions, grants the repository, and only then installs the secrets with
-`/usr/local/lib/cog/setup-secrets`, which reads each value from stdin. A
-failure, or a hangup, interrupt, quit or terminate signal, after the clone
-disables the registration and deletes the VM.
+`/usr/local/lib/cog/setup-secrets`, which reads each value from stdin. If
+setup fails or is interrupted after a successful clone, `cog` disables its
+registration and deletes the VM. If opening the shell fails after setup, the
+VM stays ready; reconnect with `limactl shell NAME`.
 `COG_CPUS` and `COG_MEMORY` (a whole number of GiB) override the size in
 `lima/dev.yaml` (6 CPUs and 16 GiB), and `COG_BASE` replaces the name
 `cog-base`.

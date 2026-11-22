@@ -85,9 +85,9 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
 No secret may reach an argument list, an environment, a log or a message. The
 Claude token, Codex login and Fireworks key go to `guest/setup-secrets NAME` on
 stdin, and the CA to `setup-github-gateway`'s stdin. `cog new` upgrades the
-agents before it installs any secret, and any failure, or hangup, interrupt,
-quit or terminate signal, after the clone disables the registration and deletes
-the VM. The staged dotfiles tree, its history and `guest/` are scanned with
+agents before it installs any secret. Rollback starts after a successful clone
+and ends before opening the interactive shell. A setup failure or signal in
+that interval disables the registration and deletes the VM. The staged dotfiles tree, its history and `guest/` are scanned with
 gitleaks before anything enters a guest. Every `limactl` call
 reads `/dev/null` unless a pipe or file is meant for it, or it is the final
 shell, so that none swallows what was typed for the shell; `tests/test_cog.zsh`

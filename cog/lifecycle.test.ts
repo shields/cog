@@ -324,6 +324,28 @@ test("new checks and authorizes before the clone and writes all inputs only afte
 
 const noSecrets = ["vm", "--no-repo", "--no-claude-token", "--no-codex-auth"];
 
+test("new does not delete a VM if the name is taken during clone", async () => {
+  const { calls, context } = fixture();
+  context.lima.clone = () => Promise.reject(new Error("name already taken"));
+  await assert.rejects(newVM(noSecrets, context), /name already taken/);
+  assert.deepEqual(calls, [["health"], ["exists", "base"], ["exists", "vm"]]);
+});
+
+test("a shell handoff failure leaves the ready VM and registration intact", async () => {
+  const { calls, context } = fixture();
+  context.lima.enter = () => Promise.reject(new Error("shell unavailable"));
+  await assert.rejects(
+    newVM(
+      ["vm", "--repo=owner/repo", "--no-claude-token", "--no-codex-auth"],
+      context,
+    ),
+    /shell unavailable/,
+  );
+  const methods = new Set(calls.map(([method]) => method));
+  assert.ok(methods.has("grant"));
+  assert.ok(!methods.has("disable") && !methods.has("remove"));
+});
+
 test("new does not ask, authorize or clone when the Codex file fails validation", async () => {
   const { calls, context } = fixture();
   const codex = context.config.codexAuthFile;

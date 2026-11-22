@@ -208,10 +208,13 @@ export async function newVM(
   }
 
   const gatewayVM = gatewayName(name);
+  let ownsClone = false;
   let registered = false;
+  let guestDir: string | undefined;
   signals.install();
   try {
     await lima.clone(base, name, size);
+    ownsClone = true;
     let directory: string;
     try {
       directory = await lima.directory(name);
@@ -276,7 +279,6 @@ export async function newVM(
       probe("10", "https://api.github.com/__cog__/health"),
     );
 
-    let guestDir: string | undefined;
     let cloned = false;
     if (repository !== null) {
       const revision = await gateway.grant(gatewayVM, repository, () =>
@@ -348,8 +350,10 @@ export async function newVM(
     }
     signals.check();
     gateway.close();
-    return await lima.enter(name, guestDir);
   } catch (error) {
+    if (!ownsClone) {
+      throw error;
+    }
     const status = signals.status;
     await signals.cleanup(async () => {
       cleanupNote(`cog: removing ${name} after the failure`);
@@ -374,4 +378,5 @@ export async function newVM(
   } finally {
     signals.uninstall();
   }
+  return lima.enter(name, guestDir);
 }
