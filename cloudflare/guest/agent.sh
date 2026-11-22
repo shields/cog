@@ -50,6 +50,7 @@ mv -f "$managed" "$settings"
 helper=/usr/local/lib/cog/github-gateway-credential
 [[ -x $helper ]] || die "$helper is missing"
 rm -f "$home/.codex/rules/no-push.rules"
-sudo -H -u "$user" git config --global credential.https://github.com.helper "!$helper"
+sudo -H -u "$user" mkdir -p "$home/.config/git"
+sudo -H -u "$user" git config --file "$home/.config/git/config" --replace-all credential.https://github.com.helper "!$helper"
 printf '%s\n' cloudflare >/etc/cog-github-gateway
 chmod 644 /etc/cog-github-gateway

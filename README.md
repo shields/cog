@@ -359,7 +359,13 @@ their sandboxed, prompting behavior.
   `/etc/codex/requirements.toml` (`additional_developer_instructions`). It
   deletes `~/.codex/rules/no-push.rules`, writes the VM ID to
   `/etc/cog-github-gateway`, and installs the CA, the `/etc/hosts` mapping of
-  the GitHub hosts to `127.0.0.1` and the relay unit `cog-github-gateway`. A
+  the GitHub hosts to `127.0.0.1` and the relay unit `cog-github-gateway`. It
+  sets github.com's credential helper with `git config --file
+~/.config/git/config --replace-all`, never `--global`, because dotfiles'
+  chezmoi manages `~/.gitconfig` and would stop at it when the guest is
+  re-provisioned. dotfiles' `provision.sh` leaves github.com's helper alone
+  where `/etc/cog-github-gateway` exists and sets only gist.github.com's.
+  `cloudflare/guest/agent.sh` sets the helper the same way. A
   Cloudflare VM gets neither instruction file, so its agents are not told the
   namespace, and dotfiles' `wt`, which names a branch from the UUID in
   `/etc/cog-github-gateway`, refuses to create a worktree where it holds
