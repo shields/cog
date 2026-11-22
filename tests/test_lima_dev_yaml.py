@@ -201,3 +201,4 @@ def test_the_readiness_probe_checks_the_filter_and_dns(lima_home: Path) -> None:
     assert "getent hosts" in script
     assert "for command in zsh git rsync curl socat jq openssl; do" in script
     assert 'command -v "$command" >/dev/null\n' in script
+    assert "hc --version" in script

@@ -97,7 +97,9 @@ kept as it is, but a URL with a user or password (`ssh://git@gitlab.com/...`
 too), or any origin with a query, a fragment or control characters, fails the
 build; with no origin, the guest has none. The build then:
 
-1. replaces any existing `cog-base`, and starts one from the embedded `lima/dev.yaml`, refusing it if `~/.lima/_config` has added a host mount;
+1. replaces any existing `cog-base` and starts one from the embedded
+   `lima/dev.yaml`, which installs Herdr Core (`hc`) in `/usr/local/bin`.
+   It refuses the VM if `~/.lima/_config` has added a host mount;
 2. copies the dotfiles tree to `~/src/github.com/shields/dotfiles` in the guest;
 3. installs `guest/` into `/usr/local/lib/cog` with `sudo tar -x` and the
    options `--no-same-owner --no-same-permissions`, then sets root ownership and

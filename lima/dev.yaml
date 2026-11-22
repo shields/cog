@@ -65,6 +65,24 @@ provision:
           nftables zsh git rsync curl socat jq openssl ca-certificates
       fi
 
+      if [ ! -x /usr/local/bin/hc ]; then
+        version=0.1.21
+        arch=$(uname -m)
+        case "$arch" in
+          aarch64) sha256=e844a2bfab48a226097679d076bc83042fe57fccef5387ef802e5b24e78b529a ;;
+          x86_64) sha256=78424755c10a40dde38a0bdb55c20ac19706e9ae05ed68fc2acf1fcff0d941c1 ;;
+          *) echo "No Herdr Core build for $arch" >&2; exit 1 ;;
+        esac
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT
+        cd "$work"
+        curl -fsSLo core.tar.gz "https://releases.herdr.dev/core/$version/herdr-core-linux-$arch.tar.gz"
+        printf '%s  core.tar.gz\n' "$sha256" | sha256sum --check
+        tar -xzf core.tar.gz herdr-core
+        install -m 0755 herdr-core /usr/local/bin/herdr-core
+        ln -sf herdr-core /usr/local/bin/hc
+      fi
+
   # Egress filter. nftables.service loads the file before the network comes up,
   # so the rules are in force from the start of every boot, and this script
   # rewrites and reloads them in case the file changed. 192.168.5.2 is the
@@ -109,6 +127,7 @@ probes:
       for command in zsh git rsync curl socat jq openssl; do
         command -v "$command" >/dev/null
       done
+      hc --version
     hint: |
       The firewall script or the package step failed, or the filter blocks the
       DNS server. See /var/log/cloud-init-output.log in the guest.
