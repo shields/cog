@@ -181,6 +181,10 @@ shell)
         mkdir -p "$state/guest"
         tar -xf "$state/calls/$call.stdin" -C "$state/guest"
         ;;
+    'sudo tar -x --no-same-owner --no-same-permissions -C '*)
+        mkdir -p "$state/lib"
+        tar -xf "$state/calls/$call.stdin" -C "$state/lib"
+        ;;
     'env GIT_TERMINAL_PROMPT=0 git clone '*) ;;
     'git '*) git -C "$state/guest" "${@:2}" || exit $? ;;
     esac
@@ -275,6 +279,11 @@ exit 1
 STUB
 cat > "$STUBS/gitleaks" <<'STUB'
 #!/bin/bash
+[[ -z ${LIMA_STUB_STATE:-} ]] || printf '%s\n' "$*" >> "$LIMA_STUB_STATE/gitleaks.log"
+if [[ $1 == dir && -n ${GUEST_SCAN_FAIL:-} && ${@: -1} == */guest ]]; then
+    echo "gitleaks: injected guest scan failure" >&2
+    exit 1
+fi
 if [[ $1 == git && -n ${HISTORY_SCAN_FAIL:-} ]]; then
     echo "gitleaks: injected history scan failure" >&2
     exit 1
@@ -300,25 +309,49 @@ fi
 exec "$(dirname "$0")/stage_tree_real.sh" "$@"
 STUB
 
-CHECKOUT="$TMPBASE/checkout"
-mkdir -p "$CHECKOUT/lima" "$CHECKOUT/guest" "$CHECKOUT/tools"
-git -C "$CHECKOUT" init -q -b main
-: > "$CHECKOUT/lima/dev.yaml"
-printf '#!/bin/bash\n' > "$CHECKOUT/provision.sh"
-printf '#!/bin/bash\n' > "$CHECKOUT/guest/throwaway.sh"
-printf '#!/bin/bash\n' > "$CHECKOUT/guest/reset-identity.sh"
-cp "$TMPBASE/stage_tree.sh" "$CHECKOUT/tools/stage_tree.sh"
-cp "$HERE/../tools/stage_tree.sh" "$CHECKOUT/tools/stage_tree_real.sh"
-chmod +x "$CHECKOUT/provision.sh" "$CHECKOUT/tools/stage_tree.sh"
-git -C "$CHECKOUT" add .
-git -C "$CHECKOUT" -c user.name=Test -c user.email=test@example.com commit -qm initial
-git -C "$CHECKOUT" tag initial
-git -C "$CHECKOUT" branch other
-printf 'tracked\n' > "$CHECKOUT/tracked.txt"
-printf 'obsolete\n' > "$CHECKOUT/obsolete.txt"
-git -C "$CHECKOUT" add .
-git -C "$CHECKOUT" -c user.name=Test -c user.email=test@example.com commit -qm second
-git -C "$CHECKOUT" remote add origin git@github.com:shields/dotfiles.git
+# The cog checkout: cog's own resources, with the real guest scripts and the
+# real staging script behind a stub that records its arguments.
+COGTREE="$TMPBASE/cog"
+mkdir -p "$COGTREE/bin" "$COGTREE/lima" "$COGTREE/tools"
+cp "$COG" "$COGTREE/bin/cog"
+cp -R "$HERE/../guest" "$COGTREE/guest"
+rm -rf "$COGTREE/guest/__pycache__"
+: > "$COGTREE/lima/dev.yaml"
+cp "$TMPBASE/stage_tree.sh" "$COGTREE/tools/stage_tree.sh"
+cp "$HERE/../tools/stage_tree.sh" "$COGTREE/tools/stage_tree_real.sh"
+chmod +x "$COGTREE/tools/stage_tree.sh"
+COGBIN="$COGTREE/bin/cog"
+GUEST_FILES="$(cd "$COGTREE/guest" && find . -type f | sort)"
+
+# The dotfiles checkout: each reader of a marker names it.
+MARKER_READERS=(
+    .zshrc:/etc/cog-throwaway
+    .zshrc:/etc/cog-github-gateway
+    .zshenv:/etc/cog-github-gateway
+    .zsh.d/wt.zsh:/etc/cog-github-gateway
+    .codex/hooks/git_guard.py:/etc/cog-github-gateway
+    tools/configure_codex.py:/etc/cog-throwaway
+    provision.sh:/etc/cog-github-gateway
+)
+DOTFILES="$TMPBASE/dotfiles"
+mkdir -p "$DOTFILES/.claude" "$DOTFILES/.codex/hooks" "$DOTFILES/.zsh.d" "$DOTFILES/tools"
+git -C "$DOTFILES" init -q -b main
+printf '#!/bin/bash\n' > "$DOTFILES/provision.sh"
+printf '{}\n' > "$DOTFILES/.claude/settings.json"
+for entry in $MARKER_READERS; do
+    print -r -- "# reads ${entry#*:}" >> "$DOTFILES/${entry%%:*}"
+done
+chmod +x "$DOTFILES/provision.sh"
+git -C "$DOTFILES" add .
+git -C "$DOTFILES" -c user.name=Test -c user.email=test@example.com commit -qm initial
+git -C "$DOTFILES" tag initial
+git -C "$DOTFILES" branch other
+printf 'tracked\n' > "$DOTFILES/tracked.txt"
+printf 'obsolete\n' > "$DOTFILES/obsolete.txt"
+git -C "$DOTFILES" add .
+git -C "$DOTFILES" -c user.name=Test -c user.email=test@example.com commit -qm second
+git -C "$DOTFILES" remote add origin git@github.com:shields/dotfiles.git
+mkdir -p "$TMPBASE/elsewhere"
 
 GUEST_DIR=/home/guest/src/github.com/shields/dotfiles
 OTHER_DIR=/home/guest/src/github.com/shields/other
@@ -329,7 +362,7 @@ FAKE_FIREWORKS='fw_FAKEfireworksKey0123'
 CODEX_JSON=$'{\n  "OPENAI_API_KEY": null,\n  "tokens": {\n    "access_token": "'"$FAKE_CODEX"$'",\n    "refresh_token": "FAKE-codex-refresh-9d1a"\n  }\n}\n'
 # What the fake GitHub hands out, and the device code it expects back.
 GITHUB_SECRETS=(-e ghu_fake-access -e ghr_fake-refresh -e fake-device-code)
-SETUP='shell t1 sh -c exec "$HOME/bin/setup-secrets" "$1" _'
+GUEST_LIB=/usr/local/lib/cog
 
 CASE_N=0
 EXTRA_ENV=()
@@ -355,6 +388,8 @@ new_case() {
     FAKE_URL=
     RUN_PATH=
     RUN_STDIN=
+    RUN_COG=
+    RUN_CWD=
     EXTRA_ENV=(COG_PROMPT_INPUT="$STATE/prompt")
 }
 
@@ -405,15 +440,26 @@ no_pbcopy_path() {
 UNREACHABLE_GITHUB=http://127.0.0.1:9
 
 # run_cog ARGS...: sets OUT (stdout and stderr) and RC. RUN_PATH replaces
-# the stubbed PATH for one case, and RUN_STDIN names a file to give cog on
-# stdin instead of nothing.
+# the stubbed PATH for one case, RUN_STDIN names a file to give cog on stdin
+# instead of nothing, RUN_COG replaces the script that runs, and RUN_CWD is the
+# current directory, the dotfiles checkout unless a case says otherwise (new
+# reads its repository from there).
 run_cog() {
     RC=0
-    OUT="$(cd "$CHECKOUT" && env PATH="${RUN_PATH:-$STUBS:$PATH}" HOME="$HOME_DIR" USER=shields \
+    OUT="$(cd "${RUN_CWD:-$DOTFILES}" && env PATH="${RUN_PATH:-$STUBS:$PATH}" HOME="$HOME_DIR" USER=shields \
         LIMA_STUB_STATE="$STATE" STAGE_ARGS_LOG="$STAGE_ARGS_LOG" COG_BASE=test-base \
         REAL_CURL="$REAL_CURL" REAL_GIT="$REAL_GIT" REAL_GITLEAKS="$REAL_GITLEAKS" \
         NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 COG_GITHUB_WEB_URL="$UNREACHABLE_GITHUB" \
-        "${EXTRA_ENV[@]}" /bin/bash "$COG" "$@" 2>&1 <"${RUN_STDIN:-/dev/null}")" || RC=$?
+        "${EXTRA_ENV[@]}" /bin/bash "${RUN_COG:-$COGBIN}" "$@" 2>&1 <"${RUN_STDIN:-/dev/null}")" || RC=$?
+}
+
+# run_base ARGS...: cog base from a directory that is not a checkout, with the
+# dotfiles checkout named, so that nothing is inferred from where it runs.
+run_base() {
+    local cwd=$RUN_CWD
+    RUN_CWD="$TMPBASE/elsewhere"
+    run_cog base --dotfiles "$DOTFILES" "$@"
+    RUN_CWD=$cwd
 }
 
 # stdin_marker: a line that cog's own stdin holds for the case, so that a
@@ -442,7 +488,7 @@ assert_only_the_shell_reads_stdin() {
 }
 
 limactl_log() {
-    sed "s|$CHECKOUT|CHECKOUT|g; s|$TMPBASE|TMP|g" "$STATE/limactl.log"
+    sed "s|$COGTREE|COG|g; s|$DOTFILES|DOTFILES|g; s|$TMPBASE|TMP|g" "$STATE/limactl.log"
 }
 
 stdin_of() {
@@ -517,7 +563,7 @@ assert_contains "help describes the Mac gateway" "Credentials" "$OUT"
 run_cog
 assert_eq "no command fails" 2 "$RC"
 RC=0
-OUT="$(cd "$CHECKOUT" && env -u HOME PATH="$STUBS:$PATH" LIMA_STUB_STATE="$STATE" COG_BASE=test-base /bin/bash "$COG" help 2>&1)" || RC=$?
+OUT="$(cd "$DOTFILES" && env -u HOME PATH="$STUBS:$PATH" LIMA_STUB_STATE="$STATE" COG_BASE=test-base /bin/bash "$COG" help 2>&1)" || RC=$?
 assert_eq "help without HOME fails" 1 "$RC"
 assert_contains "help without HOME says so" "cog: HOME is not set" "$OUT"
 run_cog frobnicate
@@ -530,79 +576,83 @@ assert_eq "list is limactl list" "list" "$(limactl_log)"
 
 # --- 3. base on a fresh machine ---
 new_case
-run_cog base none
+run_base none
 assert_eq "base succeeds" 0 "$RC"
 assert_eq "base call order" "list -q test-base
-start --tty=false --name=test-base CHECKOUT/lima/dev.yaml
+start --tty=false --name=test-base COG/lima/dev.yaml
 list --format {{len .Config.Mounts}} test-base
 shell test-base sh -c printf %s \"\$HOME\"
 shell test-base sh -c set -eu; rm -rf \"\$1\"; mkdir -p \"\$1\"; tar -xf - --no-same-owner -C \"\$1\" _ $GUEST_DIR
+shell test-base sudo install -d -m 755 -o root -g root $GUEST_LIB
+shell test-base sudo tar -x --no-same-owner --no-same-permissions -C $GUEST_LIB
+shell test-base sudo chown -R root:root $GUEST_LIB
+shell test-base sudo chmod -R go-w $GUEST_LIB
 shell --workdir $GUEST_DIR test-base ./provision.sh none
 shell --workdir $GUEST_DIR test-base git reset --mixed --quiet HEAD
-shell test-base sudo $GUEST_DIR/guest/throwaway.sh --claude-settings $GUEST_DIR/.claude/settings.json --no-github-timer
+shell test-base sudo $GUEST_LIB/throwaway.sh --claude-settings $GUEST_DIR/.claude/settings.json --no-github-timer
 shell --workdir $GUEST_DIR test-base env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin uv run --no-dev python tools/configure_codex.py /home/guest/.codex/config.toml
 shell test-base sudo truncate -s 0 /etc/machine-id
-shell test-base $GUEST_DIR/guest/reset-identity.sh
+shell test-base $GUEST_LIB/reset-identity.sh
 stop --tty=false test-base
 edit --tty=false test-base --shell /usr/bin/zsh
 protect test-base" "$(limactl_log)"
-assert_eq "base stages into a directory outside the checkout" 1 \
-    "$([[ "$(<"$STAGE_ARGS_LOG")" == "$TMPDIR"/cog.*/tree ]] && echo 1 || echo 0)"
+assert_eq "base stages the dotfiles checkout into a directory outside it" 1 \
+    "$([[ "$(<"$STAGE_ARGS_LOG")" == "--source"$'\n'"$DOTFILES"$'\n'"$TMPDIR"/cog.*/tree ]] && echo 1 || echo 0)"
 assert_eq "base streams the staged tree as a tar archive" "./provision.sh" \
     "$(tar -tf "$STATE/calls/5.stdin" | grep -x './provision.sh')"
 assert_eq "base removes its staging directory" 0 "$(staging_dirs_left)"
 assert_eq "base leaves the VM protected" 1 "$([[ -e "$STATE/protected-test-base" ]] && echo 1 || echo 0)"
 assert_contains "base says what to do next" "cog new" "$OUT"
-assert_eq "base preserves the commit history" "$(git -C "$CHECKOUT" log --format=%H)" \
+assert_eq "base preserves the commit history" "$(git -C "$DOTFILES" log --format=%H)" \
     "$(git -C "$STATE/guest" log --format=%H 2>/dev/null || true)"
 assert_eq "base preserves the branch" main "$(git -C "$STATE/guest" branch --show-current)"
 assert_eq "base preserves tags" initial "$(git -C "$STATE/guest" tag)"
-assert_eq "base copies other branches" "$(git -C "$CHECKOUT" rev-parse other)" \
+assert_eq "base copies other branches" "$(git -C "$DOTFILES" rev-parse other)" \
     "$(git -C "$STATE/guest" rev-parse refs/remotes/origin/other)"
 assert_eq "base leaves a clean checkout clean" "" "$(git -C "$STATE/guest" status --porcelain)"
 assert_eq "base uses HTTPS for the guest's GitHub origin" https://github.com/shields/dotfiles.git \
     "$(git -C "$STATE/guest" remote get-url origin 2>/dev/null || true)"
 
 new_case
-printf 'edited\n' > "$CHECKOUT/tracked.txt"
-printf 'untracked\n' > "$CHECKOUT/new.txt"
-rm "$CHECKOUT/obsolete.txt"
-run_cog base none
+printf 'edited\n' > "$DOTFILES/tracked.txt"
+printf 'untracked\n' > "$DOTFILES/new.txt"
+rm "$DOTFILES/obsolete.txt"
+run_base none
 assert_eq "base with local changes succeeds" 0 "$RC"
 assert_eq "base keeps local edits" edited "$(<"$STATE/guest/tracked.txt")"
 assert_eq "base keeps untracked files" untracked "$(<"$STATE/guest/new.txt")"
 assert_eq "base reports only the local changes" " D obsolete.txt
  M tracked.txt
 ?? new.txt" "$(git -C "$STATE/guest" status --porcelain)"
-git -C "$CHECKOUT" checkout -- tracked.txt obsolete.txt
-rm "$CHECKOUT/new.txt"
+git -C "$DOTFILES" checkout -- tracked.txt obsolete.txt
+rm "$DOTFILES/new.txt"
 
 new_case
-git -C "$CHECKOUT" checkout -q --detach
-run_cog base none
+git -C "$DOTFILES" checkout -q --detach
+run_base none
 assert_eq "base with a detached HEAD succeeds" 0 "$RC"
 assert_eq "base preserves a detached HEAD" "" "$(git -C "$STATE/guest" branch --show-current)"
-assert_eq "base preserves the detached commit" "$(git -C "$CHECKOUT" rev-parse HEAD)" \
+assert_eq "base preserves the detached commit" "$(git -C "$DOTFILES" rev-parse HEAD)" \
     "$(git -C "$STATE/guest" rev-parse HEAD)"
-git -C "$CHECKOUT" checkout -q main
+git -C "$DOTFILES" checkout -q main
 
 new_case
-git -C "$CHECKOUT" worktree add -q -b worktree "$TMPBASE/worktree"
-MAIN_CHECKOUT=$CHECKOUT
-CHECKOUT="$TMPBASE/worktree"
-printf 'worktree\n' > "$CHECKOUT/tracked.txt"
-run_cog base none
+git -C "$DOTFILES" worktree add -q -b worktree "$TMPBASE/worktree"
+MAIN_DOTFILES=$DOTFILES
+DOTFILES="$TMPBASE/worktree"
+printf 'worktree\n' > "$DOTFILES/tracked.txt"
+run_base none
 assert_eq "base from a linked worktree succeeds" 0 "$RC"
 assert_eq "base preserves the worktree branch" worktree "$(git -C "$STATE/guest" branch --show-current)"
 assert_eq "base preserves the worktree's changes" worktree "$(<"$STATE/guest/tracked.txt")"
 assert_eq "the guest has an independent Git directory" yes "$([[ -d "$STATE/guest/.git" ]] && echo yes || echo no)"
 assert_eq "the guest has no host object dependency" no "$([[ -e "$STATE/guest/.git/objects/info/alternates" ]] && echo yes || echo no)"
-CHECKOUT=$MAIN_CHECKOUT
+DOTFILES=$MAIN_DOTFILES
 
 for origin in https://github.com/shields/dotfiles.git ssh://git@github.com/shields/dotfiles.git; do
     new_case
-    git -C "$CHECKOUT" remote set-url origin "$origin"
-    run_cog base none
+    git -C "$DOTFILES" remote set-url origin "$origin"
+    run_base none
     assert_eq "base accepts a credential-free origin" 0 "$RC"
     assert_eq "base configures the HTTPS origin" https://github.com/shields/dotfiles.git \
         "$(git -C "$STATE/guest" remote get-url origin)"
@@ -617,8 +667,8 @@ for origin in \
     "https://github.com/shields/dotfiles.git?token=$origin_marker" \
     "https://github.com/shields/dotfiles.git#$origin_marker"; do
     new_case test-base
-    git -C "$CHECKOUT" remote set-url origin "$origin"
-    run_cog base none
+    git -C "$DOTFILES" remote set-url origin "$origin"
+    run_base none
     assert_eq "base rejects an origin that can carry credentials" 1 "$RC"
     assert_contains "base explains the origin rejection" "origin must not contain" "$OUT"
     assert_eq "a rejected origin touches no VM" "" "$(limactl_log)"
@@ -627,15 +677,15 @@ for origin in \
     assert_eq "origin credentials are not printed" no "$([[ $OUT == *$origin_marker* ]] && echo yes || echo no)"
     assert_eq "a rejected origin leaves no staging directory" 0 "$(staging_dirs_left)"
 done
-git -C "$CHECKOUT" remote set-url origin git@github.com:shields/dotfiles.git
+git -C "$DOTFILES" remote set-url origin git@github.com:shields/dotfiles.git
 
 new_history_case() {
     new_case test-base
-    CHECKOUT="$TMPBASE/history-$CASE_N"
-    git clone -q --no-local "$MAIN_CHECKOUT" "$CHECKOUT"
-    git -C "$CHECKOUT" config user.name Test
-    git -C "$CHECKOUT" config user.email test@example.com
-    git -C "$CHECKOUT" remote set-url origin git@github.com:shields/dotfiles.git
+    DOTFILES="$TMPBASE/history-$CASE_N"
+    git clone -q --no-local "$MAIN_DOTFILES" "$DOTFILES"
+    git -C "$DOTFILES" config user.name Test
+    git -C "$DOTFILES" config user.email test@example.com
+    git -C "$DOTFILES" remote set-url origin git@github.com:shields/dotfiles.git
     cat > "$STATE/gitleaks.toml" <<'EOF'
 [[rules]]
 id = "history-marker"
@@ -656,68 +706,68 @@ assert_history_rejected() {
 }
 
 new_history_case
-git -C "$CHECKOUT" checkout -qb merge-side
-printf 'side\n' > "$CHECKOUT/side.txt"
-git -C "$CHECKOUT" add side.txt
-git -C "$CHECKOUT" commit -qm side
-git -C "$CHECKOUT" checkout -q main
-printf 'main\n' > "$CHECKOUT/main.txt"
-git -C "$CHECKOUT" add main.txt
-git -C "$CHECKOUT" commit -qm main
-git -C "$CHECKOUT" merge --no-ff --no-commit merge-side >/dev/null 2>&1
-printf 'COG_HISTORY_SENTINEL\n' > "$CHECKOUT/merge-only.txt"
-git -C "$CHECKOUT" add merge-only.txt
-git -C "$CHECKOUT" commit -qm merge
-git -C "$CHECKOUT" rm -q merge-only.txt
-git -C "$CHECKOUT" commit -qm remove
-run_cog base none
+git -C "$DOTFILES" checkout -qb merge-side
+printf 'side\n' > "$DOTFILES/side.txt"
+git -C "$DOTFILES" add side.txt
+git -C "$DOTFILES" commit -qm side
+git -C "$DOTFILES" checkout -q main
+printf 'main\n' > "$DOTFILES/main.txt"
+git -C "$DOTFILES" add main.txt
+git -C "$DOTFILES" commit -qm main
+git -C "$DOTFILES" merge --no-ff --no-commit merge-side >/dev/null 2>&1
+printf 'COG_HISTORY_SENTINEL\n' > "$DOTFILES/merge-only.txt"
+git -C "$DOTFILES" add merge-only.txt
+git -C "$DOTFILES" commit -qm merge
+git -C "$DOTFILES" rm -q merge-only.txt
+git -C "$DOTFILES" commit -qm remove
+run_base none
 assert_history_rejected "a secret introduced only by a merge and then removed" merge-only.txt
-CHECKOUT=$MAIN_CHECKOUT
+DOTFILES=$MAIN_DOTFILES
 
 new_history_case
-git -C "$CHECKOUT" checkout -qb unmerged
-printf 'COG_HISTORY_SENTINEL\n' > "$CHECKOUT/unmerged-only.txt"
-git -C "$CHECKOUT" add unmerged-only.txt
-git -C "$CHECKOUT" commit -qm unmerged
-git -C "$CHECKOUT" checkout -q main
-git -C "$CHECKOUT" remote remove origin
-run_cog base none
+git -C "$DOTFILES" checkout -qb unmerged
+printf 'COG_HISTORY_SENTINEL\n' > "$DOTFILES/unmerged-only.txt"
+git -C "$DOTFILES" add unmerged-only.txt
+git -C "$DOTFILES" commit -qm unmerged
+git -C "$DOTFILES" checkout -q main
+git -C "$DOTFILES" remote remove origin
+run_base none
 assert_history_rejected "a secret on an unmerged branch with no origin" unmerged-only.txt
-CHECKOUT=$MAIN_CHECKOUT
+DOTFILES=$MAIN_DOTFILES
 
 new_case
-git -C "$CHECKOUT" remote remove origin
-run_cog base none
+git -C "$DOTFILES" remote remove origin
+run_base none
 assert_eq "base accepts a safe repository without an origin" 0 "$RC"
 assert_eq "a source without an origin leaves no host remote in the guest" "" "$(git -C "$STATE/guest" remote)"
-assert_eq "base without an origin preserves history" "$(git -C "$CHECKOUT" log --format=%H)" \
+assert_eq "base without an origin preserves history" "$(git -C "$DOTFILES" log --format=%H)" \
     "$(git -C "$STATE/guest" log --format=%H)"
-git -C "$CHECKOUT" remote add origin git@github.com:shields/dotfiles.git
+git -C "$DOTFILES" remote add origin git@github.com:shields/dotfiles.git
 
 # --- 4. base passes modules and sizes through ---
 new_case
-run_cog base dev data
+run_base dev data
 assert_contains "base passes the modules" "./provision.sh dev data" "$(limactl_log)"
 assert_eq "base without a size passes none" 0 "$(count_in_log '--cpus')"
 new_case
 EXTRA_ENV+=(COG_CPUS=4 COG_MEMORY=8)
-run_cog base none
+run_base none
 assert_contains "base passes the size to start" \
-    "start --tty=false --name=test-base --cpus 4 --memory 8 CHECKOUT/lima/dev.yaml" "$(limactl_log)"
+    "start --tty=false --name=test-base --cpus 4 --memory 8 COG/lima/dev.yaml" "$(limactl_log)"
 new_case
 EXTRA_ENV+=(COG_CPUS=many)
-run_cog base none
+run_base none
 assert_eq "a bad COG_CPUS fails" 1 "$RC"
 assert_eq "a bad COG_CPUS touches no VM" "" "$(limactl_log)"
 new_case
 EXTRA_ENV+=(COG_MEMORY=8GiB)
-run_cog base none
+run_base none
 assert_eq "a bad COG_MEMORY fails" 1 "$RC"
 
 # --- 5. base replaces an existing protected base ---
 new_case test-base other
 : > "$STATE/protected-test-base"
-run_cog base none
+run_base none
 assert_eq "base over a protected base succeeds" 0 "$RC"
 assert_eq "base unprotects before deleting" "list -q test-base
 list --format {{.Protected}} test-base
@@ -725,33 +775,219 @@ unprotect test-base
 delete --tty=false --force test-base" "$(limactl_log | sed -n 1,4p)"
 assert_eq "base leaves other VMs alone" 1 "$(grep -cx other "$STATE/instances")"
 
-# --- 6. base outside a dotfiles checkout ---
+# --- 6. the dotfiles checkout comes from --dotfiles or the default, never from
+# the current directory ---
 new_case
-RC=0
-OUT="$(cd "$TMPBASE" && env PATH="$STUBS:$PATH" HOME="$HOME_DIR" LIMA_STUB_STATE="$STATE" \
-    REAL_GIT="$REAL_GIT" COG_BASE=test-base /bin/bash "$COG" base 2>&1 </dev/null)" || RC=$?
-assert_eq "base outside a repository fails" 1 "$RC"
-assert_contains "base outside a repository says so" "inside a dotfiles checkout" "$OUT"
-mkdir "$TMPBASE/other-repo"
-git -C "$TMPBASE/other-repo" init -q
-RC=0
-OUT="$(cd "$TMPBASE/other-repo" && env PATH="$STUBS:$PATH" HOME="$HOME_DIR" LIMA_STUB_STATE="$STATE" \
-    REAL_GIT="$REAL_GIT" COG_BASE=test-base /bin/bash "$COG" base 2>&1 </dev/null)" || RC=$?
-assert_eq "base in another repository fails" 1 "$RC"
-assert_contains "base in another repository says so" "is not a dotfiles checkout" "$OUT"
-assert_eq "neither touched limactl" "" "$(limactl_log)"
+run_cog base none
+assert_eq "base run inside a dotfiles checkout, with no default one, fails" 1 "$RC"
+assert_contains "base without a dotfiles checkout says where to pass one" "does not exist; pass --dotfiles DIR" "$OUT"
+assert_eq "base without a dotfiles checkout touches no VM" "" "$(limactl_log)"
+assert_eq "base without a dotfiles checkout stages nothing" 0 "$(staging_dirs_left)"
+
+new_case
+mkdir -p "$HOME_DIR/src/github.com/shields"
+ln -s "$DOTFILES" "$HOME_DIR/src/github.com/shields/dotfiles"
+RUN_CWD="$TMPBASE/elsewhere"
+run_cog base none
+assert_eq "base uses the default dotfiles checkout" 0 "$RC"
+assert_contains "base names the default checkout and its commit" \
+    "cog: building test-base from the dotfiles checkout $DOTFILES at $(git -C "$DOTFILES" rev-parse HEAD)" "$OUT"
+assert_eq "base stages the default checkout" "--source"$'\n'"$DOTFILES" "$(head -2 "$STAGE_ARGS_LOG")"
+
+new_case
+RUN_CWD="$TMPBASE/elsewhere"
+ln -sfn "$DOTFILES" "$TMPBASE/link-to-dotfiles"
+run_cog base --dotfiles="$TMPBASE/link-to-dotfiles" none
+assert_eq "base accepts --dotfiles=DIR" 0 "$RC"
+assert_contains "base reports the canonical path of a symlinked checkout" \
+    "from the dotfiles checkout $DOTFILES at " "$OUT"
+assert_eq "base stages the canonical path" "--source"$'\n'"$DOTFILES" "$(head -2 "$STAGE_ARGS_LOG")"
+
+new_case test-base
+run_base none
+assert_eq "base names the commit it builds from" 1 \
+    "$([[ $OUT == *"cog: building test-base from the dotfiles checkout $DOTFILES at "*"$(git -C "$DOTFILES" rev-parse HEAD)"* ]] && echo 1 || echo 0)"
+
+# A decoy in the current directory has a lima template, guest scripts and a
+# staging script of its own; none of them may be used.
+new_case
+mkdir -p "$TMPBASE/hostile/lima" "$TMPBASE/hostile/guest" "$TMPBASE/hostile/tools"
+: > "$TMPBASE/hostile/lima/dev.yaml"
+printf '#!/bin/bash\ntouch "%s"\n' "$TMPBASE/hostile-ran" > "$TMPBASE/hostile/tools/stage_tree.sh"
+chmod +x "$TMPBASE/hostile/tools/stage_tree.sh"
+RUN_CWD="$TMPBASE/hostile"
+run_cog base --dotfiles "$DOTFILES" none
+assert_eq "base run beside a decoy succeeds" 0 "$RC"
+assert_contains "base starts the cog checkout's template, not the current directory's" \
+    "start --tty=false --name=test-base COG/lima/dev.yaml" "$(limactl_log)"
+assert_eq "base does not run the current directory's staging script" no "$([[ -e $TMPBASE/hostile-ran ]] && echo yes || echo no)"
+
+# cog finds its resources from the checkout it lives in, however it is called.
+new_case
+mkdir -p "$TMPBASE/linkbin" "$TMPBASE/linkbin-relative"
+ln -sfn "$COGBIN" "$TMPBASE/linkbin/cog"
+ln -sfn ../cog/bin/cog "$TMPBASE/linkbin-relative/cog"
+for RUN_COG in "$TMPBASE/linkbin/cog" "$TMPBASE/linkbin-relative/cog"; do
+    : > "$STATE/limactl.log"
+    run_base none
+    assert_eq "base through a link to cog succeeds" 0 "$RC"
+    assert_contains "base through a link uses the linked checkout's template" \
+        "start --tty=false --name=test-base COG/lima/dev.yaml" "$(limactl_log)"
+done
+RUN_COG=
+
+new_case
+cp -R "$COGTREE" "$TMPBASE/cog-incomplete"
+rm -rf "$TMPBASE/cog-incomplete/guest"
+RUN_COG="$TMPBASE/cog-incomplete/bin/cog"
+run_base none
+assert_eq "a cog checkout without guest scripts fails base" 1 "$RC"
+assert_contains "it says the checkout is incomplete" "is not a cog checkout" "$OUT"
+assert_eq "it touches no VM" "" "$(limactl_log)"
+RUN_COG=
+
+new_case
+run_cog base --dotfiles
+assert_eq "--dotfiles without a directory fails" 1 "$RC"
+assert_contains "--dotfiles without a directory says so" "--dotfiles needs a directory" "$OUT"
+run_cog base --dotfiles=
+assert_eq "an empty --dotfiles= fails" 1 "$RC"
+run_cog base --dotfiles "$DOTFILES" --dotfiles "$DOTFILES"
+assert_eq "--dotfiles twice fails" 1 "$RC"
+assert_contains "--dotfiles twice says so" "given twice" "$OUT"
+run_cog base --bogus
+assert_eq "an unknown base option fails" 1 "$RC"
+assert_contains "an unknown base option is named" "unknown option --bogus" "$OUT"
+assert_eq "bad base options touch no VM" "" "$(limactl_log)"
+
+# dotfiles_copy NAME [FILE...]: a copy of the dotfiles checkout, with FILE
+# paths removed from it.
+dotfiles_copy() {
+    local name=$1 file
+    shift
+    cp -R "$DOTFILES" "$TMPBASE/$name"
+    for file in "$@"; do
+        rm -rf "$TMPBASE/$name/$file"
+    done
+}
+
+refuse_dotfiles() {
+    local desc=$1 dir=$2 text=$3
+    new_case test-base
+    run_cog base --dotfiles "$dir" none
+    assert_eq "$desc fails base" 1 "$RC"
+    assert_contains "$desc says why" "$text" "$OUT"
+    assert_eq "$desc touches no VM" "" "$(limactl_log)"
+    assert_eq "$desc leaves the existing base" 1 "$(grep -cx test-base "$STATE/instances")"
+    assert_eq "$desc leaves no staging directory" 0 "$(staging_dirs_left)"
+}
+
+mkdir "$TMPBASE/not-a-repository"
+refuse_dotfiles "a missing directory" "$TMPBASE/missing" "does not exist"
+refuse_dotfiles "a directory that is not a git checkout" "$TMPBASE/not-a-repository" "is not a git checkout"
+refuse_dotfiles "a subdirectory of a checkout" "$DOTFILES/tools" "is not the top level"
+dotfiles_copy no-provision provision.sh
+refuse_dotfiles "a checkout without provision.sh" "$TMPBASE/no-provision" "is not a dotfiles checkout"
+dotfiles_copy not-executable
+chmod -x "$TMPBASE/not-executable/provision.sh"
+refuse_dotfiles "a checkout whose provision.sh is not executable" "$TMPBASE/not-executable" "is not a dotfiles checkout"
+dotfiles_copy no-settings .claude/settings.json
+refuse_dotfiles "a checkout without .claude/settings.json" "$TMPBASE/no-settings" "is not a dotfiles checkout"
+dotfiles_copy no-codex tools/configure_codex.py
+refuse_dotfiles "a checkout without tools/configure_codex.py" "$TMPBASE/no-codex" "is not a dotfiles checkout"
+
+# A checkout whose readers name other markers is refused; the check is on the
+# staged tree, and it comes before anything is created or deleted.
+for entry in $MARKER_READERS; do
+    reader=${entry%%:*}
+    marker=${entry#*:}
+    dotfiles_copy "stale-${reader//\//-}-${marker:t}"
+    MARKER=$marker perl -pi -e 's/\Q$ENV{MARKER}\E/\/etc\/stale-marker/g' "$TMPBASE/stale-${reader//\//-}-${marker:t}/$reader"
+    refuse_dotfiles "$reader without $marker" "$TMPBASE/stale-${reader//\//-}-${marker:t}" \
+        "$reader in the dotfiles checkout does not name $marker"
+    assert_eq "$reader without $marker is reported after staging" 1 "$([[ -s $STAGE_ARGS_LOG ]] && echo 1 || echo 0)"
+done
+dotfiles_copy no-reader .zsh.d/wt.zsh
+refuse_dotfiles "a missing marker reader" "$TMPBASE/no-reader" ".zsh.d/wt.zsh in the dotfiles checkout does not name"
+dotfiles_copy pre-split
+for entry in $MARKER_READERS; do
+    MARKER=${entry#*:} perl -pi -e 's/\Q$ENV{MARKER}\E/\/etc\/dotfiles-throwaway/g' "$TMPBASE/pre-split/${entry%%:*}"
+done
+refuse_dotfiles "a checkout from before the split" "$TMPBASE/pre-split" "reads other markers"
+
+# --- 6b. guest scripts install root-owned in /usr/local/lib/cog ---
+new_case
+run_base none
+assert_eq "base sends the guest scripts as a tar archive" "$GUEST_FILES" \
+    "$(tar -tf "$STATE/calls/7.stdin" | grep -v '/$' | sort)"
+assert_eq "base unpacks the guest scripts with sudo tar in the guest" "$GUEST_FILES" \
+    "$(cd "$STATE/lib" && find . -type f | sort)"
+assert_eq "the unpacking call is sudo tar with the owner and permission flags" \
+    "shell"$'\n'"test-base"$'\n'"sudo"$'\n'"tar"$'\n'"-x"$'\n'"--no-same-owner"$'\n'"--no-same-permissions"$'\n'"-C"$'\n'"$GUEST_LIB" \
+    "$(<"$STATE/calls/7.argv")"
+assert_eq "ownership is set after unpacking" "shell"$'\n'"test-base"$'\n'"sudo"$'\n'"chown"$'\n'"-R"$'\n'"root:root"$'\n'"$GUEST_LIB" \
+    "$(<"$STATE/calls/8.argv")"
+assert_eq "group and other write is removed after ownership" "shell"$'\n'"test-base"$'\n'"sudo"$'\n'"chmod"$'\n'"-R"$'\n'"go-w"$'\n'"$GUEST_LIB" \
+    "$(<"$STATE/calls/9.argv")"
+assert_eq "the guest scripts keep their executable bits in the archive" "yes" \
+    "$(tar -tvf "$STATE/calls/7.stdin" | grep -q '^-rwx.* ./throwaway.sh$' && echo yes || echo no)"
+assert_eq "base leaves no bytecode cache in the guest scripts" 0 "$(find "$STATE/lib" -name __pycache__ | wc -l | tr -d ' ')"
+assert_eq "base scans the guest scripts with gitleaks dir" 1 \
+    "$(grep -cE "^dir .* $TMPDIR/cog\\.[A-Za-z0-9]+/guest\$" "$STATE/gitleaks.log" || true)"
+assert_eq "no limactl call refers to the home directory's bin" 0 "$(grep -cE '/bin/setup-|HOME/bin|/home/guest/bin' "$STATE/limactl.log" || true)"
+
+new_case test-base
+EXTRA_ENV+=(GUEST_SCAN_FAIL=1)
+run_base none
+assert_eq "a failed guest scan fails base" 1 "$RC"
+assert_contains "a failed guest scan says why" "gitleaks found secrets in guest/, or failed" "$OUT"
+assert_eq "a failed guest scan touches no VM" "" "$(limactl_log)"
+assert_eq "a failed guest scan leaves the existing base" 1 "$(grep -cx test-base "$STATE/instances")"
+assert_eq "a failed guest scan leaves no staging directory" 0 "$(staging_dirs_left)"
+
+new_case test-base
+printf 'COG_GUEST_SENTINEL\n' > "$COGTREE/guest/planted"
+cat > "$STATE/gitleaks.toml" <<'EOF'
+[[rules]]
+id = "guest-marker"
+description = "guest script regression marker"
+regex = '''COG_GUEST_SENTINEL'''
+EOF
+EXTRA_ENV+=(GITLEAKS_CONFIG="$STATE/gitleaks.toml")
+run_base none
+rm "$COGTREE/guest/planted"
+assert_eq "a planted secret in guest/ fails base" 1 "$RC"
+assert_contains "a planted secret in guest/ names the file" planted "$OUT"
+assert_eq "a planted secret in guest/ is redacted" no "$([[ $OUT == *COG_GUEST_SENTINEL* ]] && echo yes || echo no)"
+assert_eq "a planted secret in guest/ touches no VM" "" "$(limactl_log)"
+assert_eq "a planted secret in guest/ leaves no staging directory" 0 "$(staging_dirs_left)"
+
+new_case test-base
+ln -s /etc/passwd "$COGTREE/guest/link"
+run_base none
+rm "$COGTREE/guest/link"
+assert_eq "a symlink in guest/ fails base" 1 "$RC"
+assert_contains "a symlink in guest/ says why" "only regular files and directories" "$OUT"
+assert_eq "a symlink in guest/ touches no VM" "" "$(limactl_log)"
+
+assert_eq "nothing refers to the home directory's bin" "" \
+    "$(grep -rnIE '\$HOME/bin|~/bin|/home/shields/bin|guest_home/bin' "$HERE/../guest" "$HERE/../cloudflare/guest" "$COG" || true)"
+assert_eq "the image's credential helper is the root-owned one" 1 \
+    "$(grep -c "'!/usr/local/lib/cog/github-gateway-credential'" "$HERE/../cloudflare/guest/agent.sh" || true)"
+assert_eq "the gateway setup finds its helper beside itself" 2 \
+    "$(grep -c 'lib_dir/github-gateway-credential' "$HERE/../guest/setup-github-gateway" || true)"
 
 # --- 7. base failures ---
 new_case
 EXTRA_ENV+=(STAGE_STUB_FAIL=1)
-run_cog base none
+run_base none
 assert_eq "a staging failure fails base" 1 "$RC"
 assert_eq "a staging failure starts no VM" "" "$(limactl_log)"
 assert_eq "a staging failure removes the staging directory" 0 "$(staging_dirs_left)"
 
 new_case test-base
 EXTRA_ENV+=(HISTORY_SCAN_FAIL=1)
-run_cog base none
+run_base none
 assert_eq "a history scan failure fails base" 1 "$RC"
 assert_eq "a history scan failure touches no VM" "" "$(limactl_log)"
 assert_eq "a history scan failure removes the staging directory" 0 "$(staging_dirs_left)"
@@ -759,14 +995,14 @@ assert_contains "a history scan failure says why" "gitleaks found secrets in the
 
 new_case
 echo 3 > "$STATE/mounts"
-run_cog base none
+run_base none
 assert_eq "a mounted base fails" 1 "$RC"
 assert_contains "a mounted base says why" "mounts 3 host directories" "$OUT"
 assert_eq "a mounted base runs no provisioning" 0 "$(count_in_log provision)"
 
 new_case
 EXTRA_ENV+=(LIMA_STUB_FAIL=./provision.sh)
-run_cog base none
+run_base none
 assert_eq "a provisioning failure fails base" 1 "$RC"
 assert_eq "a provisioning failure stops before the identity reset and the protection" 0 \
     "$(grep -cE 'machine-id|reset-identity|protect|stop' "$STATE/limactl.log" || true)"
@@ -776,7 +1012,7 @@ assert_eq "a provisioning failure removes the staging directory" 0 "$(staging_di
 
 new_case
 : > "$STATE/guest-home-unknown"
-run_cog base none
+run_base none
 assert_eq "an unknown guest home fails base" 1 "$RC"
 assert_contains "an unknown guest home in base says so" "cannot tell the home directory in test-base" "$OUT"
 assert_eq "an unknown guest home in base runs no provisioning" 0 "$(count_in_log provision)"
@@ -791,6 +1027,13 @@ assert_contains "new registers the VM" "register lima:t1 --lima-dir $HOME_DIR/.l
 assert_contains "new installs reverse socket forwarding" 'guestSocket":"/tmp/cog-github.sock' "$(<"$STATE/limactl.log")"
 assert_contains "new starts the VM after configuring its socket" "edit --tty=false --set" "$(<"$STATE/limactl.log")"
 assert_contains "new installs guest trust and relay" "setup-github-gateway 01234567-89ab-4cde-8fab-0123456789ab" "$(<"$STATE/limactl.log")"
+assert_contains "new runs the gateway setup from the root-owned directory" \
+    "shell t1 sudo $GUEST_LIB/setup-github-gateway 01234567-89ab-4cde-8fab-0123456789ab" "$(<"$STATE/limactl.log")"
+assert_contains "new installs the Claude token with the root-owned setup-secrets" \
+    "shell t1 $GUEST_LIB/setup-secrets CLAUDE_CODE_OAUTH_TOKEN" "$(<"$STATE/limactl.log")"
+assert_contains "new installs the Codex login with the root-owned setup-secrets" \
+    "shell t1 $GUEST_LIB/setup-secrets CODEX_AUTH" "$(<"$STATE/limactl.log")"
+assert_eq "new refers to nothing in the home directory's bin" 0 "$(grep -cE '/bin/setup-|HOME/bin|/home/guest/bin' "$STATE/limactl.log" || true)"
 assert_contains "new probes the guest relay" "/__cog__/health" "$(<"$STATE/limactl.log")"
 assert_contains "new grants cog access" "grant lima:t1 shields/dotfiles --profile cog" "$(<"$STATE/cog-gateway.log")"
 assert_contains "new verifies the granted repository" "https://api.github.com/repos/shields/dotfiles" "$(<"$STATE/limactl.log")"
@@ -882,6 +1125,7 @@ new_case test-base
 EXTRA_ENV+=(COG_STUB_FAIL=health)
 run_cog new t1 --repo shields/dotfiles
 assert_eq "an unavailable gateway stops new" 1 "$RC"
+assert_contains "an unavailable gateway points to cog's installer" "./install.sh" "$OUT"
 assert_eq "an unavailable gateway creates no VM" 0 "$(count_in_log clone)"
 
 new_case test-base

@@ -45,7 +45,7 @@ while (($#)); do
         exit 0
         ;;
     --claude-settings)
-        [[ $# -ge 2 && -n $2 ]] || die "$usage"
+        [[ $# -ge 2 && -n $2 && $2 != -* ]] || die "$usage"
         settings=$2
         shift 2
         ;;
@@ -159,7 +159,7 @@ Type=oneshot
 User=$user
 Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 ExecCondition=/bin/sh -c 'test -e "\$\$HOME/.config/github-app/auth.json"'
-ExecStart=/bin/sh -c 'exec "\$\$HOME/bin/github_app_token.py" refresh-if-needed'
+ExecStart=/usr/local/lib/cog/github_app_token.py refresh-if-needed
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full

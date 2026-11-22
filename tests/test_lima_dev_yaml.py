@@ -127,7 +127,7 @@ def test_provisioning_installs_packages_then_filters_egress(lima_home: Path) -> 
     dependency = query(
         lima_home, '.provision[] | select(.mode == "dependency") | .script'
     )
-    for package in ("nftables", "zsh", "git", "rsync"):
+    for package in ("nftables", "zsh", "git", "rsync", "socat", "jq", "openssl"):
         assert package in dependency
     assert "command -v" in dependency
     assert "until apt-get -o DPkg::Lock::Timeout=300 update; do" in dependency
@@ -198,4 +198,4 @@ def test_the_readiness_probe_checks_the_filter_and_dns(lima_home: Path) -> None:
     script = query(lima_home, ".probes[0].script")
     assert "nft list table inet lima_isolation" in script
     assert "getent hosts" in script
-    assert "command -v zsh git rsync" in script
+    assert "command -v zsh git rsync curl socat jq openssl" in script

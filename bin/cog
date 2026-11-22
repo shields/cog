@@ -25,6 +25,7 @@ set -euo pipefail
 base=${COG_BASE:-cog-base}
 dotfiles_repo=shields/dotfiles
 guest_repo=src/github.com/$dotfiles_repo
+guest_lib=/usr/local/lib/cog
 github_web_url=${COG_GITHUB_WEB_URL:-https://github.com}
 
 die() {
@@ -33,13 +34,29 @@ die() {
 }
 
 [[ -n ${HOME:-} ]] || die "HOME is not set"
+
+# The resources (lima/dev.yaml, guest/, tools/stage_tree.sh) belong to the cog
+# checkout that this script lives in, wherever it is run from or linked to.
+script=${BASH_SOURCE[0]}
+while [[ -L $script ]]; do
+    link=$(readlink "$script")
+    case $link in
+    /*) script=$link ;;
+    *) script=$(dirname "$script")/$link ;;
+    esac
+done
+cog_root=$(cd "$(dirname "$script")/.." && pwd -P)
+default_dotfiles=$HOME/src/github.com/shields/dotfiles
+
 claude_token_file=$HOME/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN
 fireworks_key_file=$HOME/.config/secrets/FIREWORKS_API_KEY
 codex_auth_file=$HOME/.codex/auth.json
 
 usage() {
     cat <<EOF
-usage: cog base [MODULE...]   build $base from lima/dev.yaml and the checkout in the current directory
+usage: cog base [--dotfiles DIR] [MODULE...]
+                              build $base from lima/dev.yaml and guest/ of this cog checkout and
+                              the dotfiles checkout DIR
        cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
                               clone $base, install secrets, clone the repository, open a shell
        cog github NAME [OWNER/REPO]
@@ -48,7 +65,11 @@ usage: cog base [MODULE...]   build $base from lima/dev.yaml and the checkout in
        cog rm NAME            delete a VM ($base is refused)
        cog list               list the VMs
 
-MODULE is a Brewfile module for provision.sh (dev by default).
+DIR defaults to $default_dotfiles and is never taken from the current
+directory. It must be the top level of a git checkout with provision.sh,
+.claude/settings.json and tools/configure_codex.py, and its shell, Codex and git
+hooks must read the markers that cog writes. MODULE is a Brewfile module for
+provision.sh (dev by default).
 COG_CPUS and COG_MEMORY (in GiB) override the size in lima/dev.yaml, and
 COG_BASE replaces the name $base. COG_GITHUB_WEB_URL, COG_GITHUB_API_URL
 and COG_GITHUB_CLIENT_ID replace GitHub's addresses and the app's client ID.
@@ -171,18 +192,95 @@ base_cleanup() {
     exit "$status"
 }
 
+# Each shell, Codex and git-hook reader in the dotfiles tree, with the marker it
+# reads.
+marker_readers=(
+    .zshrc:/etc/cog-throwaway
+    .zshrc:/etc/cog-github-gateway
+    .zshenv:/etc/cog-github-gateway
+    .zsh.d/wt.zsh:/etc/cog-github-gateway
+    .codex/hooks/git_guard.py:/etc/cog-github-gateway
+    tools/configure_codex.py:/etc/cog-throwaway
+    provision.sh:/etc/cog-github-gateway
+)
+
+check_marker_readers() {
+    local tree=$1 entry file marker
+    for entry in "${marker_readers[@]}"; do
+        file=${entry%%:*}
+        marker=${entry#*:}
+        if [[ ! -f $tree/$file || -L $tree/$file ]] || ! grep -qF -- "$marker" "$tree/$file"; then
+            die "$file in the dotfiles checkout does not name $marker, which cog writes; a checkout from before the split reads other markers, so update it"
+        fi
+    done
+}
+
+# What goes into the guest is copied first, and the copy is what gets scanned
+# and sent.
+stage_guest_scripts() {
+    local special
+    [[ -d $cog_root/guest ]] || die "$cog_root has no guest directory"
+    mkdir "$stage/guest"
+    COPYFILE_DISABLE=1 tar --no-xattrs --no-acls -C "$cog_root/guest" --exclude __pycache__ -cf - . |
+        tar -xpf - --no-xattrs --no-acls --no-same-owner -C "$stage/guest"
+    special=$(find "$stage/guest" ! -type f ! -type d)
+    [[ -z $special ]] || die "guest/ may hold only regular files and directories"
+    gitleaks dir --no-banner --no-color --redact --verbose --log-level warn \
+        --gitleaks-ignore-path "$stage/guest" "$stage/guest" >&2 ||
+        die "gitleaks found secrets in guest/, or failed"
+}
+
+install_guest_scripts() {
+    limactl shell "$base" sudo install -d -m 755 -o root -g root "$guest_lib" </dev/null
+    COPYFILE_DISABLE=1 tar --no-xattrs --no-acls -C "$stage/guest" -cf - . |
+        limactl shell "$base" sudo tar -x --no-same-owner --no-same-permissions -C "$guest_lib"
+    limactl shell "$base" sudo chown -R root:root "$guest_lib" </dev/null
+    limactl shell "$base" sudo chmod -R go-w "$guest_lib" </dev/null
+}
+
 cmd_base() {
     need limactl
     need git
     need tar
+    need gitleaks
+    local dotfiles_arg='' have_dotfiles=0
+    while (($#)); do
+        case $1 in
+        --dotfiles)
+            [[ $# -ge 2 && -n $2 ]] || die "--dotfiles needs a directory"
+            ((! have_dotfiles)) || die "--dotfiles was given twice"
+            dotfiles_arg=$2
+            have_dotfiles=1
+            shift 2
+            ;;
+        --dotfiles=*)
+            ((! have_dotfiles)) || die "--dotfiles was given twice"
+            dotfiles_arg=${1#--dotfiles=}
+            [[ -n $dotfiles_arg ]] || die "--dotfiles needs a directory"
+            have_dotfiles=1
+            shift
+            ;;
+        -*) die "unknown option $1" ;;
+        *) break ;;
+        esac
+    done
     set_size_args
-    local root origin authority
-    root=$(git rev-parse --show-toplevel 2>/dev/null) || die "run this inside a dotfiles checkout"
-    [[ -f $root/lima/dev.yaml && -x $root/provision.sh && -x $root/tools/stage_tree.sh &&
-        -f $root/guest/throwaway.sh && -f $root/guest/reset-identity.sh ]] ||
-        die "$root is not a dotfiles checkout (a file under lima/, guest/ or tools/ is missing)"
+    [[ -f $cog_root/lima/dev.yaml && -x $cog_root/tools/stage_tree.sh && -d $cog_root/guest ]] ||
+        die "$cog_root is not a cog checkout (lima/dev.yaml, guest/ or tools/stage_tree.sh is missing)"
 
-    origin=$(git -C "$root" config --default '' --get remote.origin.url)
+    local dotfiles top origin authority commit
+    dotfiles=${dotfiles_arg:-$default_dotfiles}
+    [[ -d $dotfiles ]] || die "the dotfiles checkout $dotfiles does not exist; pass --dotfiles DIR"
+    dotfiles=$(cd "$dotfiles" && pwd -P)
+    top=$(git -C "$dotfiles" rev-parse --show-toplevel 2>/dev/null) ||
+        die "$dotfiles is not a git checkout; pass --dotfiles DIR"
+    [[ $top == "$dotfiles" ]] || die "$dotfiles is not the top level of its git checkout; pass --dotfiles DIR"
+    [[ -x $dotfiles/provision.sh && -f $dotfiles/.claude/settings.json && -f $dotfiles/tools/configure_codex.py ]] ||
+        die "$dotfiles is not a dotfiles checkout (provision.sh, .claude/settings.json or tools/configure_codex.py is missing)"
+    commit=$(git -C "$dotfiles" rev-parse --verify HEAD 2>/dev/null) || die "$dotfiles has no commits"
+    printf 'cog: building %s from the dotfiles checkout %s at %s\n' "$base" "$dotfiles" "$commit"
+
+    origin=$(git -C "$dotfiles" config --default '' --get remote.origin.url)
     case $origin in
     git@github.com:*) origin=https://github.com/${origin#git@github.com:} ;;
     ssh://git@github.com/*) origin=https://github.com/${origin#ssh://git@github.com/} ;;
@@ -199,12 +297,14 @@ cmd_base() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
     stage=$(mktemp -d "${TMPDIR:-/tmp}/cog.XXXXXX")
-    "$root/tools/stage_tree.sh" "$stage/tree"
+    "$cog_root/tools/stage_tree.sh" --source "$dotfiles" "$stage/tree"
+    check_marker_readers "$stage/tree"
+    stage_guest_scripts
 
-    git clone --quiet --no-local --no-checkout --template= "$root" "$stage/history"
+    git clone --quiet --no-local --no-checkout --template= "$dotfiles" "$stage/history"
     local head
     head=$(git -C "$stage/history" rev-parse --verify HEAD)
-    if ! git -C "$root" symbolic-ref --quiet HEAD >/dev/null; then
+    if ! git -C "$dotfiles" symbolic-ref --quiet HEAD >/dev/null; then
         git -C "$stage/history" update-ref --no-deref HEAD "$head"
     fi
     rm -rf "$stage/tree/.git"
@@ -229,7 +329,7 @@ cmd_base() {
         limactl delete --tty=false --force "$base"
     fi
     base_started=1
-    limactl start --tty=false --name="$base" ${size_args[@]+"${size_args[@]}"} "$root/lima/dev.yaml" </dev/null
+    limactl start --tty=false --name="$base" ${size_args[@]+"${size_args[@]}"} "$cog_root/lima/dev.yaml" </dev/null
 
     local mounts
     mounts=$(limactl list --format '{{len .Config.Mounts}}' "$base")
@@ -241,17 +341,18 @@ cmd_base() {
 
     COPYFILE_DISABLE=1 tar --no-xattrs --no-acls -C "$stage/tree" -cf - . |
         limactl shell "$base" sh -c 'set -eu; rm -rf "$1"; mkdir -p "$1"; tar -xf - --no-same-owner -C "$1"' _ "$guest_dir"
+    install_guest_scripts
 
     # No modules is valid: provision.sh then uses its own default. bash 3.2
     # accepts an empty "$@" under set -u, unlike an empty array.
     limactl shell --workdir "$guest_dir" "$base" ./provision.sh "$@" </dev/null
     limactl shell --workdir "$guest_dir" "$base" git reset --mixed --quiet HEAD </dev/null
-    limactl shell "$base" sudo "$guest_dir/guest/throwaway.sh" --claude-settings "$guest_dir/.claude/settings.json" --no-github-timer </dev/null
+    limactl shell "$base" sudo "$guest_lib/throwaway.sh" --claude-settings "$guest_dir/.claude/settings.json" --no-github-timer </dev/null
     limactl shell --workdir "$guest_dir" "$base" env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin \
         uv run --no-dev python tools/configure_codex.py "$guest_home/.codex/config.toml" </dev/null
 
     limactl shell "$base" sudo truncate -s 0 /etc/machine-id </dev/null
-    limactl shell "$base" "$guest_dir/guest/reset-identity.sh" </dev/null
+    limactl shell "$base" "$guest_lib/reset-identity.sh" </dev/null
 
     limactl stop --tty=false "$base"
     # limactl shell starts the instance's user.shell, not the passwd entry, and
@@ -331,7 +432,7 @@ cmd_claude_token() {
 }
 
 install_secret() {
-    limactl shell "$1" sh -c 'exec "$HOME/bin/setup-secrets" "$1"' _ "$2"
+    limactl shell "$1" "$guest_lib/setup-secrets" "$2"
 }
 
 created=
@@ -404,9 +505,9 @@ cmd_new() {
     need limactl
     need cog-gateway
     need jq
-    cog-gateway health >/dev/null || die "the GitHub gateway is not running; run ./provision.sh dev"
+    cog-gateway health >/dev/null || die "the GitHub gateway is not running; run ./install.sh in the cog checkout"
     set_size_args
-    instance_exists "$base" || die "$base does not exist; run cog base in a dotfiles checkout first"
+    instance_exists "$base" || die "$base does not exist; run cog base first"
     ! instance_exists "$name" || die "$name already exists"
     if ((! no_codex_auth)); then
         need jq
@@ -457,7 +558,7 @@ cmd_new() {
 
     guest_home=$(guest_home_of "$name")
     ca_path=$(cog-gateway ca-path) || die "cannot find the gateway CA certificate"
-    limactl shell "$name" sudo "$guest_home/bin/setup-github-gateway" "$vm_id" <"$ca_path"
+    limactl shell "$name" sudo "$guest_lib/setup-github-gateway" "$vm_id" <"$ca_path"
     limactl shell "$name" curl --fail --silent --show-error --max-time 10 --noproxy '*' \
         --output /dev/null https://api.github.com/__cog__/health </dev/null
 

@@ -28,8 +28,10 @@ die() {
 command -v socat >/dev/null || die "socat is not installed"
 command -v jq >/dev/null || die "jq is not installed"
 
+lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+[[ -x $lib_dir/github-gateway-credential ]] || die "guest credential helper is missing"
 guest_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-[[ $guest_home == /* && -x $guest_home/bin/github-gateway-credential ]] || die "guest credential helper is missing"
+[[ $guest_home == /* ]] || die "cannot find the home directory of $SUDO_USER"
 
 ca='' managed='' claude_md='' requirements=''
 trap 'rm -f "$ca" "$managed" "$claude_md" "$requirements"' EXIT
@@ -66,13 +68,16 @@ EOF
 
 settings=/etc/claude-code/managed-settings.json
 [[ -f $settings ]] || die "Claude managed settings are missing"
-jq '.permissions.deny |= map(select(. as $entry | [
+jq '(.permissions.deny | length) as $before
+  | .permissions.deny |= map(select(. as $entry | [
     "Bash(git push*)",
     "Bash(git -C * push*)",
     "Bash(git -c * push*)",
     "Bash(git --git-dir* push*)",
     "Bash(git --work-tree* push*)"
-  ] | index($entry) | not))' "$settings" >"$managed"
+  ] | index($entry) | not))
+  | if (.permissions.deny | length) == $before then error("no git push deny rule was present") else . end' \
+    "$settings" >"$managed" || die "cannot remove the git push deny rules from $settings"
 chmod 644 "$managed"
 mv -f "$managed" "$settings"
 
@@ -101,7 +106,7 @@ mv -f "$claude_md" /etc/claude-code/CLAUDE.md
 mv -f "$requirements" /etc/codex/requirements.toml
 
 rm -f "$guest_home/.codex/rules/no-push.rules"
-sudo -H -u "$SUDO_USER" git config --global credential.https://github.com.helper "!$guest_home/bin/github-gateway-credential"
+sudo -H -u "$SUDO_USER" git config --global credential.https://github.com.helper "!$lib_dir/github-gateway-credential"
 printf '%s\n' "$1" >/etc/cog-github-gateway
 chmod 644 /etc/cog-github-gateway
 

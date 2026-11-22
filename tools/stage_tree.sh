@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-usage="usage: tools/stage_tree.sh DEST"
+usage="usage: tools/stage_tree.sh [--source REPO] DEST"
 
 die() {
     printf 'stage_tree: %s\n' "$*" >&2
@@ -36,16 +36,42 @@ within() {
     return 1
 }
 
-case ${1:-} in
--h | --help)
-    printf '%s\n' "$usage"
-    exit 0
-    ;;
-esac
-[[ $# -eq 1 ]] || die "$usage"
-dest=$1
+source_arg=
+have_source=0
+dest=
+dest_count=0
+while (($#)); do
+    case $1 in
+    -h | --help)
+        printf '%s\n' "$usage"
+        exit 0
+        ;;
+    --source)
+        [[ $# -ge 2 ]] || die "$usage"
+        ((! have_source)) || die "--source was given twice"
+        source_arg=$2
+        have_source=1
+        shift 2
+        ;;
+    --source=*)
+        ((! have_source)) || die "--source was given twice"
+        source_arg=${1#--source=}
+        have_source=1
+        shift
+        ;;
+    *)
+        dest=$1
+        dest_count=$((dest_count + 1))
+        shift
+        ;;
+    esac
+done
+[[ $dest_count -eq 1 ]] || die "$usage"
 [[ -n $dest ]] || die "DEST is empty"
 [[ $dest != -* ]] || die "DEST $dest starts with a dash; write ./$dest"
+if ((have_source)); then
+    [[ -n $source_arg ]] || die "--source is empty"
+fi
 
 for tool in git tar gitleaks; do
     command -v "$tool" >/dev/null || die "$tool is not installed"
@@ -60,8 +86,13 @@ for var in $(git rev-parse --local-env-vars); do
 done
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-root=$(cd "$script_dir/.." && pwd -P)
-top=$(git -C "$root" rev-parse --show-toplevel)
+script_root=$(cd "$script_dir/.." && pwd -P)
+if ((have_source)); then
+    root=$(cd "$source_arg" 2>/dev/null && pwd -P) || die "--source $source_arg is not a directory"
+else
+    root=$script_root
+fi
+top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || die "$root is not in a git repository"
 [[ $top == "$root" ]] || die "$root is not the top level of a git repository"
 git_dir=$(git -C "$root" rev-parse --absolute-git-dir)
 git_common_dir=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)
@@ -92,7 +123,7 @@ else
     dest=$parent/$base
 fi
 
-for protected in "$home" "$root" "$git_dir" "$git_common_dir"; do
+for protected in "$home" "$root" "$script_root" "$git_dir" "$git_common_dir"; do
     if within "$protected" "$dest"; then
         die "refusing to replace $dest: it is or contains $protected"
     fi
@@ -102,6 +133,9 @@ for git_area in "$git_dir" "$git_common_dir"; do
         die "refusing to replace $dest: it is inside $git_area"
     fi
 done
+if ! [[ $script_root -ef $root ]] && within "$dest" "$script_root"; then
+    die "refusing to replace $dest: it is inside $script_root"
+fi
 if within "$dest" "$root"; then
     [[ $base == .context ]] || die "refusing to replace $dest: inside the repository only a .context directory may be replaced"
     rel=

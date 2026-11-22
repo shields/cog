@@ -806,7 +806,7 @@ def test_an_empty_destination_is_refused(layout: Layout) -> None:
 def test_wrong_argument_counts_print_usage(layout: Layout, args: list[str]) -> None:
     result = layout.stage(args=args)
     assert result.returncode != 0
-    assert "usage: tools/stage_tree.sh DEST" in result.stderr
+    assert "usage: tools/stage_tree.sh [--source REPO] DEST" in result.stderr
 
 
 def test_a_missing_home_is_refused(layout: Layout) -> None:
@@ -1044,7 +1044,7 @@ def test_help_prints_usage_and_stages_nothing(layout: Layout, flag: str) -> None
     before = layout.state()
     result = layout.stage(args=[flag])
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "usage: tools/stage_tree.sh DEST"
+    assert result.stdout.strip() == "usage: tools/stage_tree.sh [--source REPO] DEST"
     assert layout.state() == before
 
 
@@ -1063,3 +1063,172 @@ def test_a_dash_destination_works_with_a_path_prefix(layout: Layout) -> None:
     result = layout.stage("./-stage")
     assert result.returncode == 0, result.stderr
     assert (layout.base / "-stage/README.md").exists()
+
+
+def make_source(layout: Layout, name: str = "other") -> Path:
+    """A second repository, with files the script's own repository lacks."""
+    source = layout.base / name
+    source.mkdir()
+    _ = layout.git("init", "-q", cwd=source)
+    _ = (source / "only-here.txt").write_text("other\n")
+    _ = (source / "uncommitted.txt").write_text("loose\n")
+    _ = layout.git("add", "only-here.txt", cwd=source)
+    _ = layout.git("commit", "-q", "-m", "initial", cwd=source)
+    return source
+
+
+def stage_source(
+    layout: Layout, source: str | Path, *args: str, script: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    return layout.stage(
+        args=["--source", str(source), *args, str(layout.dest)], script=script
+    )
+
+
+def test_source_stages_another_repository(layout: Layout) -> None:
+    source = make_source(layout)
+    result = stage_source(layout, source)
+    assert result.returncode == 0, result.stderr
+    assert tree_files(layout.dest) == ["only-here.txt", "uncommitted.txt"]
+    assert index_files(layout, layout.dest) == ["only-here.txt", "uncommitted.txt"]
+    assert f"into {layout.dest}" in result.stdout
+
+
+def test_source_with_an_equals_sign(layout: Layout) -> None:
+    source = make_source(layout)
+    result = layout.stage(args=[f"--source={source}", str(layout.dest)])
+    assert result.returncode == 0, result.stderr
+    assert tree_files(layout.dest) == ["only-here.txt", "uncommitted.txt"]
+
+
+def test_source_may_follow_the_destination(layout: Layout) -> None:
+    source = make_source(layout)
+    result = layout.stage(args=[str(layout.dest), "--source", str(source)])
+    assert result.returncode == 0, result.stderr
+    assert tree_files(layout.dest) == ["only-here.txt", "uncommitted.txt"]
+
+
+def test_source_equal_to_the_scripts_own_repository_is_the_default(
+    layout: Layout,
+) -> None:
+    default = layout.stage()
+    assert default.returncode == 0, default.stderr
+    expected = tree_files(layout.dest)
+    result = stage_source(layout, layout.repo)
+    assert result.returncode == 0, result.stderr
+    assert tree_files(layout.dest) == expected == tracked_and_untracked(layout)
+
+
+def test_a_symlinked_source_is_canonicalised(layout: Layout) -> None:
+    source = make_source(layout)
+    link = layout.base / "link-to-source"
+    link.symlink_to(source)
+    result = stage_source(layout, link)
+    assert result.returncode == 0, result.stderr
+    assert tree_files(layout.dest) == ["only-here.txt", "uncommitted.txt"]
+
+
+def test_a_symlink_to_the_scripts_own_repository_is_the_same_repository(
+    layout: Layout,
+) -> None:
+    link = layout.base / "link-to-repo"
+    link.symlink_to(layout.repo)
+    result = stage_source(layout, link)
+    assert result.returncode == 0, result.stderr
+    assert tree_files(layout.dest) == tracked_and_untracked(layout)
+
+
+def test_a_symlinked_source_is_still_protected_from_replacement(
+    layout: Layout,
+) -> None:
+    source = make_source(layout)
+    link = layout.base / "link-to-source"
+    link.symlink_to(source)
+    before = layout.state()
+    for dest in (source, link, source / "sub"):
+        result = layout.stage(args=["--source", str(link), str(dest)])
+        assert result.returncode != 0, dest
+        assert result.stderr.startswith("stage_tree: "), dest
+        assert layout.state() == before, dest
+    assert (source / "uncommitted.txt").read_text() == "loose\n"
+
+
+def test_the_source_git_directory_is_protected(layout: Layout) -> None:
+    source = make_source(layout)
+    before = layout.state()
+    result = layout.stage(args=["--source", str(source), str(source / ".git/stage")])
+    assert result.returncode != 0
+    assert "inside" in result.stderr
+    assert layout.state() == before
+
+
+def test_the_scripts_own_repository_stays_protected_with_another_source(
+    layout: Layout,
+) -> None:
+    source = make_source(layout)
+    before = layout.state()
+    for dest in (layout.repo, layout.repo / "sub", layout.repo / ".context"):
+        result = layout.stage(args=["--source", str(source), str(dest)])
+        assert result.returncode != 0, dest
+        assert result.stderr.startswith("stage_tree: "), dest
+        assert layout.state() == before, dest
+
+
+def test_a_source_subdirectory_is_refused(layout: Layout) -> None:
+    result = stage_source(layout, layout.repo / "src")
+    assert result.returncode != 0
+    assert "is not the top level" in result.stderr
+    assert not layout.dest.exists()
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "plain-directory"])
+def test_an_unusable_source_is_refused(layout: Layout, kind: str) -> None:
+    source = layout.base / "source"
+    if kind == "file":
+        _ = source.write_text("not a directory\n")
+    elif kind == "plain-directory":
+        source.mkdir()
+    result = stage_source(layout, source)
+    assert result.returncode != 0
+    assert result.stderr.startswith("stage_tree: ")
+    assert not layout.dest.exists()
+
+
+def test_an_empty_or_repeated_source_is_refused(layout: Layout) -> None:
+    source = make_source(layout)
+    empty = layout.stage(args=["--source", "", str(layout.dest)])
+    assert empty.returncode != 0
+    assert "--source is empty" in empty.stderr
+    twice = layout.stage(
+        args=["--source", str(source), "--source", str(source), str(layout.dest)]
+    )
+    assert twice.returncode != 0
+    assert "twice" in twice.stderr
+    assert not layout.dest.exists()
+
+
+def test_a_source_without_a_value_prints_usage(layout: Layout) -> None:
+    result = layout.stage(args=["--source"])
+    assert result.returncode != 0
+    assert "usage: tools/stage_tree.sh [--source REPO] DEST" in result.stderr
+
+
+def test_a_script_outside_any_repository_stages_a_source(layout: Layout) -> None:
+    loose = layout.base / "loose/tools"
+    loose.mkdir(parents=True)
+    script = loose / "stage_tree.sh"
+    _ = shutil.copy2(SCRIPT, script)
+    source = make_source(layout)
+    result = stage_source(layout, source, script=script)
+    assert result.returncode == 0, result.stderr
+    assert tree_files(layout.dest) == ["only-here.txt", "uncommitted.txt"]
+
+
+def test_a_source_staging_scans_the_source_for_secrets(layout: Layout) -> None:
+    source = make_source(layout)
+    _ = (source / "leak.txt").write_text(f"token = {planted_secret()}\n")
+    result = stage_source(layout, source)
+    assert result.returncode != 0
+    assert "leak.txt" in result.stderr
+    assert planted_secret() not in result.stderr
+    assert not layout.dest.exists()

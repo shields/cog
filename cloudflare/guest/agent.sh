@@ -39,6 +39,6 @@ chmod 644 "$managed"
 mv -f "$managed" "$settings"
 
 rm -f /home/shields/.codex/rules/no-push.rules
-sudo -H -u shields git config --global credential.https://github.com.helper '!/home/shields/bin/github-gateway-credential'
+sudo -H -u shields git config --global credential.https://github.com.helper '!/usr/local/lib/cog/github-gateway-credential'
 printf '%s\n' cloudflare >/etc/cog-github-gateway
 chmod 644 /etc/cog-github-gateway

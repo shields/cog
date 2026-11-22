@@ -331,6 +331,19 @@ def test_the_settings_argument_is_required(etc: Path) -> None:
     assert files_under(etc) == []
 
 
+def test_an_option_is_not_a_settings_file(etc: Path) -> None:
+    result = subprocess.run(
+        [BASH, str(SCRIPT), "--claude-settings", "--etc-dir", str(etc)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode != 0
+    assert "usage:" in result.stderr
+    assert files_under(etc) == []
+
+
 def test_a_status_line_is_optional(tmp_path: Path) -> None:
     settings = copy.deepcopy(SETTINGS)
     del settings["statusLine"]
@@ -411,22 +424,10 @@ def test_the_service_does_nothing_until_an_auth_record_exists(
     assert subprocess.run(argv, env=env, check=False).returncode == 0
 
 
-def test_the_service_starts_the_token_manager_from_the_users_bin(
-    etc: Path, tmp_path: Path
-) -> None:
+def test_the_service_starts_the_root_owned_token_manager(etc: Path) -> None:
     assert run(etc).returncode == 0
     (start,) = exec_lines(unit(etc, "github-app-refresh.service"), "ExecStart")
-    home = tmp_path / "home"
-    (home / "bin").mkdir(parents=True)
-    stub = home / "bin/github_app_token.py"
-    _ = stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$HOME/argv"\n')
-    stub.chmod(0o755)
-    env = {"HOME": str(home), "PATH": os.environ["PATH"]}
-    result = subprocess.run(
-        systemd_command(start), env=env, check=False, capture_output=True
-    )
-    assert result.returncode == 0, result.stderr
-    assert (home / "argv").read_text() == "refresh-if-needed\n"
+    assert start == "/usr/local/lib/cog/github_app_token.py refresh-if-needed"
 
 
 def test_without_a_timer_no_unit_is_written(etc: Path) -> None:
