@@ -50,13 +50,13 @@ if ((worker_only && have_dotfiles)); then
     exit 2
 fi
 
+unset CDPATH
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 secret_dir=$HOME/.config/secrets/cog
 token_file=$secret_dir/cloudflare-admin-token
 install -d -m 0700 "$secret_dir"
 if [[ ! -e $token_file ]]; then
-    umask 077
-    openssl rand -hex 32 >"$token_file"
+    (umask 077 && openssl rand -hex 32 >"$token_file")
 fi
 [[ $(stat -c %a "$token_file" 2>/dev/null || stat -f %Lp "$token_file") == 600 ]] || {
     printf '%s\n' 'Cloudflare admin token must have mode 0600' >&2

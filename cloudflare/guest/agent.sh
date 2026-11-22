@@ -26,24 +26,30 @@ die() {
 [[ $# -eq 2 && $1 == --user && -n $2 && $2 != -* ]] || die "$usage"
 user=$2
 [[ $(id -u) -eq 0 ]] || die 'run as root'
-home=$(getent passwd "$user" | cut -d: -f6)
+entry=$(getent passwd "$user") || die "no such user: $user"
+home=$(cut -d: -f6 <<<"$entry")
 [[ -n $home && -d $home ]] || die "cannot find the home directory of $user"
 
 settings=/etc/claude-code/managed-settings.json
 [[ -f $settings ]] || die 'managed settings are missing'
 managed=$(mktemp /etc/claude-code/.managed-settings.XXXXXX)
 trap 'rm -f "$managed"' EXIT
-jq '.permissions.deny |= map(select(. as $entry | [
+jq '(.permissions.deny | length) as $before
+  | .permissions.deny |= map(select(. as $entry | [
     "Bash(git push*)",
     "Bash(git -C * push*)",
     "Bash(git -c * push*)",
     "Bash(git --git-dir* push*)",
     "Bash(git --work-tree* push*)"
-  ] | index($entry) | not))' "$settings" >"$managed"
+  ] | index($entry) | not))
+  | if (.permissions.deny | length) == $before then error("no git push deny rule was present") else . end' \
+    "$settings" >"$managed" || die "cannot remove the git push deny rules from $settings"
 chmod 644 "$managed"
 mv -f "$managed" "$settings"
 
+helper=/usr/local/lib/cog/github-gateway-credential
+[[ -x $helper ]] || die "$helper is missing"
 rm -f "$home/.codex/rules/no-push.rules"
-sudo -H -u "$user" git config --global credential.https://github.com.helper '!/usr/local/lib/cog/github-gateway-credential'
+sudo -H -u "$user" git config --global credential.https://github.com.helper "!$helper"
 printf '%s\n' cloudflare >/etc/cog-github-gateway
 chmod 644 /etc/cog-github-gateway

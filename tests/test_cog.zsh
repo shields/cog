@@ -80,8 +80,10 @@ assert_contains() {
 STUBS="$TMPBASE/stubs"
 mkdir -p "$STUBS"
 
-# limactl keeps its instances and its calls under $LIMA_STUB_STATE, and a call
-# whose arguments contain $LIMA_STUB_FAIL fails.
+# limactl keeps its instances and its calls under $LIMA_STUB_STATE, a call whose
+# arguments contain $LIMA_STUB_FAIL fails, and one whose arguments contain
+# $LIMA_STUB_BLOCK creates $LIMA_STUB_STATE/blocked and waits for
+# $LIMA_STUB_STATE/release.
 cat > "$STUBS/limactl" <<'STUB'
 #!/bin/bash
 state=$LIMA_STUB_STATE
@@ -96,6 +98,13 @@ fi
 if [[ -n ${LIMA_STUB_FAIL:-} && $* == *"$LIMA_STUB_FAIL"* ]]; then
     echo "limactl: injected failure" >&2
     exit 1
+fi
+if [[ -n ${LIMA_STUB_BLOCK:-} && $* == *"$LIMA_STUB_BLOCK"* ]]; then
+    : > "$state/blocked"
+    for _ in {1..400}; do
+        [[ -e "$state/release" ]] && break
+        /bin/sleep 0.05
+    done
 fi
 sub=$1
 shift
@@ -322,6 +331,8 @@ cp "$HERE/../tools/stage_tree.sh" "$COGTREE/tools/stage_tree_real.sh"
 chmod +x "$COGTREE/tools/stage_tree.sh"
 COGBIN="$COGTREE/bin/cog"
 GUEST_FILES="$(cd "$COGTREE/guest" && find . -type f | sort)"
+mkdir -p "$COGTREE/guest/__pycache__"
+: > "$COGTREE/guest/__pycache__/github_app_token.cpython-313.pyc"
 
 # The dotfiles checkout: each reader of a marker names it.
 MARKER_READERS=(
@@ -462,6 +473,49 @@ run_base() {
     RUN_CWD=$cwd
 }
 
+# run_cog_hangup [--dead-output] ARGS...: like run_cog, but a hangup reaches cog
+# while the limactl call that contains $LIMA_STUB_BLOCK is held, and the call is
+# released after it. Closing a terminal does the same, and nobody reads cog's
+# output then, which --dead-output imitates with a pipe whose reader has gone.
+# Sets OUT (empty with --dead-output) and RC.
+run_cog_hangup() {
+    local dead_output=0 pid tries
+    if [[ ${1:-} == --dead-output ]]; then
+        dead_output=1
+        shift
+    fi
+    rm -f "$STATE/blocked" "$STATE/release" "$STATE/hangup.out"
+    (
+        cd "${RUN_CWD:-$DOTFILES}"
+        if (( dead_output )); then
+            exec > >(:) 2>&1
+        else
+            exec > "$STATE/hangup.out" 2>&1
+        fi
+        exec env PATH="${RUN_PATH:-$STUBS:$PATH}" HOME="$HOME_DIR" USER=shields \
+            LIMA_STUB_STATE="$STATE" STAGE_ARGS_LOG="$STAGE_ARGS_LOG" COG_BASE=test-base \
+            REAL_CURL="$REAL_CURL" REAL_GIT="$REAL_GIT" REAL_GITLEAKS="$REAL_GITLEAKS" \
+            NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 COG_GITHUB_WEB_URL="$UNREACHABLE_GITHUB" \
+            "${EXTRA_ENV[@]}" /bin/bash "${RUN_COG:-$COGBIN}" "$@" < "${RUN_STDIN:-/dev/null}"
+    ) &
+    pid=$!
+    for tries in {1..400}; do
+        [[ -e "$STATE/blocked" ]] && break
+        sleep 0.05
+    done
+    if [[ ! -e "$STATE/blocked" ]]; then
+        kill -KILL "$pid" 2>/dev/null || true
+        echo "limactl never reached a call that contains $LIMA_STUB_BLOCK" >&2
+        exit 1
+    fi
+    kill -HUP "$pid"
+    : > "$STATE/release"
+    RC=0
+    wait "$pid" || RC=$?
+    OUT=
+    [[ ! -e "$STATE/hangup.out" ]] || OUT="$(<"$STATE/hangup.out")"
+}
+
 # stdin_marker: a line that cog's own stdin holds for the case, so that a
 # stub which reads it shows up; the stubs record what they are given.
 STDIN_MARKER='cog-stdin-marker-9f3e'
@@ -586,7 +640,7 @@ shell test-base sh -c set -eu; rm -rf \"\$1\"; mkdir -p \"\$1\"; tar -xf - --no-
 shell test-base sudo install -d -m 755 -o root -g root $GUEST_LIB
 shell test-base sudo tar -x --no-same-owner --no-same-permissions -C $GUEST_LIB
 shell test-base sudo chown -R root:root $GUEST_LIB
-shell test-base sudo chmod -R go-w $GUEST_LIB
+shell test-base sudo chmod -R u=rwX,go=rX $GUEST_LIB
 shell --workdir $GUEST_DIR test-base ./provision.sh none
 shell --workdir $GUEST_DIR test-base git reset --mixed --quiet HEAD
 shell test-base sudo $GUEST_LIB/throwaway.sh --claude-settings $GUEST_DIR/.claude/settings.json --no-github-timer
@@ -836,6 +890,45 @@ for RUN_COG in "$TMPBASE/linkbin/cog" "$TMPBASE/linkbin-relative/cog"; do
 done
 RUN_COG=
 
+# A link to cog's bin directory leads to the checkout that holds it, not to the
+# link's parent, which here is a decoy with a template and guest scripts of its
+# own.
+new_case
+mkdir -p "$TMPBASE/linkparent/lima" "$TMPBASE/linkparent/guest" "$TMPBASE/linkparent/tools"
+: > "$TMPBASE/linkparent/lima/dev.yaml"
+cp "$COGTREE/tools/stage_tree_real.sh" "$TMPBASE/linkparent/tools/stage_tree.sh"
+ln -sfn "$COGTREE/bin" "$TMPBASE/linkparent/bin-link"
+ln -sfn ../cog/bin "$TMPBASE/linkparent/bin-link-relative"
+for RUN_COG in "$TMPBASE/linkparent/bin-link/cog" "$TMPBASE/linkparent/bin-link-relative/cog"; do
+    : > "$STATE/limactl.log"
+    run_base none
+    assert_eq "base through a link to cog's bin directory succeeds" 0 "$RC"
+    assert_contains "base through a link to cog's bin directory uses the linked checkout's template" \
+        "start --tty=false --name=test-base COG/lima/dev.yaml" "$(limactl_log)"
+done
+RUN_COG=
+
+# A CDPATH makes cd look elsewhere first and print where it went, which would
+# end up in the paths that cog captures; it must not matter.
+new_case
+RUN_COG=bin/cog
+RUN_CWD="$COGTREE"
+EXTRA_ENV+=(CDPATH=.)
+run_cog base --dotfiles "$DOTFILES" none
+assert_eq "base run as bin/cog with CDPATH=. succeeds" 0 "$RC"
+assert_contains "base run as bin/cog with CDPATH=. uses the checkout's template" \
+    "start --tty=false --name=test-base COG/lima/dev.yaml" "$(limactl_log)"
+RUN_COG=
+
+new_case
+mkdir -p "$TMPBASE/cdpath-decoy/dotfiles"
+RUN_CWD="$TMPBASE"
+EXTRA_ENV+=(CDPATH="$TMPBASE/cdpath-decoy")
+run_cog base --dotfiles dotfiles none
+assert_eq "base with a relative --dotfiles and a CDPATH that holds the same name succeeds" 0 "$RC"
+assert_contains "base takes the relative --dotfiles from the current directory" \
+    "from the dotfiles checkout $DOTFILES at " "$OUT"
+
 new_case
 cp -R "$COGTREE" "$TMPBASE/cog-incomplete"
 rm -rf "$TMPBASE/cog-incomplete/guest"
@@ -844,6 +937,28 @@ run_base none
 assert_eq "a cog checkout without guest scripts fails base" 1 "$RC"
 assert_contains "it says the checkout is incomplete" "is not a cog checkout" "$OUT"
 assert_eq "it touches no VM" "" "$(limactl_log)"
+RUN_COG=
+
+for guest_script in github-gateway-credential reset-identity.sh setup-github-gateway setup-secrets throwaway.sh; do
+    new_case test-base
+    cp -R "$COGTREE" "$TMPBASE/cog-without-$guest_script"
+    rm "$TMPBASE/cog-without-$guest_script/guest/$guest_script"
+    RUN_COG="$TMPBASE/cog-without-$guest_script/bin/cog"
+    run_base none
+    assert_eq "a cog checkout without guest/$guest_script fails base" 1 "$RC"
+    assert_contains "base names the missing guest/$guest_script" "guest/$guest_script is missing" "$OUT"
+    assert_eq "a missing guest/$guest_script touches no VM" "" "$(limactl_log)"
+    assert_eq "a missing guest/$guest_script leaves the existing base" 1 "$(grep -cx test-base "$STATE/instances")"
+    assert_eq "a missing guest/$guest_script leaves no staging directory" 0 "$(staging_dirs_left)"
+done
+new_case test-base
+cp -R "$COGTREE" "$TMPBASE/cog-not-executable"
+chmod -x "$TMPBASE/cog-not-executable/guest/setup-secrets"
+RUN_COG="$TMPBASE/cog-not-executable/bin/cog"
+run_base none
+assert_eq "a guest script that is not executable fails base" 1 "$RC"
+assert_contains "base names the guest script that is not executable" "guest/setup-secrets is missing" "$OUT"
+assert_eq "a guest script that is not executable touches no VM" "" "$(limactl_log)"
 RUN_COG=
 
 new_case
@@ -859,6 +974,26 @@ run_cog base --bogus
 assert_eq "an unknown base option fails" 1 "$RC"
 assert_contains "an unknown base option is named" "unknown option --bogus" "$OUT"
 assert_eq "bad base options touch no VM" "" "$(limactl_log)"
+
+# Options belong before the modules: everything from the first module on goes to
+# provision.sh in the guest, which has no --dotfiles, after the existing base is
+# gone. The default checkout exists here, so that a misplaced --dotfiles would
+# otherwise start a build from it.
+new_case test-base
+mkdir -p "$HOME_DIR/src/github.com/shields"
+ln -s "$DOTFILES" "$HOME_DIR/src/github.com/shields/dotfiles"
+run_cog base none --dotfiles "$TMPBASE/elsewhere"
+assert_eq "--dotfiles after a module fails" 1 "$RC"
+assert_contains "--dotfiles after a module is named" "option --dotfiles must come before the modules" "$OUT"
+assert_eq "--dotfiles after a module touches no VM" "" "$(limactl_log)"
+assert_eq "--dotfiles after a module leaves the existing base" 1 "$(grep -cx test-base "$STATE/instances")"
+assert_eq "--dotfiles after a module stages nothing" 0 "$(staging_dirs_left)"
+run_cog base dev --dotfiles="$TMPBASE/elsewhere"
+assert_eq "--dotfiles=DIR after a module fails" 1 "$RC"
+run_cog base none --bogus
+assert_eq "an unknown option after a module fails" 1 "$RC"
+assert_contains "an unknown option after a module is named" "option --bogus must come before the modules" "$OUT"
+assert_eq "options after a module touch no VM" "" "$(limactl_log)"
 
 # dotfiles_copy NAME [FILE...]: a copy of the dotfiles checkout, with FILE
 # paths removed from it.
@@ -927,10 +1062,11 @@ assert_eq "the unpacking call is sudo tar with the owner and permission flags" \
     "$(<"$STATE/calls/7.argv")"
 assert_eq "ownership is set after unpacking" "shell"$'\n'"test-base"$'\n'"sudo"$'\n'"chown"$'\n'"-R"$'\n'"root:root"$'\n'"$GUEST_LIB" \
     "$(<"$STATE/calls/8.argv")"
-assert_eq "group and other write is removed after ownership" "shell"$'\n'"test-base"$'\n'"sudo"$'\n'"chmod"$'\n'"-R"$'\n'"go-w"$'\n'"$GUEST_LIB" \
+assert_eq "modes are set after ownership, whatever the umask of sudo tar" "shell"$'\n'"test-base"$'\n'"sudo"$'\n'"chmod"$'\n'"-R"$'\n'"u=rwX,go=rX"$'\n'"$GUEST_LIB" \
     "$(<"$STATE/calls/9.argv")"
+guest_listing="$(tar -tvf "$STATE/calls/7.stdin")"
 assert_eq "the guest scripts keep their executable bits in the archive" "yes" \
-    "$(tar -tvf "$STATE/calls/7.stdin" | grep -q '^-rwx.* ./throwaway.sh$' && echo yes || echo no)"
+    "$(grep -q '^-rwx.* ./throwaway.sh$' <<<"$guest_listing" && echo yes || echo no)"
 assert_eq "base leaves no bytecode cache in the guest scripts" 0 "$(find "$STATE/lib" -name __pycache__ | wc -l | tr -d ' ')"
 assert_eq "base scans the guest scripts with gitleaks dir" 1 \
     "$(grep -cE "^dir .* $TMPDIR/cog\\.[A-Za-z0-9]+/guest\$" "$STATE/gitleaks.log" || true)"
@@ -973,7 +1109,7 @@ assert_eq "a symlink in guest/ touches no VM" "" "$(limactl_log)"
 assert_eq "nothing refers to the home directory's bin" "" \
     "$(grep -rnIE '\$HOME/bin|~/bin|/home/shields/bin|guest_home/bin' "$HERE/../guest" "$HERE/../cloudflare/guest" "$COG" || true)"
 assert_eq "the image's credential helper is the root-owned one" 1 \
-    "$(grep -c "'!/usr/local/lib/cog/github-gateway-credential'" "$HERE/../cloudflare/guest/agent.sh" || true)"
+    "$(grep -c '^helper=/usr/local/lib/cog/github-gateway-credential$' "$HERE/../cloudflare/guest/agent.sh" || true)"
 assert_eq "the gateway setup finds its helper beside itself" 2 \
     "$(grep -c 'lib_dir/github-gateway-credential' "$HERE/../guest/setup-github-gateway" || true)"
 
@@ -1047,6 +1183,8 @@ codex_call=$(grep -n 'CODEX_AUTH' "$STATE/limactl.log" | head -1 | cut -d: -f1)
 assert_eq "the Claude token reaches only setup-secrets stdin" "$FAKE_CLAUDE" "$(stdin_of "$claude_call")"
 assert_eq "the Codex login reaches only setup-secrets stdin" "${CODEX_JSON%$'\n'}" "$(stdin_of "$codex_call")"
 assert_no_secret_leak "new with a repository"
+assert_eq "a successful new disables no gateway access" 0 "$(grep -c '^disable ' "$STATE/cog-gateway.log" || true)"
+assert_eq "a successful new deletes no VM" 0 "$(count_in_log delete)"
 
 new_case test-base
 run_cog new t1 --no-repo --no-claude-token --no-codex-auth
@@ -1146,6 +1284,21 @@ EXTRA_ENV+=(LIMA_STUB_FAIL=__cog__/health)
 run_cog new t1 --repo shields/dotfiles
 assert_eq "a failed relay probe stops new" 1 "$RC"
 assert_contains "a failed relay probe disables gateway access" "disable lima:t1" "$(<"$STATE/cog-gateway.log")"
+
+new_case test-base
+EXTRA_ENV+=(LIMA_STUB_BLOCK="start --tty=false t1")
+run_cog_hangup new t1 --no-repo --no-claude-token --no-codex-auth
+assert_eq "a hangup stops new" 129 "$RC"
+assert_contains "a hangup after the registration disables gateway access" "disable lima:t1" "$(<"$STATE/cog-gateway.log")"
+assert_contains "a hangup after the registration deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+assert_eq "a hangup leaves no instance behind" 0 "$(grep -cx t1 "$STATE/instances" || true)"
+
+new_case test-base
+EXTRA_ENV+=(LIMA_STUB_BLOCK="start --tty=false t1")
+run_cog_hangup --dead-output new t1 --no-repo --no-claude-token --no-codex-auth
+assert_contains "a hangup with no reader for the output disables gateway access" "disable lima:t1" "$(<"$STATE/cog-gateway.log")"
+assert_contains "a hangup with no reader for the output deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+assert_eq "a hangup with no reader for the output leaves no instance behind" 0 "$(grep -cx t1 "$STATE/instances" || true)"
 
 new_case test-base t1
 run_cog github t1 shields/other

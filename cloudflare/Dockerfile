@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The build context is assembled by cloudflare/context.sh DEST, so this builds
-# from any directory with: docker build -f cloudflare/Dockerfile DEST
+# The build context is assembled by cloudflare/context.sh DEST. From the cog
+# checkout, build it with: docker build -f cloudflare/Dockerfile DEST
 
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 

@@ -30,7 +30,8 @@ command -v jq >/dev/null || die "jq is not installed"
 
 lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 [[ -x $lib_dir/github-gateway-credential ]] || die "guest credential helper is missing"
-guest_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+entry=$(getent passwd "$SUDO_USER") || die "no such user: $SUDO_USER"
+guest_home=$(cut -d: -f6 <<<"$entry")
 [[ $guest_home == /* ]] || die "cannot find the home directory of $SUDO_USER"
 
 ca='' managed='' claude_md='' requirements=''

@@ -16,6 +16,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,9 +54,29 @@ BUNX_STUB = """\
 #!/bin/bash
 set -euo pipefail
 printf '%s\\n' "$@" >"$STUB_LOG/bunx-args"
-cp cloudflare/wrangler.jsonc "$STUB_LOG/config.json"
-context=$(jq -r '.containers[0].images.base.build_context' cloudflare/wrangler.jsonc)
+config=
+secrets=
+while (($#)); do
+    case $1 in
+    --config)
+        config=$2
+        shift
+        ;;
+    --secrets-file)
+        secrets=$2
+        shift
+        ;;
+    esac
+    shift
+done
+cp "$config" "$STUB_LOG/config.json"
+head -c 12 "$secrets" >"$STUB_LOG/secrets-prefix"
+ls -ld "$secrets" | cut -c1-10 >"$STUB_LOG/secrets-mode"
+context=$(jq -r '.containers[0].images.base.build_context' "$config")
 cd "$context"
+for dir in . guest cloudflare; do
+    ls -ld "$dir" | cut -c1-10
+done >"$STUB_LOG/context-modes"
 find . -path ./dotfiles -prune -o -print | LC_ALL=C sort >"$STUB_LOG/context-list"
 if [[ -f dotfiles/provision.sh ]]; then : >"$STUB_LOG/has-dotfiles"; fi
 """
@@ -181,6 +202,9 @@ def world(tmp_path: Path) -> World:
     _ = shutil.copytree(
         REPO / "guest", cog / "guest", ignore=shutil.ignore_patterns("__pycache__")
     )
+    for pycache in (cog / "guest/__pycache__", cog / "cloudflare/guest/__pycache__"):
+        pycache.mkdir()
+        _ = (pycache / "stray.cpython-313.pyc").write_bytes(b"\0")
     git(env, base, "init", "-q", str(cog))
 
     dotfiles = base / "dotfiles"
@@ -254,7 +278,7 @@ def test_context_sh_and_cog_base_check_the_dotfiles_checkout_alike() -> None:
     for pattern in (
         r"marker_readers=\(\n.*?\n\)\n",
         r"check_marker_readers\(\) \{\n.*?\n\}\n",
-        r"\[\[ -x \$dotfiles/provision\.sh .*?\n.*?\n",
+        r"dotfiles=\$\{dotfiles_arg:-\$default_dotfiles\}\n.*?commit=.*?\n",
         r"default_dotfiles=\S+\n",
     ):
         in_context = re.search(pattern, context, re.DOTALL)
@@ -391,6 +415,109 @@ def test_a_secret_in_the_guest_scripts_stops_the_context(world: World) -> None:
     assert not dest.exists()
 
 
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "guest/throwaway.sh",
+        "guest/reset-identity.sh",
+        "guest/github-gateway-credential",
+        "cloudflare/guest/agent.sh",
+        "cloudflare/guest/entrypoint.sh",
+    ],
+)
+def test_a_missing_guest_script_stops_the_context(world: World, missing: str) -> None:
+    (world.cog / missing).unlink()
+    world.commit(world.cog)
+    dest = world.base / "ctx"
+    result = world.context(dest)
+    assert result.returncode != 0
+    assert "is missing from the assembled context" in result.stderr
+    assert not dest.exists()
+
+
+def test_a_guest_script_that_is_not_executable_stops_the_context(
+    world: World,
+) -> None:
+    (world.cog / "guest/reset-identity.sh").chmod(0o644)
+    world.commit(world.cog)
+    dest = world.base / "ctx"
+    result = world.context(dest)
+    assert result.returncode != 0
+    assert "guest/reset-identity.sh is missing" in result.stderr
+    assert not dest.exists()
+
+
+def test_the_guest_trees_are_readable_and_runnable_whatever_the_checkout_modes(
+    world: World,
+) -> None:
+    for tree in (world.cog / "guest", world.cog / "cloudflare/guest"):
+        for path in tree.iterdir():
+            path.chmod(0o700 if os.access(path, os.X_OK) else 0o600)
+    dest = world.base / "ctx"
+    result = world.run(
+        "/bin/bash",
+        "-c",
+        'umask 077 && exec "$@"',
+        "bash",
+        str(world.cog / "cloudflare/context.sh"),
+        str(dest),
+        "--dotfiles",
+        str(world.dotfiles),
+    )
+    assert result.returncode == 0, result.stderr
+    for tree in (dest / "guest", dest / "cloudflare"):
+        for path in (tree, *tree.rglob("*")):
+            mode = stat.S_IMODE(path.stat().st_mode)
+            assert mode in {0o755, 0o644}, f"{path} is {oct(mode)}"
+    assert os.access(dest / "guest/throwaway.sh", os.X_OK)
+    assert not list(dest.rglob("__pycache__"))
+
+
+def test_a_gitleaks_allowlist_in_the_dotfiles_tree_applies_to_the_context(
+    world: World,
+) -> None:
+    (world.dotfiles / "tests").mkdir()
+    fixture = world.dotfiles / "tests/fixture.txt"
+    _ = fixture.write_text(f"token = {planted_secret()}\n")
+    _ = (world.dotfiles / ".gitleaks.toml").write_text("""\
+[extend]
+useDefault = true
+
+[[allowlists]]
+paths = ['''tests/fixture\\.txt''']
+""")
+    world.commit(world.dotfiles)
+    dest = world.base / "ctx"
+    result = world.context(dest)
+    assert result.returncode == 0, result.stderr
+    assert (dest / "dotfiles/tests/fixture.txt").is_file()
+
+
+@pytest.mark.parametrize("failure", ["secret", "marker", "symlink"])
+def test_a_failed_run_keeps_a_destination_that_was_there_empty(
+    world: World, failure: str
+) -> None:
+    if failure == "secret":
+        _ = (world.dotfiles / "leak.txt").write_text(f"token = {planted_secret()}\n")
+        world.commit(world.dotfiles)
+    elif failure == "marker":
+        _ = (world.dotfiles / ".zshenv").write_text("/etc/dotfiles-github-gateway\n")
+        world.commit(world.dotfiles)
+    else:
+        (world.cog / "guest/link").symlink_to("throwaway.sh")
+        world.commit(world.cog)
+    dest = world.base / "ctx"
+    dest.mkdir()
+    dest.chmod(0o700)
+    inode = dest.stat().st_ino
+    result = world.context(dest)
+    assert result.returncode != 0
+    assert dest.is_dir()
+    assert dest.stat().st_ino == inode
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+    assert list(dest.iterdir()) == []
+
+
 def test_deploy_stages_the_context_and_points_wrangler_at_it(world: World) -> None:
     result = world.deploy("--dotfiles", str(world.dotfiles))
     assert result.returncode == 0, result.stderr
@@ -408,8 +535,17 @@ def test_deploy_stages_the_context_and_points_wrangler_at_it(world: World) -> No
     assert "./guest/throwaway.sh" in listing
     assert "./cloudflare/Dockerfile" not in listing
     args = (world.log / "bunx-args").read_text().split()
-    assert args[:2] == ["wrangler", "deploy"]
+    assert args[:5] == [
+        "wrangler",
+        "deploy",
+        "--config",
+        "cloudflare/wrangler.jsonc",
+        "--secrets-file",
+    ]
     assert "--containers-rollout=none" not in args
+    assert (world.log / "secrets-prefix").read_text() == "ADMIN_TOKEN="
+    assert (world.log / "secrets-mode").read_text().strip() == "-rw-------"
+    assert (world.log / "context-modes").read_text().split() == ["drwxr-xr-x"] * 3
     assert not list((world.base / "tmp").iterdir())
 
 
@@ -419,7 +555,7 @@ def test_deploy_worker_only_stages_no_dotfiles_tree(world: World) -> None:
     assert not (world.log / "has-dotfiles").exists()
     args = (world.log / "bunx-args").read_text().split()
     assert "--containers-rollout=none" in args
-    assert "dotfiles" not in result.stdout + result.stderr
+    assert "using the dotfiles checkout" not in result.stdout + result.stderr
 
 
 def test_deploy_worker_only_takes_no_dotfiles_option(world: World) -> None:

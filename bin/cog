@@ -34,6 +34,7 @@ die() {
 }
 
 [[ -n ${HOME:-} ]] || die "HOME is not set"
+unset CDPATH
 
 # The resources (lima/dev.yaml, guest/, tools/stage_tree.sh) belong to the cog
 # checkout that this script lives in, wherever it is run from or linked to.
@@ -45,7 +46,7 @@ while [[ -L $script ]]; do
     *) script=$(dirname "$script")/$link ;;
     esac
 done
-cog_root=$(cd "$(dirname "$script")/.." && pwd -P)
+cog_root=$(cd -P -- "$(dirname "$script")/.." && pwd -P)
 default_dotfiles=$HOME/src/github.com/shields/dotfiles
 
 claude_token_file=$HOME/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN
@@ -71,8 +72,10 @@ directory. It must be the top level of a git checkout with provision.sh,
 hooks must read the markers that cog writes. MODULE is a Brewfile module for
 provision.sh (dev by default).
 COG_CPUS and COG_MEMORY (in GiB) override the size in lima/dev.yaml, and
-COG_BASE replaces the name $base. COG_GITHUB_WEB_URL, COG_GITHUB_API_URL
-and COG_GITHUB_CLIENT_ID replace GitHub's addresses and the app's client ID.
+COG_BASE replaces the name $base. COG_GITHUB_CLIENT_ID, COG_GITHUB_WEB_URL
+and COG_GITHUB_API_URL change the GitHub App authorization that cog-gateway
+performs, and cog reads COG_GITHUB_WEB_URL to recognize an origin and to build
+the clone URL; the gateway still relays a VM's requests to github.com.
 
 The repository is --repo's, or else the one that the git origin of the current
 directory names, when it is on $github_web_url. The Mac gateway performs the
@@ -192,8 +195,6 @@ base_cleanup() {
     exit "$status"
 }
 
-# Each shell, Codex and git-hook reader in the dotfiles tree, with the marker it
-# reads.
 marker_readers=(
     .zshrc:/etc/cog-throwaway
     .zshrc:/etc/cog-github-gateway
@@ -218,13 +219,17 @@ check_marker_readers() {
 # What goes into the guest is copied first, and the copy is what gets scanned
 # and sent.
 stage_guest_scripts() {
-    local special
+    local special name
     [[ -d $cog_root/guest ]] || die "$cog_root has no guest directory"
     mkdir "$stage/guest"
     COPYFILE_DISABLE=1 tar --no-xattrs --no-acls -C "$cog_root/guest" --exclude __pycache__ -cf - . |
         tar -xpf - --no-xattrs --no-acls --no-same-owner -C "$stage/guest"
-    special=$(find "$stage/guest" ! -type f ! -type d)
-    [[ -z $special ]] || die "guest/ may hold only regular files and directories"
+    special=$(cd "$stage/guest" && find . ! -type f ! -type d)
+    [[ -z $special ]] || die "guest/ may hold only regular files and directories: $special"
+    for name in github-gateway-credential reset-identity.sh setup-github-gateway setup-secrets throwaway.sh; do
+        [[ -f $stage/guest/$name && -x $stage/guest/$name ]] ||
+            die "guest/$name is missing from $cog_root, or is not executable"
+    done
     gitleaks dir --no-banner --no-color --redact --verbose --log-level warn \
         --gitleaks-ignore-path "$stage/guest" "$stage/guest" >&2 ||
         die "gitleaks found secrets in guest/, or failed"
@@ -235,7 +240,7 @@ install_guest_scripts() {
     COPYFILE_DISABLE=1 tar --no-xattrs --no-acls -C "$stage/guest" -cf - . |
         limactl shell "$base" sudo tar -x --no-same-owner --no-same-permissions -C "$guest_lib"
     limactl shell "$base" sudo chown -R root:root "$guest_lib" </dev/null
-    limactl shell "$base" sudo chmod -R go-w "$guest_lib" </dev/null
+    limactl shell "$base" sudo chmod -R u=rwX,go=rX "$guest_lib" </dev/null
 }
 
 cmd_base() {
@@ -243,7 +248,7 @@ cmd_base() {
     need git
     need tar
     need gitleaks
-    local dotfiles_arg='' have_dotfiles=0
+    local dotfiles_arg='' have_dotfiles=0 arg
     while (($#)); do
         case $1 in
         --dotfiles)
@@ -264,6 +269,9 @@ cmd_base() {
         *) break ;;
         esac
     done
+    for arg in "$@"; do
+        [[ $arg != -* ]] || die "option $arg must come before the modules"
+    done
     set_size_args
     [[ -f $cog_root/lima/dev.yaml && -x $cog_root/tools/stage_tree.sh && -d $cog_root/guest ]] ||
         die "$cog_root is not a cog checkout (lima/dev.yaml, guest/ or tools/stage_tree.sh is missing)"
@@ -271,7 +279,7 @@ cmd_base() {
     local dotfiles top origin authority commit
     dotfiles=${dotfiles_arg:-$default_dotfiles}
     [[ -d $dotfiles ]] || die "the dotfiles checkout $dotfiles does not exist; pass --dotfiles DIR"
-    dotfiles=$(cd "$dotfiles" && pwd -P)
+    dotfiles=$(cd -- "$dotfiles" && pwd -P)
     top=$(git -C "$dotfiles" rev-parse --show-toplevel 2>/dev/null) ||
         die "$dotfiles is not a git checkout; pass --dotfiles DIR"
     [[ $top == "$dotfiles" ]] || die "$dotfiles is not the top level of its git checkout; pass --dotfiles DIR"
@@ -440,7 +448,11 @@ registered=0
 new_cleanup() {
     local status=$?
     trap - EXIT
-    if [[ -n $created && $status -ne 0 ]]; then
+    # A closed terminal sends HUP and makes every write to it fail; neither may end the cleanup.
+    trap '' HUP PIPE
+    set +e
+    if [[ -n $created ]]; then
+        [[ $status -ne 0 ]] || status=1
         printf 'cog: removing %s after the failure\n' "$created" >&2
         if ((registered)); then
             cog-gateway disable "lima:$created" ||
@@ -533,7 +545,9 @@ cmd_new() {
     [[ -z $repo ]] || cog-gateway ensure-auth "$repo"
 
     trap new_cleanup EXIT
+    trap 'exit 129' HUP
     trap 'exit 130' INT
+    trap 'exit 131' QUIT
     trap 'exit 143' TERM
     created=$name
     # limactl clone takes limactl edit's --cpus and --memory.

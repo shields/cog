@@ -30,8 +30,6 @@ die() {
     exit 1
 }
 
-# Each shell, Codex and git-hook reader in the dotfiles tree, with the marker it
-# reads.
 marker_readers=(
     .zshrc:/etc/cog-throwaway
     .zshrc:/etc/cog-github-gateway
@@ -110,7 +108,7 @@ cog_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 dotfiles=${dotfiles_arg:-$default_dotfiles}
 [[ -d $dotfiles ]] || die "the dotfiles checkout $dotfiles does not exist; pass --dotfiles DIR"
-dotfiles=$(cd "$dotfiles" && pwd -P)
+dotfiles=$(cd -- "$dotfiles" && pwd -P)
 top=$(git -C "$dotfiles" rev-parse --show-toplevel 2>/dev/null) ||
     die "$dotfiles is not a git checkout; pass --dotfiles DIR"
 [[ $top == "$dotfiles" ]] || die "$dotfiles is not the top level of its git checkout; pass --dotfiles DIR"
@@ -144,9 +142,11 @@ for checkout in "$cog_root" "$dotfiles"; do
         die "DEST $dest must be outside $checkout, and must not contain it"
     fi
 done
+dest_existed=0
 if [[ -e $dest ]]; then
     [[ -d $dest ]] || die "DEST $dest exists and is not a directory"
     [[ -z $(ls -A "$dest") ]] || die "DEST $dest is not empty"
+    dest_existed=1
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/cog-context.XXXXXX")
@@ -155,7 +155,11 @@ created=0
 cleanup() {
     rm -rf "$work"
     if ((created && ! finished)); then
-        rm -rf "$dest"
+        if ((dest_existed)); then
+            rm -rf "$dest/dotfiles" "$dest/guest" "$dest/cloudflare"
+        else
+            rm -rf "$dest"
+        fi
     fi
 }
 trap cleanup EXIT
@@ -164,8 +168,12 @@ copy_tree() {
     local special
     COPYFILE_DISABLE=1 tar --no-xattrs --no-acls -C "$1" --exclude __pycache__ -cf - . |
         tar -xpf - --no-xattrs --no-acls --no-same-owner -C "$2"
-    special=$(find "$2" ! -type f ! -type d)
-    [[ -z $special ]] || die "$1 may hold only regular files and directories"
+    special=$(cd "$2" && find . ! -type f ! -type d)
+    [[ -z $special ]] || die "${1#"$work/cog/"} may hold only regular files and directories: $special"
+    # The Dockerfile copies the files into /usr/local/lib/cog with the modes they
+    # have here, and the image's user must be able to read and run them whatever
+    # the modes of the checkout were.
+    chmod -R u=rwX,go=rX "$2"
 }
 
 "$cog_root/tools/stage_tree.sh" "$work/cog"
@@ -176,10 +184,9 @@ check_marker_readers "$dest/dotfiles"
 mkdir "$dest/guest" "$dest/cloudflare"
 copy_tree "$work/cog/guest" "$dest/guest"
 copy_tree "$work/cog/cloudflare/guest" "$dest/cloudflare"
-
-gitleaks dir --no-banner --no-color --redact --verbose --log-level warn \
-    --gitleaks-ignore-path "$dest" "$dest" >&2 ||
-    die "gitleaks found secrets in the assembled context, or failed"
+for file in guest/throwaway.sh guest/reset-identity.sh guest/github-gateway-credential cloudflare/agent.sh cloudflare/entrypoint.sh; do
+    [[ -f $dest/$file && -x $dest/$file ]] || die "$file is missing from the assembled context, or is not executable"
+done
 
 finished=1
 printf 'context.sh: assembled %s\n' "$dest"

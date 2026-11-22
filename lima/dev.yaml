@@ -108,7 +108,9 @@ probes:
       set -eux -o pipefail
       sudo -n nft list table inet lima_isolation >/dev/null
       getent hosts deb.debian.org >/dev/null
-      command -v zsh git rsync curl socat jq openssl >/dev/null
+      for command in zsh git rsync curl socat jq openssl; do
+        command -v "$command" >/dev/null
+      done
     hint: |
       The firewall script or the package step failed, or the filter blocks the
       DNS server. See /var/log/cloud-init-output.log in the guest.
