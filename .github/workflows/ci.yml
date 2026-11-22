@@ -43,7 +43,7 @@ jobs:
           enable-cache: false
       - uses: oven-sh/setup-bun@v2.2.0
         with:
-          bun-version: "1.4.4"
+          bun-version: "1.4.5"
           no-cache: true
       - run: make ci-tools
       - id: setup
@@ -55,7 +55,9 @@ jobs:
       # even after one fails, so one failure doesn't hide another suite.
       - run: make -k lint
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-      - run: make build
+      - run: |
+          make build
+          ./build/cog help
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
       - run: make -k test
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}

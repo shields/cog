@@ -211,6 +211,16 @@ describe("pipe", () => {
 });
 
 describe("signals", () => {
+  test("a child's signal can arrive before the parent's signal handler", async () => {
+    signals.install();
+    const error = await failure(() =>
+      capture(["/bin/sh", "-c", "kill -HUP $$"]),
+    );
+    assert.ok(error instanceof Interrupted);
+    assert.equal(error.status, 129);
+    assert.equal(signals.status, 129);
+  });
+
   test("a signal lets the running child finish, then ends the next call", async () => {
     signals.install();
     const started = performance.now();

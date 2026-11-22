@@ -23,9 +23,6 @@ for var in $(git rev-parse --local-env-vars); do
     unset "$var"
 done
 
-# COG_IMPL names the program under test; it is read before the unset below.
-IMPL=${COG_IMPL:-bash}
-
 # The caller's COG_CPUS or COG_MEMORY would change what cog passes to limactl;
 # unset -m returns 1 when nothing matches.
 unset -m 'COG_*' || true
@@ -33,25 +30,15 @@ unset -m 'COG_*' || true
 HERE="${0:A:h}"
 PYTHON="$(uv run --project "$HERE/.." python -c 'import sys; print(sys.executable)')"
 export PATH="${PYTHON:h}:$PATH"
-COG="$HERE/../bin/cog"
-GATEWAY_MAIN="$HERE/../gateway/main.ts"
+INSTALL="$HERE/../install.sh"
 GATEWAY_STATE="$HERE/gateway_state.ts"
-FAKE_GITHUB="$HERE/fake_github.py"
 REAL_CURL="$(command -v curl)"
 REAL_GIT="$(command -v git)"
 REAL_GITLEAKS="$(command -v gitleaks)"
 # The gateway refuses a Unix socket path over 100 bytes, which a macOS
 # $TMPDIR-based directory exceeds once a VM's socket is under it.
 TMPBASE="${$(mktemp -d /tmp/cog.XXXXXX):A}"
-FAKE_PID=
 GATEWAY_PID=
-stop_fake() {
-    if [[ -n $FAKE_PID ]]; then
-        kill -KILL "$FAKE_PID" 2>/dev/null || true
-        wait "$FAKE_PID" 2>/dev/null || true
-        FAKE_PID=
-    fi
-}
 stop_gateway() {
     if [[ -n $GATEWAY_PID ]]; then
         kill -TERM "$GATEWAY_PID" 2>/dev/null || true
@@ -59,9 +46,10 @@ stop_gateway() {
         GATEWAY_PID=
     fi
 }
-trap 'stop_fake; stop_gateway; rm -rf "$TMPBASE"' EXIT
+trap 'stop_gateway; rm -rf "$TMPBASE"' EXIT
 export TMPDIR="$TMPBASE/tmp"
 mkdir -p "$TMPDIR"
+export GIT_AUTHOR_DATE=2026-01-01T00:00:00Z GIT_COMMITTER_DATE=2026-01-01T00:00:00Z
 
 pass=0
 fail=0
@@ -94,11 +82,24 @@ assert_contains() {
 
 STUBS="$TMPBASE/stubs"
 mkdir -p "$STUBS"
+cat > "$STUBS/record" <<'STUB'
+record() {
+    local record_name=${1##*/} record_file
+    shift
+    record_file=$(mktemp "$LIMA_STUB_STATE/calls/$record_name.XXXXXX")
+    printf '%s\n' "$@" > "$record_file.argv"
+    env | sort > "$record_file.env"
+    if [[ ! -t 0 ]]; then
+        cat > "$record_file.stdin"
+        exec < "$record_file.stdin"
+    fi
+}
+STUB
 
 # limactl keeps its instances and its calls under $LIMA_STUB_STATE, a call whose
 # arguments contain $LIMA_STUB_FAIL fails, and one whose arguments contain
 # $LIMA_STUB_BLOCK creates $LIMA_STUB_STATE/blocked and waits for
-# $LIMA_STUB_STATE/release. A call to a subcommand named in
+# a terminal signal. A call to a subcommand named in
 # $LIMA_STUB_SNAPSHOT saves the gateway's state to
 # $LIMA_STUB_STATE/snapshots/CALL.json before it does anything.
 cat > "$STUBS/limactl" <<'STUB'
@@ -120,11 +121,16 @@ if [[ -n ${LIMA_STUB_FAIL:-} && $* == *"$LIMA_STUB_FAIL"* ]]; then
     exit 1
 fi
 if [[ -n ${LIMA_STUB_BLOCK:-} && $* == *"$LIMA_STUB_BLOCK"* ]]; then
+    trap 'trap - HUP; kill -HUP "$$"' HUP
+    trap 'trap - INT; kill -INT "$$"' INT
+    trap 'trap - TERM; kill -TERM "$$"' TERM
+    trap 'trap - QUIT; kill -QUIT "$$"' QUIT
     : > "$state/blocked"
     for _ in {1..400}; do
-        [[ -e "$state/release" ]] && break
         /bin/sleep 0.05
     done
+    echo 'limactl stub timed out waiting for a signal' >&2
+    exit 91
 fi
 sub=$1
 shift
@@ -222,26 +228,13 @@ esac
 exit 0
 STUB
 
-# cog-gateway runs gateway/main.ts, the program that bin/cog-gateway starts from
-# an installed bundle, and records its arguments and environment like the other
-# stubs. It reads no stdin itself.
-cat > "$STUBS/cog-gateway" <<STUB
-#!/bin/bash
-state=\$LIMA_STUB_STATE
-call=\$(mktemp "\$state/calls/cog-gateway.XXXXXX")
-printf '%s\n' "\$@" > "\$call.argv"
-env | sort > "\$call.env"
-exec bun --no-env-file "$GATEWAY_MAIN" "\$@"
-STUB
-
 # gh answers the one read-only call cog makes, with the id in
 # $LIMA_STUB_STATE/gh-id, and fails if $LIMA_STUB_STATE/gh-fail exists.
 cat > "$STUBS/gh" <<'STUB'
 #!/bin/bash
 state=$LIMA_STUB_STATE
-call=$(mktemp "$state/calls/gh.XXXXXX")
-printf '%s\n' "$@" > "$call.argv"
-env | sort > "$call.env"
+source "$TEST_STUBS/record"
+record "$0" "$@"
 printf '%s\n' "$*" >> "$state/gh.log"
 if [[ -e "$state/gh-fail" ]]; then
     echo "gh: HTTP 404: Not Found" >&2
@@ -260,48 +253,41 @@ STUB
 cat > "$STUBS/curl" <<'STUB'
 #!/bin/bash
 state=$LIMA_STUB_STATE
-call=$(mktemp "$state/calls/curl.XXXXXX")
-printf '%s\n' "$@" > "$call.argv"
-env | sort > "$call.env"
+source "$TEST_STUBS/record"
+record "$0" "$@"
+
 exec "$REAL_CURL" "$@"
 STUB
 
 cat > "$STUBS/open" <<'STUB'
 #!/bin/bash
+source "$TEST_STUBS/record"
+record "$0" "$@"
 printf '%s\n' "$*" >> "$LIMA_STUB_STATE/open.log"
 [[ ! -e $LIMA_STUB_STATE/open-fail ]]
 STUB
 
-# pbcopy records what it was given, and fails if $LIMA_STUB_STATE/pbcopy-fail
-# exists.
-cat > "$STUBS/pbcopy" <<'STUB'
-#!/bin/bash
-state=$LIMA_STUB_STATE
-call=$(mktemp "$state/calls/pbcopy.XXXXXX")
-printf '%s\n' "$@" > "$call.argv"
-env | sort > "$call.env"
-if [[ -e $state/pbcopy-fail ]]; then
-    echo "pbcopy: injected failure" >&2
-    exit 1
-fi
-cat > "$state/pbcopy.stdin"
-STUB
-
 cat > "$STUBS/sleep" <<'STUB'
 #!/bin/bash
+source "$TEST_STUBS/record"
+record "$0" "$@"
 printf '%s\n' "$*" >> "$LIMA_STUB_STATE/sleep.log"
 STUB
 
 # cog has no use for the macOS security command, so any call is a failure.
 cat > "$STUBS/security" <<'STUB'
 #!/bin/bash
+source "$TEST_STUBS/record"
+record "$0" "$@"
 echo "called: $*" >> "$LIMA_STUB_STATE/security.log"
 echo "security: cog must not call this" >&2
 exit 1
 STUB
 cat > "$STUBS/gitleaks" <<'STUB'
 #!/bin/bash
-[[ -z ${LIMA_STUB_STATE:-} ]] || printf '%s\n' "$*" >> "$LIMA_STUB_STATE/gitleaks.log"
+source "$TEST_STUBS/record"
+record "$0" "$@"
+printf '%s\n' "$*" >> "$LIMA_STUB_STATE/gitleaks.log"
 if [[ $1 == dir && -n ${GUEST_SCAN_FAIL:-} && ${@: -1} == */guest ]]; then
     echo "gitleaks: injected guest scan failure" >&2
     exit 1
@@ -314,9 +300,8 @@ exec "$REAL_GITLEAKS" "$@"
 STUB
 cat > "$STUBS/git" <<'STUB'
 #!/bin/bash
-call=$(mktemp "$LIMA_STUB_STATE/calls/git.XXXXXX")
-printf '%s\n' "$@" > "$call.argv"
-env | sort > "$call.env"
+source "$TEST_STUBS/record"
+record "$0" "$@"
 exec "$REAL_GIT" "$@"
 STUB
 chmod +x "$STUBS"/*
@@ -326,48 +311,51 @@ chmod +x "$STUBS"/*
 # when $STAGE_STUB_BLOCK is set.
 cat > "$TMPBASE/stage_tree.sh" <<'STUB'
 #!/bin/bash
+source "$TEST_STUBS/record"
+record "$0" "$@"
 printf '%s\n' "$@" > "$STAGE_ARGS_LOG"
 perl -e 'printf "%o\n", (stat $ARGV[0])[2] & 07777' "$(dirname "${@: -1}")" > "$STAGE_ARGS_LOG.mode"
 if [[ -n ${STAGE_STUB_BLOCK:-} ]]; then
+    trap 'trap - HUP; kill -HUP "$$"' HUP
+    trap 'trap - INT; kill -INT "$$"' INT
+    trap 'trap - TERM; kill -TERM "$$"' TERM
+    trap 'trap - QUIT; kill -QUIT "$$"' QUIT
     : > "$LIMA_STUB_STATE/blocked"
     for _ in {1..400}; do
-        [[ -e "$LIMA_STUB_STATE/release" ]] && break
         /bin/sleep 0.05
     done
+    echo 'stager stub timed out waiting for a signal' >&2
+    exit 91
 fi
 if [[ -n ${STAGE_STUB_FAIL:-} ]]; then
     echo "stage_tree: injected failure" >&2
     exit 1
 fi
-exec "$(dirname "$0")/stage_tree_real.sh" "$@"
+guest=${0%/embedded/tools/*}/guest
+case ${TEST_GUEST_FAULT:-} in
+    absent) rm -rf "$guest" ;;
+    missing:*) rm "$guest/${TEST_GUEST_FAULT#*:}" ;;
+    mode) chmod -x "$guest/setup-secrets" ;;
+    secret) printf 'COG_GUEST_SENTINEL\n' > "$guest/planted" ;;
+    symlink) ln -s absent "$guest/link" ;;
+esac
 STUB
 
-# The program under test is chosen here and nowhere else: COG_LAUNCH is the
-# command that runs the program at COGBIN, and COG is the source that the static
-# checks read.
-case $IMPL in
-bash) COG_LAUNCH=(/bin/bash) ;;
-*)
-    echo "unknown COG_IMPL: $IMPL" >&2
-    exit 1
-    ;;
-esac
-
-# The cog checkout: cog's own resources, with the real guest scripts and the
-# real staging script behind a stub that records its arguments.
-COGTREE="$TMPBASE/cog"
-mkdir -p "$COGTREE/bin" "$COGTREE/lima" "$COGTREE/tools"
-cp "$COG" "$COGTREE/bin/cog"
-cp -R "$HERE/../guest" "$COGTREE/guest"
-rm -rf "$COGTREE/guest/__pycache__"
-: > "$COGTREE/lima/dev.yaml"
-cp "$TMPBASE/stage_tree.sh" "$COGTREE/tools/stage_tree.sh"
-cp "$HERE/../tools/stage_tree.sh" "$COGTREE/tools/stage_tree_real.sh"
-chmod +x "$COGTREE/tools/stage_tree.sh"
+BUILD="$TMPBASE/build"
+COGTREE="$TMPBASE/installed"
 COGBIN="$COGTREE/bin/cog"
-GUEST_FILES="$(cd "$COGTREE/guest" && find . -type f | sort)"
-mkdir -p "$COGTREE/guest/__pycache__"
-: > "$COGTREE/guest/__pycache__/github_app_token.cpython-313.pyc"
+mkdir -p "$BUILD/tools" "$COGTREE/bin"
+cp -R "$HERE/../cog" "$HERE/../gateway" "$HERE/../lima" "$HERE/../guest" "$HERE/../profiles.yaml" "$BUILD/"
+rm -rf "$BUILD/guest/__pycache__"
+GUEST_FILES=$(cd "$BUILD/guest" && find . -type f | sort)
+mkdir -p "$BUILD/guest/__pycache__"
+: > "$BUILD/guest/__pycache__/github_app_token.cpython-313.pyc"
+ln -s "$HERE/../node_modules" "$BUILD/node_modules"
+
+# The shipping binary must not expose the test's staging fault injection.
+{ print -r -- "$(<"$TMPBASE/stage_tree.sh")"; tail -n +2 "$HERE/../tools/stage_tree.sh"; } > "$BUILD/tools/stage_tree.sh"
+bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig "$BUILD/cog/main.ts" --outfile "$COGBIN"
+rm -rf "$BUILD"
 
 # The dotfiles checkout: each reader of a marker names it.
 MARKER_READERS=(
@@ -401,7 +389,6 @@ mkdir -p "$TMPBASE/elsewhere"
 
 GUEST_DIR=/home/guest/src/github.com/shields/dotfiles
 OTHER_DIR=/home/guest/src/github.com/shields/other
-CLIENT_ID=Iv23lim5x4MdkNNgv28z
 FAKE_CLAUDE='sk-ant-oat01-FAKEclaudeToken-7f3c9a'
 FAKE_CODEX='FAKE-codex-access-token-4c8e'
 FAKE_FIREWORKS='fw_FAKEfireworksKey0123'
@@ -412,18 +399,16 @@ GUEST_LIB=/usr/local/lib/cog
 
 CASE_N=0
 EXTRA_ENV=()
-FAKE_URL=
 
 # The gateway's certificates are issued once, and each case starts from a copy.
 CERTS_ROOT="$TMPBASE/certs"
-COG_ROOT="$CERTS_ROOT" bun --no-env-file "$GATEWAY_MAIN" init > /dev/null
+COG_ROOT="$CERTS_ROOT" bun --no-env-file "$GATEWAY_STATE" certificates
 CERTS="$CERTS_ROOT/secrets"
 
 # new_case [INSTANCE...]: a fresh state with a home that holds a Codex login, a
 # Claude token to type and the instances that exist, and a gateway root that
 # nothing runs in yet (new_gateway_case does that).
 new_case() {
-    stop_fake
     stop_gateway
     (( ++CASE_N ))
     STATE="$TMPBASE/s$CASE_N"
@@ -437,8 +422,7 @@ new_case() {
     echo 4242 > "$STATE/gh-id"
     print -r -- "$FAKE_CLAUDE" > "$STATE/prompt"
     STAGE_ARGS_LOG="$STATE/stage-args"
-    FAKE_URL=
-    RUN_PATH=
+        RUN_PATH=
     RUN_STDIN=
     RUN_COG=
     RUN_CWD=
@@ -468,12 +452,11 @@ start_gateway() {
     local tries ready=0
     (
         umask "$RUN_UMASK"
-        exec env LIMA_STUB_STATE="$STATE" COG_ROOT="$GATEWAY_ROOT" "$STUBS/cog-gateway" serve \
+        exec env -i PATH="$PATH" HOME="$HOME_DIR" TMPDIR="$TMPDIR" TEST_STUBS="$STUBS" \
+            LIMA_STUB_STATE="$STATE" COG_ROOT="$GATEWAY_ROOT" "$COGBIN" gateway serve \
             > "$STATE/gateway.out" 2> "$STATE/gateway.err" < /dev/null
     ) &
     GATEWAY_PID=$!
-    # A process that opens the database while the daemon creates it fails with
-    # "database is locked", so readiness comes from the socket alone.
     for tries in {1..400}; do
         if [[ -S "$GATEWAY_ROOT/state/admin.sock" ]] &&
             "$REAL_CURL" --silent --fail --max-time 5 --unix-socket "$GATEWAY_ROOT/state/admin.sock" http://localhost/health > /dev/null 2>&1; then
@@ -515,65 +498,29 @@ unseed_auth() {
     rm -f "$GATEWAY_ROOT/secrets/$(printf %s "$1" | base64 | tr '+/' '-_' | tr -d '=').json"
 }
 
-# start_fake [JSON FIELDS]: a fake GitHub on a free port for the current case,
-# with the repositories shields/dotfiles (4242) and shields/other (77), and
-# cog aimed at it. FAKE_CLIENT_ID is the client id it accepts.
-start_fake() {
-    local fields=${1:+, $1}
-    print -r -- "{\"port_file\": \"$STATE/fake.port\", \"log\": \"$STATE/fake.log\", \"client_id\": \"${FAKE_CLIENT_ID:-$CLIENT_ID}\", \"repo_ids\": {\"shields/dotfiles\": 4242, \"shields/other\": 77}$fields}" > "$STATE/fake.json"
-    python3 "$FAKE_GITHUB" "$STATE/fake.json" &
-    FAKE_PID=$!
-    local tries
-    for tries in {1..200}; do
-        [[ -s "$STATE/fake.port" ]] && break
-        sleep 0.05
-    done
-    if [[ ! -s "$STATE/fake.port" ]]; then
-        echo "the fake GitHub did not start" >&2
-        exit 1
-    fi
-    FAKE_URL="http://127.0.0.1:$(<"$STATE/fake.port")"
-    EXTRA_ENV+=(COG_GITHUB_WEB_URL="$FAKE_URL" COG_GITHUB_API_URL="$FAKE_URL/api/v3")
-}
-
-# no_pbcopy_path: the test PATH with every pbcopy removed, each directory that
-# holds one replaced by a directory of links to its other commands.
-no_pbcopy_path() {
-    local dir farm cmd result= stubbed_path="$STUBS:$PATH"
-    for dir in ${(s<:>)stubbed_path}; do
-        if [[ -e $dir/pbcopy ]]; then
-            farm="$TMPBASE/no-pbcopy$dir"
-            if [[ ! -d $farm ]]; then
-                mkdir -p "$farm"
-                for cmd in "$dir"/*(N); do
-                    [[ ${cmd:t} == pbcopy ]] || ln -s "$cmd" "$farm/${cmd:t}"
-                done
-            fi
-            dir=$farm
-        fi
-        result+="${result:+:}$dir"
-    done
-    print -r -- "$result"
-}
-
-# Every run gets a GitHub that nothing listens on, so that the checkout's origin
-# never leads a case to the real one; start_fake replaces it, later in the
-# environment.
+# The checkout's origin must never lead a case to the real GitHub.
 UNREACHABLE_GITHUB=http://127.0.0.1:9
 
 # run_cog ARGS...: sets OUT (stdout and stderr) and RC. RUN_PATH replaces
 # the stubbed PATH for one case, RUN_STDIN names a file to give cog on stdin
-# instead of nothing, RUN_COG replaces the script that runs, RUN_UMASK is its
+# instead of nothing, RUN_COG replaces the executable path, RUN_UMASK is its
 # umask, and RUN_CWD is the current directory, the dotfiles checkout unless a
 # case says otherwise (new reads its repository from there).
+run_environment() {
+    RUN_ENV=(PATH="${RUN_PATH:-$STUBS:$PATH}" HOME="$HOME_DIR" USER=shields TMPDIR="$TMPDIR"
+        LIMA_STUB_STATE="$STATE" STAGE_ARGS_LOG="$STAGE_ARGS_LOG" TEST_STUBS="$STUBS" COG_BASE=test-base
+        COG_ROOT="$GATEWAY_ROOT" GATEWAY_STATE="$GATEWAY_STATE"
+        REAL_CURL="$REAL_CURL" REAL_GIT="$REAL_GIT" REAL_GITLEAKS="$REAL_GITLEAKS"
+        NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 COG_GITHUB_WEB_URL="$UNREACHABLE_GITHUB"
+        "${EXTRA_ENV[@]}")
+    [[ -z ${RUN_WITHOUT_HOME:-} ]] || RUN_ENV=("${(@)RUN_ENV:#HOME=*}")
+}
+
 run_cog() {
+    run_environment
     RC=0
-    OUT="$(umask "$RUN_UMASK"; cd "${RUN_CWD:-$DOTFILES}" && env PATH="${RUN_PATH:-$STUBS:$PATH}" HOME="$HOME_DIR" USER=shields \
-        LIMA_STUB_STATE="$STATE" STAGE_ARGS_LOG="$STAGE_ARGS_LOG" COG_BASE=test-base \
-        COG_ROOT="$GATEWAY_ROOT" GATEWAY_STATE="$GATEWAY_STATE" \
-        REAL_CURL="$REAL_CURL" REAL_GIT="$REAL_GIT" REAL_GITLEAKS="$REAL_GITLEAKS" \
-        NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 COG_GITHUB_WEB_URL="$UNREACHABLE_GITHUB" \
-        "${EXTRA_ENV[@]}" "${COG_LAUNCH[@]}" "${RUN_COG:-$COGBIN}" "$@" 2>&1 <"${RUN_STDIN:-/dev/null}")" || RC=$?
+    OUT="$(umask "$RUN_UMASK"; cd "${RUN_CWD:-$DOTFILES}" && env -i "${RUN_ENV[@]}" \
+        "${RUN_COG:-$COGBIN}" "$@" 2>&1 <"${RUN_STDIN:-/dev/null}")" || RC=$?
 }
 
 # run_base ARGS...: cog base from a directory that is not a checkout, with the
@@ -603,7 +550,8 @@ run_cog_signal() {
     fi
     signal=$1
     shift
-    rm -f "$STATE/blocked" "$STATE/release" "$STATE/signal.out"
+    run_environment
+    rm -f "$STATE/blocked" "$STATE/signal.out"
     (
         umask "$RUN_UMASK"
         cd "${RUN_CWD:-$DOTFILES}"
@@ -613,12 +561,7 @@ run_cog_signal() {
             exec > "$STATE/signal.out" 2>&1
         fi
         exec perl -e 'setpgrp(0, 0); $SIG{INT} = "DEFAULT"; $SIG{QUIT} = "DEFAULT"; exec @ARGV or die' -- \
-            env PATH="${RUN_PATH:-$STUBS:$PATH}" HOME="$HOME_DIR" USER=shields \
-            LIMA_STUB_STATE="$STATE" STAGE_ARGS_LOG="$STAGE_ARGS_LOG" COG_BASE=test-base \
-            COG_ROOT="$GATEWAY_ROOT" GATEWAY_STATE="$GATEWAY_STATE" \
-            REAL_CURL="$REAL_CURL" REAL_GIT="$REAL_GIT" REAL_GITLEAKS="$REAL_GITLEAKS" \
-            NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 COG_GITHUB_WEB_URL="$UNREACHABLE_GITHUB" \
-            "${EXTRA_ENV[@]}" "${COG_LAUNCH[@]}" "${RUN_COG:-$COGBIN}" "$@" < "${RUN_STDIN:-/dev/null}"
+            env -i "${RUN_ENV[@]}" "${RUN_COG:-$COGBIN}" "$@" < "${RUN_STDIN:-/dev/null}"
     ) &
     pid=$!
     for tries in {1..400}; do
@@ -631,7 +574,6 @@ run_cog_signal() {
         exit 1
     fi
     kill -s "$signal" -- "-$pid"
-    : > "$STATE/release"
     RC=0
     wait "$pid" || RC=$?
     OUT=
@@ -664,7 +606,7 @@ assert_only_the_shell_reads_stdin() {
 }
 
 limactl_log() {
-    sed "s|$COGTREE|COG|g; s|$DOTFILES|DOTFILES|g; s|$TMPBASE|TMP|g" "$STATE/limactl.log"
+    sed -E "s|$TMPDIR/cog\\.[[:alnum:]]+/dev.yaml|COG/lima/dev.yaml|g; s|$COGTREE|COG|g; s|$DOTFILES|DOTFILES|g; s|$TMPBASE|TMP|g" "$STATE/limactl.log"
 }
 
 stdin_of() {
@@ -683,21 +625,6 @@ mode_of() {
     local -a mode
     zstat -A mode +mode "$1"
     printf '%o' $(( mode[1] & 8#7777 ))
-}
-
-fake_requests() {
-    [[ -e "$STATE/fake.log" ]] || return 0
-    jq -r '"\(.method) \(.path)"' "$STATE/fake.log"
-}
-
-fake_form() {
-    [[ -e "$STATE/fake.log" ]] || return 0
-    jq -r --arg path "$1" --arg field "$2" 'select(.path == $path) | .form[$field] // empty' "$STATE/fake.log"
-}
-
-stub_calls() {
-    local name=$1
-    ls "$STATE/calls" | grep -c "^$name\\..*\\.argv\$" || true
 }
 
 # None of the secrets may show in what a stub was given as arguments or
@@ -720,11 +647,13 @@ assert_no_secret_leak() {
 
 # --- 1. Static checks ---
 assert_eq "no bash 4 constructs" "" \
-    "$(grep -vE '^[[:space:]]*#' "$COG" | grep -nE 'mapfile|readarray|declare +-A|local +-n|\$\{[A-Za-z_0-9]+(,,|\^\^|@[LUu])' || true)"
-assert_eq "cog is run by the system bash" "#!/bin/bash" "$(head -1 "$COG")"
-assert_eq "no eval" 0 "$(grep -cE '(^|[^a-z_])eval ' "$COG" || true)"
-assert_eq "cog is executable" yes "$([[ -x $COG ]] && echo yes || echo no)"
-assert_eq "cog does not use the Keychain" 0 "$(grep -ciE 'keychain|need security|find-generic-password' "$COG" || true)"
+    "$(grep -vE '^[[:space:]]*#' "$INSTALL" | grep -nE 'mapfile|readarray|declare +-A|local +-n|\$\{[A-Za-z_0-9]+(,,|\^\^|@[LUu])' || true)"
+assert_eq "install.sh is run by the system bash" "#!/bin/bash" "$(head -1 "$INSTALL")"
+assert_eq "no eval" "" \
+    "$(grep -rEn '(^|[^[:alnum:]_])eval[ (]|new Function\(|Bun\.\$' "$HERE/../cog" "$HERE/../gateway" || true)"
+assert_eq "cog is executable" yes "$([[ -x $COGBIN ]] && echo yes || echo no)"
+assert_eq "cog does not use the Keychain" "" \
+    "$(grep -rinE 'keychain|need security|find-generic-password' "$HERE/../cog" "$HERE/../gateway" || true)"
 
 # --- 2. help and bad invocations ---
 new_case
@@ -732,7 +661,7 @@ run_cog help
 assert_eq "help succeeds" 0 "$RC"
 assert_contains "help lists base" "cog base" "$OUT"
 assert_contains "help lists new" "cog new" "$OUT"
-assert_contains "help lists github" "cog github NAME [OWNER/REPO]" "$OUT"
+assert_contains "help lists the grant command" "cog grant NAME [OWNER/REPO] [--profile read|cog]" "$OUT"
 assert_contains "help names --repo" "--repo OWNER/REPO" "$OUT"
 assert_contains "help names --no-repo" "--no-repo" "$OUT"
 assert_contains "help names --no-claude-token" "--no-claude-token" "$OUT"
@@ -743,8 +672,7 @@ assert_contains "help names the Fireworks key file" ".config/secrets/FIREWORKS_A
 assert_contains "help describes the Mac gateway" "Credentials" "$OUT"
 run_cog
 assert_eq "no command fails" 2 "$RC"
-RC=0
-OUT="$(cd "$DOTFILES" && env -u HOME PATH="$STUBS:$PATH" LIMA_STUB_STATE="$STATE" COG_BASE=test-base "${COG_LAUNCH[@]}" "$COGBIN" help 2>&1)" || RC=$?
+RUN_WITHOUT_HOME=1 run_cog help
 assert_eq "help without HOME fails" 1 "$RC"
 assert_contains "help without HOME says so" "cog: HOME is not set" "$OUT"
 run_cog frobnicate
@@ -754,6 +682,9 @@ assert_eq "new with two names fails" 1 "$RC"
 run_cog list
 assert_eq "list succeeds" 0 "$RC"
 assert_eq "list is limactl list" "list" "$(limactl_log)"
+expected_env="$(printf '%s\n' "${RUN_ENV[@]}" | LC_ALL=C sort)"
+child_env="$(grep -Ev '^(PWD|OLDPWD|SHLVL|_)=|^BASH_FUNC_' "$STATE/calls/1.env")"
+assert_eq "list passes its environment to limactl unchanged" "$expected_env" "$child_env"
 
 # --- 3. base on a fresh machine ---
 new_case
@@ -846,7 +777,8 @@ for origin in \
     "HTTPS://$origin_marker@github.com/shields/dotfiles.git" \
     "ssh://git:$origin_marker@github.com/shields/dotfiles.git" \
     "https://github.com/shields/dotfiles.git?token=$origin_marker" \
-    "https://github.com/shields/dotfiles.git#$origin_marker"; do
+    "https://github.com/shields/dotfiles.git#$origin_marker" \
+    $'https://github.com/shields/dotfiles.git\n'; do
     new_case test-base
     git -C "$DOTFILES" remote set-url origin "$origin"
     run_base none
@@ -996,41 +928,41 @@ mkdir -p "$TMPBASE/hostile/lima" "$TMPBASE/hostile/guest" "$TMPBASE/hostile/tool
 : > "$TMPBASE/hostile/lima/dev.yaml"
 printf '#!/bin/bash\ntouch "%s"\n' "$TMPBASE/hostile-ran" > "$TMPBASE/hostile/tools/stage_tree.sh"
 chmod +x "$TMPBASE/hostile/tools/stage_tree.sh"
+printf 'COG_CPUS=hostile\n' > "$TMPBASE/hostile/.env"
+printf 'preload = ["./preload.ts"]\n' > "$TMPBASE/hostile/bunfig.toml"
+printf 'await Bun.write("preload-ran", "yes");\n' > "$TMPBASE/hostile/preload.ts"
 RUN_CWD="$TMPBASE/hostile"
 run_cog base --dotfiles "$DOTFILES" none
 assert_eq "base run beside a decoy succeeds" 0 "$RC"
-assert_contains "base starts the cog checkout's template, not the current directory's" \
+assert_contains "base starts the embedded template, not the current directory's" \
     "start --tty=false --name=test-base COG/lima/dev.yaml" "$(limactl_log)"
 assert_eq "base does not run the current directory's staging script" no "$([[ -e $TMPBASE/hostile-ran ]] && echo yes || echo no)"
+assert_eq "base ignores a preload in the current directory" no "$([[ -e "$RUN_CWD/preload-ran" ]] && echo yes || echo no)"
 
-# cog finds its resources from the checkout it lives in, however it is called.
 new_case
 mkdir -p "$TMPBASE/linkbin" "$TMPBASE/linkbin-relative"
 ln -sfn "$COGBIN" "$TMPBASE/linkbin/cog"
-ln -sfn ../cog/bin/cog "$TMPBASE/linkbin-relative/cog"
+ln -sfn ../installed/bin/cog "$TMPBASE/linkbin-relative/cog"
 for RUN_COG in "$TMPBASE/linkbin/cog" "$TMPBASE/linkbin-relative/cog"; do
     : > "$STATE/limactl.log"
     run_base none
     assert_eq "base through a link to cog succeeds" 0 "$RC"
-    assert_contains "base through a link uses the linked checkout's template" \
+    assert_contains "base through a link uses the embedded template" \
         "start --tty=false --name=test-base COG/lima/dev.yaml" "$(limactl_log)"
 done
 RUN_COG=
 
-# A link to cog's bin directory leads to the checkout that holds it, not to the
-# link's parent, which here is a decoy with a template and guest scripts of its
-# own.
 new_case
 mkdir -p "$TMPBASE/linkparent/lima" "$TMPBASE/linkparent/guest" "$TMPBASE/linkparent/tools"
 : > "$TMPBASE/linkparent/lima/dev.yaml"
-cp "$COGTREE/tools/stage_tree_real.sh" "$TMPBASE/linkparent/tools/stage_tree.sh"
+cp "$HERE/../tools/stage_tree.sh" "$TMPBASE/linkparent/tools/stage_tree.sh"
 ln -sfn "$COGTREE/bin" "$TMPBASE/linkparent/bin-link"
-ln -sfn ../cog/bin "$TMPBASE/linkparent/bin-link-relative"
+ln -sfn ../installed/bin "$TMPBASE/linkparent/bin-link-relative"
 for RUN_COG in "$TMPBASE/linkparent/bin-link/cog" "$TMPBASE/linkparent/bin-link-relative/cog"; do
     : > "$STATE/limactl.log"
     run_base none
     assert_eq "base through a link to cog's bin directory succeeds" 0 "$RC"
-    assert_contains "base through a link to cog's bin directory uses the linked checkout's template" \
+    assert_contains "base through a link to cog's bin directory uses the embedded template" \
         "start --tty=false --name=test-base COG/lima/dev.yaml" "$(limactl_log)"
 done
 RUN_COG=
@@ -1043,7 +975,7 @@ RUN_CWD="$COGTREE"
 EXTRA_ENV+=(CDPATH=.)
 run_cog base --dotfiles "$DOTFILES" none
 assert_eq "base run as bin/cog with CDPATH=. succeeds" 0 "$RC"
-assert_contains "base run as bin/cog with CDPATH=. uses the checkout's template" \
+assert_contains "base run as bin/cog with CDPATH=. uses the embedded template" \
     "start --tty=false --name=test-base COG/lima/dev.yaml" "$(limactl_log)"
 RUN_COG=
 
@@ -1056,33 +988,29 @@ assert_eq "base with a relative --dotfiles and a CDPATH that holds the same name
 assert_contains "base takes the relative --dotfiles from the current directory" \
     "from the dotfiles checkout $DOTFILES at " "$OUT"
 
+run_base_with_guest_fault() {
+    EXTRA_ENV+=(TEST_GUEST_FAULT="$1")
+    run_base none
+}
+
 new_case
-cp -R "$COGTREE" "$TMPBASE/cog-incomplete"
-rm -rf "$TMPBASE/cog-incomplete/guest"
-RUN_COG="$TMPBASE/cog-incomplete/bin/cog"
-run_base none
-assert_eq "a cog checkout without guest scripts fails base" 1 "$RC"
-assert_contains "it says the checkout is incomplete" "is not a cog checkout" "$OUT"
+run_base_with_guest_fault absent
+assert_eq "a staged tree without guest scripts fails base" 1 "$RC"
+assert_contains "it names the missing guest directory" "guest/" "$OUT"
 assert_eq "it touches no VM" "" "$(limactl_log)"
 RUN_COG=
 
 for guest_script in github-gateway-credential reset-identity.sh setup-github-gateway setup-secrets throwaway.sh; do
     new_case test-base
-    cp -R "$COGTREE" "$TMPBASE/cog-without-$guest_script"
-    rm "$TMPBASE/cog-without-$guest_script/guest/$guest_script"
-    RUN_COG="$TMPBASE/cog-without-$guest_script/bin/cog"
-    run_base none
-    assert_eq "a cog checkout without guest/$guest_script fails base" 1 "$RC"
+    run_base_with_guest_fault "missing:$guest_script"
+    assert_eq "a staged tree without guest/$guest_script fails base" 1 "$RC"
     assert_contains "base names the missing guest/$guest_script" "guest/$guest_script is missing" "$OUT"
     assert_eq "a missing guest/$guest_script touches no VM" "" "$(limactl_log)"
     assert_eq "a missing guest/$guest_script leaves the existing base" 1 "$(grep -cx test-base "$STATE/instances")"
     assert_eq "a missing guest/$guest_script leaves no staging directory" 0 "$(staging_dirs_left)"
 done
 new_case test-base
-cp -R "$COGTREE" "$TMPBASE/cog-not-executable"
-chmod -x "$TMPBASE/cog-not-executable/guest/setup-secrets"
-RUN_COG="$TMPBASE/cog-not-executable/bin/cog"
-run_base none
+run_base_with_guest_fault mode
 assert_eq "a guest script that is not executable fails base" 1 "$RC"
 assert_contains "base names the guest script that is not executable" "guest/setup-secrets is missing" "$OUT"
 assert_eq "a guest script that is not executable touches no VM" "" "$(limactl_log)"
@@ -1209,7 +1137,6 @@ assert_eq "a failed guest scan leaves the existing base" 1 "$(grep -cx test-base
 assert_eq "a failed guest scan leaves no staging directory" 0 "$(staging_dirs_left)"
 
 new_case test-base
-printf 'COG_GUEST_SENTINEL\n' > "$COGTREE/guest/planted"
 cat > "$STATE/gitleaks.toml" <<'EOF'
 [[rules]]
 id = "guest-marker"
@@ -1217,8 +1144,7 @@ description = "guest script regression marker"
 regex = '''COG_GUEST_SENTINEL'''
 EOF
 EXTRA_ENV+=(GITLEAKS_CONFIG="$STATE/gitleaks.toml")
-run_base none
-rm "$COGTREE/guest/planted"
+run_base_with_guest_fault secret
 assert_eq "a planted secret in guest/ fails base" 1 "$RC"
 assert_contains "a planted secret in guest/ names the file" planted "$OUT"
 assert_eq "a planted secret in guest/ is redacted" no "$([[ $OUT == *COG_GUEST_SENTINEL* ]] && echo yes || echo no)"
@@ -1226,15 +1152,13 @@ assert_eq "a planted secret in guest/ touches no VM" "" "$(limactl_log)"
 assert_eq "a planted secret in guest/ leaves no staging directory" 0 "$(staging_dirs_left)"
 
 new_case test-base
-ln -s /etc/passwd "$COGTREE/guest/link"
-run_base none
-rm "$COGTREE/guest/link"
+run_base_with_guest_fault symlink
 assert_eq "a symlink in guest/ fails base" 1 "$RC"
 assert_contains "a symlink in guest/ says why" "only regular files and directories" "$OUT"
 assert_eq "a symlink in guest/ touches no VM" "" "$(limactl_log)"
 
 assert_eq "nothing refers to the home directory's bin" "" \
-    "$(grep -rnIE '\$HOME/bin|~/bin|/home/shields/bin|guest_home/bin' "$HERE/../guest" "$HERE/../cloudflare/guest" "$COG" || true)"
+    "$(grep -rnIE '\$HOME/bin|~/bin|/home/shields/bin|guest_home/bin' "$HERE/../guest" "$HERE/../cloudflare/guest" "$HERE/../cog/commands" || true)"
 assert_eq "the image's credential helper is the root-owned one" 1 \
     "$(grep -c '^helper=/usr/local/lib/cog/github-gateway-credential$' "$HERE/../cloudflare/guest/agent.sh" || true)"
 assert_eq "the gateway setup finds its helper beside itself" 2 \
@@ -1495,7 +1419,7 @@ assert_eq "the agents are upgraded before any secret is installed" 1 "$(( upgrad
 new_case test-base t1
 prepare_gateway
 register_vm t1
-run_cog github t1 shields/other
+run_cog grant t1 shields/other
 assert_eq "github adds an additional repository" 0 "$RC"
 assert_eq "github grants the cog profile" '{"shields/other":{"read":true,"pushCogBranches":true}}' "$(instance_query t1 .grants)"
 assert_eq "github does not copy a credential into the guest" 0 "$(count_in_log setup-secrets)"
@@ -1503,7 +1427,7 @@ assert_eq "github does not start a stopped VM" 0 "$(count_in_log start)"
 
 new_case test-base
 prepare_gateway
-run_cog github missing shields/other
+run_cog grant missing shields/other
 assert_eq "github refuses a missing VM" 1 "$RC"
 assert_eq "github leaves policy unchanged for a missing VM" 0 "$(gateway_dump | jq '.instances | length')"
 
@@ -1640,13 +1564,10 @@ for entry in HUP:129 INT:130 TERM:143; do
     new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" 1 --repo shields/dotfiles
 done
 
-# Bash's notice that a child died of the hangup can reach the closed pipe before
-# the cleanup ignores SIGPIPE, which ends new with 141 instead.
 new_gateway_case test-base
 EXTRA_ENV+=(LIMA_STUB_BLOCK="start --tty=false t1" LIMA_STUB_SNAPSHOT=delete)
 run_cog_signal --dead-output HUP new t1 --no-repo --no-claude-token --no-codex-auth
-assert_eq "a hangup with no reader for the output ends new with a signal's status" 1 \
-    "$([[ $RC == 129 || $RC == 141 ]] && echo 1 || echo 0)"
+assert_eq "a hangup with no reader for the output ends new with the hangup status" 129 "$RC"
 assert_eq "a hangup with no reader for the output disables gateway access" true "$(instance_query t1 .disabled)"
 assert_contains "a hangup with no reader for the output deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 assert_eq "a hangup with no reader for the output leaves no instance behind" 0 "$(grep -cx t1 "$STATE/instances" || true)"

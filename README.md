@@ -18,43 +18,28 @@ VM and the Cloudflare image are built from a dotfiles checkout: cog runs that
 checkout's `provision.sh`, then applies the throwaway policy, and `cog new` adds
 the GitHub relay and the secrets to each VM.
 
-## What exists now
-
-The command is two bash programs, `bin/cog` for VMs and `bin/cog-gateway` for
-the gateway. A TypeScript `cog` that replaces both is not written, so these
-names and commands will change. `install.sh` is not written either, so nothing
-installs the gateway: `bin/cog-gateway` runs the bundle
-`~/.local/share/cog/main.mjs` with Bun from `/opt/homebrew/bin` or
-`/usr/local/bin` and fails naming `./install.sh` when either is missing, and no
-launchd agent starts the daemon. `Library/LaunchAgents/` still holds the plist
-carried over from dotfiles, which starts `~/bin/vm-access` under its old label
-and does not work. `bun gateway/main.ts VERB` in a checkout runs the same
-program as `cog-gateway VERB`, which is the way to try it before installation.
-`cog new` needs `cog-gateway` on `PATH` and a running daemon, so it does not
-work until `install.sh` exists.
-
-`cog/` holds the TypeScript `cog` as it is written. `bun cog/main.ts VERB` in a
-checkout runs `show`, `edit`, `revoke`, `logs`, `authorize` and
-`gateway serve|health|disable` on `gateway/control.ts`, with a bare VM NAME
-where `cog-gateway` takes `lima:NAME`; the other verbs answer that they are not
-implemented yet. Its `help` prints the usage, which exits 2 when there is no
-command or an unknown one. `COG_PROFILES` names a file of grant profiles, and
-the program embeds the checkout's `profiles.yaml` otherwise. Nothing in `bin/`
-or the daemon's launcher calls it yet.
-
-`bin/cog` finds its resources (`lima/dev.yaml`, `guest/`, `tools/stage_tree.sh`)
-from the checkout it lives in, following symlinks, wherever it is run from.
-
 ## Installing
 
-`install.sh` is not written yet. It will check the tools cog needs, build the
-program, link it from `~/bin` and start the gateway.
+From the cog checkout, run `./install.sh` (or `make install`) as the logged-in
+macOS user, without `sudo`. The installer checks for the required tools,
+installs the locked Bun dependencies and compiles one executable. It replaces
+`~/.local/share/cog/cog` by rename, links `~/bin/cog` to it and loads the
+`dev.msrl.cog.gateway` LaunchAgent running `cog gateway serve`. Reinstall the
+same way after updating the checkout. Nothing installed points into the
+checkout. The executable embeds the Lima template, guest scripts, stager and
+grant profiles, and does not load `.env` or `bunfig.toml` at runtime.
 
-The Mac needs `limactl`, `git`, `tar`, `gitleaks` 8.19 or newer, `jq`, `bun` and
-`openssl` (macOS ships one), and a `gh` that is logged in to GitHub: the gateway
-runs `gh api repos/OWNER/REPO --jq .id` whenever a repository needs an
-authorization (the first `cog new --repo` or `cog github` for it,
-`cog-gateway authorize`, and `cloudflare/admin.ts authorize`). The Homebrew
+The installer waits for `cog gateway health` to report readiness. If it fails,
+check `~/Library/Logs/dev.msrl.cog.gateway.err`; standard output goes to the
+adjacent `.out` file. `./install.sh --uninstall` unloads the agent and removes
+its plist, binary and link. It keeps logs, `~/.local/state/cog`,
+`~/.config/secrets/cog`, `~/.config/cog` and the VMs.
+
+The Mac needs `limactl`, `git`, `tar`, `gitleaks` 8.19 or newer, `jq`, `socat`,
+`bun` and `openssl` (macOS ships one). It also needs `gh` logged in to GitHub:
+the gateway runs `gh api repos/OWNER/REPO --jq .id` whenever a repository needs an
+authorization (the first `cog new --repo` or `cog grant` for it,
+`cog authorize`, and `cloudflare/admin.ts authorize`). The Homebrew
 modules in dotfiles (`brew/*.Brewfile` there) install them; cog installs none
 itself, because `brew bundle cleanup` in dotfiles' `provision.sh` would remove
 it again. Run `make setup` for the dependencies of the tests.
@@ -66,10 +51,12 @@ this `PATH` order does not hold.
 
 ## Commands
 
+`cog help` lists the VM and gateway commands.
+
 ```
 cog base [--dotfiles DIR] [MODULE...]
 cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
-cog github NAME [OWNER/REPO]
+cog grant NAME [OWNER/REPO] [--profile read|cog]
 cog claude-token
 cog rm NAME
 cog list
@@ -77,7 +64,7 @@ cog list
 
 `cog base` builds the base VM `cog-base` once, and again to refresh it; it takes
 tens of minutes. `cog new` makes a VM from a clone of the base, installs the
-secrets and the repository, and opens a shell in it. `cog github` adds a
+secrets and the repository, and opens a shell in it. `cog grant` adds a
 repository grant to a running VM. `cog claude-token` keeps the Claude token on
 the Mac for every later `new`. `cog rm` disables the VM's GitHub access and
 deletes it, and refuses the base. `cog list` is `limactl list`. `ssh lima-NAME`
@@ -85,8 +72,9 @@ also works, through `~/.lima/*/ssh.config`.
 
 `cog base` takes the dotfiles checkout from `--dotfiles DIR`, or else
 `~/src/github.com/shields/dotfiles`; it never infers it from the current
-directory. The directory must be the top level of a git checkout with an
-executable `provision.sh`, `.claude/settings.json` and
+directory. Options must come before the first module. The directory must be the
+top level of a git checkout with an executable `provision.sh`,
+`.claude/settings.json` and
 `tools/configure_codex.py`, and with a commit. It also fails, before any VM is
 created or deleted, when the staged copy of a marker reader
 listed under "The contract with dotfiles" does not name the markers that cog
@@ -101,15 +89,15 @@ detached HEAD), its commit history and the tags survive, and local changes
 appear as unstaged or untracked files after provisioning. The checkout's other
 local branches survive only as `origin/` branches, and only if it has an
 origin. Gitleaks scans the copied files, the history of every ref (before an
-origin is removed) and the copy of `guest/`, and a finding stops the build. An
+origin is removed) and the copy of `guest/`, and a finding stops the build.
+The staged worktree uses modes 0644 and 0755 regardless of the host umask. An
 origin of the form `git@github.com:OWNER/REPO` or
 `ssh://git@github.com/OWNER/REPO` is rewritten to HTTPS. Any other origin is
 kept as it is, but a URL with a user or password (`ssh://git@gitlab.com/...`
 too), or any origin with a query, a fragment or control characters, fails the
 build; with no origin, the guest has none. The build then:
 
-1. replaces any existing `cog-base`, and starts one from `lima/dev.yaml` in the
-   cog checkout, refusing it if `~/.lima/_config` has added a host mount;
+1. replaces any existing `cog-base`, and starts one from the embedded `lima/dev.yaml`, refusing it if `~/.lima/_config` has added a host mount;
 2. copies the dotfiles tree to `~/src/github.com/shields/dotfiles` in the guest;
 3. installs `guest/` into `/usr/local/lib/cog` with `sudo tar -x` and the
    options `--no-same-owner --no-same-permissions`, then sets root ownership and
@@ -145,7 +133,7 @@ honours both outside tests.
 
 ## GitHub access
 
-The gateway is a daemon on the Mac, `cog-gateway serve`, which runs under Bun.
+The gateway is a daemon on the Mac, `cog gateway serve`.
 It holds the GitHub App access and refresh tokens under
 `~/.config/secrets/cog/` and its state and admin socket under
 `~/.local/state/cog/`. A Lima guest receives only a public CA certificate and an
@@ -164,13 +152,13 @@ into `~/src/github.com/OWNER/REPO` and opens a shell there. The base already
 holds `shields/dotfiles` with the checkout's local changes, so a VM for that
 repository reuses that checkout. With no explicit repository, `cog new` infers
 one from a GitHub `origin` of the current directory; `--no-repo` creates a VM
-with no grants. `cog github NAME [OWNER/REPO]` adds another repository without
+with no grants. `cog grant NAME [OWNER/REPO] [--profile read|cog]` adds another repository without
 stopping the VM or removing its existing grants, inferring the repository from
-the current directory if the argument is omitted. `COG_GITHUB_CLIENT_ID`,
+the current directory if the argument is omitted. The default profile is `cog`;
+use `--profile read` for read-only access. `COG_GITHUB_CLIENT_ID`,
 `COG_GITHUB_WEB_URL` and `COG_GITHUB_API_URL` change only the GitHub App
-authorization that `cog-gateway` performs (the device flow, and the check that
-the new token can read the repository), and the `cog-gateway` that `cog` runs
-inherits them. `cog` itself also reads `COG_GITHUB_WEB_URL`, to recognize an
+authorization that cog performs (the device flow, and the check that
+the new token can read the repository). Cog also reads `COG_GITHUB_WEB_URL`, to recognize an
 origin and to build the clone URL. The relay is not affected: the gateway always
 sends a VM's requests to `github.com` and `api.github.com`, so a token issued by
 another server would be sent to GitHub. The Cloudflare commands ignore all
@@ -201,21 +189,20 @@ transferred repository's old name, so use its current name. There is no approval
 queue.
 
 `profiles.yaml` defines the two capability templates, `read` (reads only) and
-`cog` (reads and pushes to `cog/VM-ID/*`). `cog-gateway grant` reads the file
-named by `COG_PROFILES`, or else `~/.config/cog/profiles.yaml`, and fails when
-either profile is missing; the daemon never reads it, nothing copies it there
-yet, and `cloudflare/admin.ts grant` reads the checkout's own `profiles.yaml`.
+`cog` (reads and pushes to `cog/VM-ID/*`). `cog grant` reads the file named by `COG_PROFILES`, or uses the embedded file
+when it is unset. `cloudflare/admin.ts grant` reads the checkout's own
+`profiles.yaml`.
 A grant stores a copy of its profile, so editing the profile changes future
 grants only. The profile key that enables pushes is `pushCogBranches`. Use
 these commands on the Mac to change a running VM immediately:
 
 ```
-cog-gateway show lima:NAME
-cog-gateway grant lima:NAME OWNER/REPO --profile read|cog
-cog-gateway revoke lima:NAME OWNER/REPO
-cog-gateway edit lima:NAME
-cog-gateway logs lima:NAME|VM-ID [--follow|--all]
-cog-gateway authorize OWNER/REPO
+cog show NAME
+cog grant NAME OWNER/REPO --profile read|cog
+cog revoke NAME OWNER/REPO
+cog edit NAME
+cog logs NAME|VM-ID [--follow|--all]
+cog authorize OWNER/REPO
 ```
 
 `edit` opens the full YAML policy in `$VISUAL`, `$EDITOR` or `vi`; it rejects a
@@ -223,11 +210,10 @@ stale revision. Adding a repository runs the GitHub authorization on the Mac
 before applying the edit. `grant` also authorizes a repository if needed. The
 gateway reads grants for every request, so changes take effect without a VM
 restart. `cog rm` disables access before deleting the VM. A new VM with the same
-display name receives a new ID and no old grants. `cog-gateway logs VM-ID` can
-inspect a deleted VM's retained history. The gateway also has `serve`, `init`
-(create the CA and server certificate), `ca-path`, `health`, `register`,
-`disable` and `ensure-auth`, which `cog` calls itself. The gateway refuses to
-register `lima:cog-base` or the VM that `COG_BASE` names.
+display name receives a new ID and no old grants. `cog logs VM-ID` can
+inspect a deleted VM's retained history. The gateway also has `cog gateway health` and `cog gateway disable NAME`.
+Internally it stores Lima VM names as `lima:NAME` and refuses to register
+`lima:cog-base` or the VM that `COG_BASE` names.
 
 The GitHub App uses device flow with expiring user tokens and no private key.
 For your own app, grant repository Contents read/write, and Pull requests,
@@ -238,7 +224,7 @@ an app has broader permissions. The default public client ID is
 `repository_id` to scope the app token, and the gateway verifies that token can
 read the intended repository. The device code and URL are printed on the Mac for
 you to complete. To replace an expired or revoked authorization, run
-`cog-gateway authorize OWNER/REPO` on the Mac; policy grants remain in place.
+`cog authorize OWNER/REPO` on the Mac; policy grants remain in place.
 Revoking the app authorization at GitHub invalidates all its tokens. The gateway
 keeps the rotating refresh tokens on the Mac and never sends them to a VM.
 
@@ -247,7 +233,7 @@ refs, policy revision, result, upstream status and duration. Headers, bodies and
 raw queries are not logged. Policy changes are separately audited with the actor
 and old/new revision. Request logs are kept for 30 days and policy events for
 one year; requests fail closed if the audit database cannot be written.
-`cog-gateway logs lima:NAME --follow` streams recent entries, and `--all` prints
+`cog logs NAME --follow` streams recent entries, and `--all` prints
 the retained history.
 
 ## Other secrets
@@ -382,9 +368,12 @@ their sandboxed, prompting behavior.
 
 ## Checks to run once with real credentials
 
-These need a working gateway, so they wait for `install.sh`. After installing,
-`cog base` and `cog new t1 --repo OWNER/REPO`, which shows a device code and
-authorization URL on the Mac:
+Automated tests use stubs for launchd and Lima and do not deploy to Cloudflare.
+They do not verify real launchd startup, VM network isolation, the guest relay,
+agent behavior with managed settings, live GitHub authorizations, a Wrangler
+deploy or an agent image build. After installing, run `cog base` and
+`cog new t1 --repo OWNER/REPO`, which shows a device code and authorization URL
+on the Mac. Then check:
 
 - `zsh -ic exit` prints nothing, `git --version` is 2.54 or later, and
   `git hook list pre-commit` lists gitleaks.
@@ -397,11 +386,11 @@ authorization URL on the Mac:
   instructions. A push to `cog/VM-ID/check` succeeds, including a forced update,
   a push of more than 1 MiB and a push from a `--depth 1` clone. A push to
   `main`, a branch deletion, a PR write, and a read of an ungranted private
-  repository fail. `cog-gateway logs lima:t1` on the Mac records each decision.
-- `cog github t1 OTHER/REPO` adds a grant while the VM runs; revoking it with
-  `cog-gateway revoke lima:t1 OTHER/REPO` takes effect on the next request.
+  repository fail. `cog logs t1` on the Mac records each decision.
+- `cog grant t1 OTHER/REPO` adds a grant while the VM runs; revoking it with
+  `cog revoke t1 OTHER/REPO` takes effect on the next request.
 - Replacing an expiring access token happens on the Mac on demand. After a
-  revoked or expired refresh token, `cog-gateway authorize OWNER/REPO` restores
+  revoked or expired refresh token, `cog authorize OWNER/REPO` restores
   the authorization; the VM never receives it.
 - `claude` runs without a login (with the token from `cog claude-token` or the
   `cog new` prompt), and so does `codex` (with the Mac's `codex login`;
@@ -536,8 +525,8 @@ does not rename them. On a Mac that ran the old tools, in this order:
 2. Merge the dotfiles branch that reads the new markers into the checkout that
    `cog base` reads by default and run its `./provision.sh`. A `provision.sh`
    from before the split would reinstall the old agent.
-3. Remove the old agent and move its state, which keeps the GitHub App
-   authorizations and the audit log:
+3. Remove the old agent and its state. cog starts with a new CA and fresh
+   state; do not copy over the old authorizations or database:
 
    ```sh
    launchctl bootout "gui/$(id -u)/com.msrl.dotfiles.vm-access"
@@ -546,25 +535,12 @@ does not rename them. On a Mac that ran the old tools, in this order:
          ~/Library/Logs/com.msrl.dotfiles.vm-access.err
    rm ~/bin/limavm ~/bin/vm-access
    rm -r ~/.local/share/vm-access ~/.config/vm-access
-   for dir in ~/.local/state ~/.config/secrets; do
-       if [ -e "$dir/cog" ]; then
-           echo "$dir/cog exists; move it aside first" >&2
-       else
-           mv "$dir/vm-access" "$dir/cog"
-       fi
-   done
-   rm -f ~/.config/secrets/cog/{ca.pem,ca-key.pem,github.pem,github-key.pem,ca.srl}
+   rm -r ~/.local/state/vm-access ~/.config/secrets/vm-access
    ```
 
-   Running `cog-gateway` or `cloudflare/deploy.sh` before this step creates the
-   `cog` directories, and `mv` would then put the old directory inside the new
-   one without an error, where the gateway does not look. If the loop reports
-   that one exists, move it aside, run the loop again, and copy back from the
-   moved one only what you need (`cloudflare-admin-token`, for instance).
+   Authorize repositories again through the device flow and recreate the VMs.
 
-   The CA is regenerated, so every VM needs the new one: rebuild them.
-
-4. Run `./install.sh` in cog (not written yet), then `cog-gateway health`.
+4. Run `./install.sh` in cog, then `cog gateway health`.
 5. `cog base`, then `cog new t1 --repo OWNER/REPO` and the checks above.
 6. Delete the old `dotfiles-base` VM (`limactl unprotect dotfiles-base`, then
    `limactl delete dotfiles-base`), run `cloudflare/deploy.sh`, then
@@ -575,12 +551,15 @@ does not rename them. On a Mac that ran the old tools, in this order:
 
 The commits before "Move the files to their places in this repository" come
 from shields/dotfiles, filtered to the files that moved here. Each shows only
-that part of its original change, names the old paths (`bin/limavm`,
-`bin/vm-access`, `.config/vm-access/`, `provision/throwaway.sh` and so on), and
+that part of its original change, names the paths as they were in dotfiles, and
 refers to dotfiles pull requests as `shields/dotfiles#N`. `git log --follow`
 follows a file across the move.
 
 ## Development
 
-`make setup lint build test` is what CI runs, after `make ci-tools`. See
-AGENTS.md for the layout and the rules for changing the code.
+`make setup lint build test` is what CI runs, after `make ci-tools`. `make
+build` checks the TypeScript and compiles `build/cog`. To use that binary
+without installing it, run `./build/cog gateway serve` in a separate terminal
+before running `./build/cog new`. `make test-zsh` builds its own test executable
+and tests it with a real gateway daemon and stub Lima commands. See AGENTS.md
+for the layout and the rules for changing the code.

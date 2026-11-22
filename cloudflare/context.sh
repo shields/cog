@@ -108,7 +108,7 @@ cog_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 dotfiles=${dotfiles_arg:-$default_dotfiles}
 [[ -d $dotfiles ]] || die "the dotfiles checkout $dotfiles does not exist; pass --dotfiles DIR"
-dotfiles=$(cd -- "$dotfiles" && pwd -P)
+dotfiles=$(CDPATH='' cd -- "$dotfiles" && pwd -P)
 top=$(git -C "$dotfiles" rev-parse --show-toplevel 2>/dev/null) ||
     die "$dotfiles is not a git checkout; pass --dotfiles DIR"
 [[ $top == "$dotfiles" ]] || die "$dotfiles is not the top level of its git checkout; pass --dotfiles DIR"

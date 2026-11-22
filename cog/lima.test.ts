@@ -70,7 +70,7 @@ exit "\${STUB_STATUS:-0}"
   };
 }
 
-test("each method makes the call that bin/cog makes", async () => {
+test("each method calls limactl with the expected arguments", async () => {
   const { limactl, calls } = stub();
   const lima = createLima(limactl);
   await lima.list();

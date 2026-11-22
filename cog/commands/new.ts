@@ -279,10 +279,11 @@ export async function newVM(
     let guestDir: string | undefined;
     let cloned = false;
     if (repository !== null) {
-      await gateway.grant(gatewayVM, repository, () =>
+      const revision = await gateway.grant(gatewayVM, repository, () =>
         profileNamed(loadProfiles(context.config), "cog"),
       );
       signals.check();
+      say(`policy revision ${String(revision)}`);
       await lima.shell(
         name,
         probe("20", `https://api.github.com/repos/${repository}`),

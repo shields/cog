@@ -178,7 +178,7 @@ export class AppAuth {
     const file = this.file(key);
     if (!existsSync(file)) {
       throw new Error(
-        `GitHub authorization for ${key} is missing; run cog-gateway grant again`,
+        `GitHub authorization for ${key} is missing; run cog authorize ${key}`,
       );
     }
     const contents = readFileSync(file, "utf8");
@@ -264,7 +264,7 @@ export class AppAuth {
       }
       if (current.refresh_expires_at <= now) {
         throw new Error(
-          `GitHub authorization for ${key} expired; run cog-gateway authorize ${key}`,
+          `GitHub authorization for ${key} expired; run cog authorize ${key}`,
         );
       }
       const reply = await postForm(
@@ -277,7 +277,7 @@ export class AppAuth {
       );
       if (reply.error !== undefined) {
         throw new Error(
-          `GitHub refused refresh for ${key}; reauthorize with cog-gateway authorize ${key}`,
+          `GitHub refused refresh for ${key}; run cog authorize ${key}`,
         );
       }
       const renewed = tokenReply(reply);

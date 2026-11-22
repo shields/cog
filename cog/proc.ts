@@ -73,7 +73,15 @@ export class Signals {
     return this.#status;
   }
 
-  check(): void {
+  check(childSignal?: string | null): void {
+    if (
+      childSignal &&
+      !this.#cleaning &&
+      this.#handlers.has(childSignal) &&
+      Object.hasOwn(interruptions, childSignal)
+    ) {
+      this.#status ??= interruptions[childSignal as keyof typeof interruptions];
+    }
     if (this.#status !== null && !this.#cleaning) {
       throw new Interrupted(this.#status);
     }
@@ -189,7 +197,7 @@ export async function runStatus(
 ): Promise<number> {
   const child = spawn(argv, options, stdoutOf(options));
   await child.exited;
-  signals.check();
+  signals.check(child.signalCode);
   return statusOf(child);
 }
 
@@ -212,7 +220,7 @@ export async function capture(
   const output = new Response(child.stdout).text();
   await child.exited;
   const text = await output;
-  signals.check();
+  signals.check(child.signalCode);
   const status = statusOf(child);
   if (status !== 0) {
     throw new CommandFailed(labelOf(argv, options), status);
@@ -244,7 +252,8 @@ export async function pipe(
     throw error;
   }
   await Promise.all([first.exited, second.exited]);
-  signals.check();
+  signals.check(second.signalCode);
+  signals.check(first.signalCode);
   const consumed = statusOf(second);
   if (consumed !== 0) {
     throw new CommandFailed(

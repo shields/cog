@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The throwaway development VM; bin/cog builds and clones it.
-
 minimumLimaVersion: 2.2.1
 
 # Only the image list: the stock debian-13 template also mounts the home
@@ -24,7 +22,7 @@ vmType: vz
 cpus: 6
 memory: 16GiB
 
-# Lima appends mounts from ~/.lima/_config; bin/cog checks that none arrived.
+# Lima appends mounts from ~/.lima/_config; cog base refuses a VM with any.
 mounts: []
 
 containerd:

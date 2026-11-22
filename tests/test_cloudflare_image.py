@@ -14,7 +14,6 @@
 
 import hashlib
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -266,26 +265,6 @@ def test_the_worker_starts_the_entrypoint_from_the_guest_scripts() -> None:
     worker = (REPO / "cloudflare/worker.ts").read_text()
     assert '"/usr/local/lib/cog/cloudflare/entrypoint.sh"' in worker
     assert "CLOUDFLARE_AGENT" not in (REPO / "cloudflare/wrangler.jsonc").read_text()
-
-
-def squash(text: str) -> list[str]:
-    return [line.strip() for line in text.splitlines()]
-
-
-def test_context_sh_and_cog_base_check_the_dotfiles_checkout_alike() -> None:
-    context = (REPO / "cloudflare/context.sh").read_text()
-    base = (REPO / "bin/cog").read_text()
-    for pattern in (
-        r"marker_readers=\(\n.*?\n\)\n",
-        r"check_marker_readers\(\) \{\n.*?\n\}\n",
-        r"dotfiles=\$\{dotfiles_arg:-\$default_dotfiles\}\n.*?commit=.*?\n",
-        r"default_dotfiles=\S+\n",
-    ):
-        in_context = re.search(pattern, context, re.DOTALL)
-        in_base = re.search(pattern, base, re.DOTALL)
-        assert in_context
-        assert in_base
-        assert squash(in_context.group(0)) == squash(in_base.group(0))
 
 
 def test_the_context_holds_the_three_trees(world: World) -> None:

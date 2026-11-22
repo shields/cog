@@ -27,6 +27,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { ensureCertificates } from "../gateway/cert.ts";
 import { normalizeRepository } from "../gateway/policy.ts";
 import { State } from "../gateway/state.ts";
 
@@ -108,37 +109,46 @@ function seedAuth(
   }
 }
 
-const [verb, ...args] = process.argv.slice(2);
-const location = directories();
-const state = new State(location.state);
-try {
-  switch (verb) {
-    case "dump": {
-      dump(state);
-      break;
-    }
-    case "register": {
-      const [name, socket] = args;
-      if (args.length !== 2 || !name || !socket) {
-        throw new Error("usage: gateway_state.ts register lima:NAME SOCKET");
-      }
-      state.register(name, socket, "test");
-      break;
-    }
-    case "seed-auth": {
-      seedAuth(location.secrets, args, YEAR);
-      break;
-    }
-    case "seed-expired": {
-      seedAuth(location.secrets, args, -YEAR);
-      break;
-    }
-    default: {
-      throw new Error(
-        "usage: gateway_state.ts {dump|register|seed-auth|seed-expired}",
-      );
-    }
+function main(verb: string | undefined, args: string[]): void {
+  const location = directories();
+  if (verb === "certificates") {
+    process.umask(0o077);
+    ensureCertificates(location.secrets);
+    return;
   }
-} finally {
-  state.close();
+  const state = new State(location.state);
+  try {
+    switch (verb) {
+      case "dump": {
+        dump(state);
+        break;
+      }
+      case "register": {
+        const [name, socket] = args;
+        if (args.length !== 2 || !name || !socket) {
+          throw new Error("usage: gateway_state.ts register lima:NAME SOCKET");
+        }
+        state.register(name, socket, "test");
+        break;
+      }
+      case "seed-auth": {
+        seedAuth(location.secrets, args, YEAR);
+        break;
+      }
+      case "seed-expired": {
+        seedAuth(location.secrets, args, -YEAR);
+        break;
+      }
+      default: {
+        throw new Error(
+          "usage: gateway_state.ts {certificates|dump|register|seed-auth|seed-expired}",
+        );
+      }
+    }
+  } finally {
+    state.close();
+  }
 }
+
+const [verb, ...args] = process.argv.slice(2);
+main(verb, args);

@@ -19,7 +19,7 @@ import type { Context } from "./commands/context.ts";
 import { claudeToken, grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
 import { authorize, edit, logs, revoke, show } from "./commands/policy.ts";
-import { loadConfig, type Config, type Env } from "./config.ts";
+import { dotfilesRepo, loadConfig, type Config, type Env } from "./config.ts";
 import { exitStatus } from "./errors.ts";
 import { createLima, findLimactl, type Lima } from "./lima.ts";
 import { validName } from "./names.ts";
@@ -27,7 +27,14 @@ import { note, say } from "./output.ts";
 import { promptClaudeToken } from "./secrets.ts";
 
 function usage(config: Config): string {
-  const { base, defaultDotfiles } = config;
+  const {
+    base,
+    defaultDotfiles,
+    githubWebUrl,
+    claudeTokenFile,
+    codexAuthFile,
+    fireworksKeyFile,
+  } = config;
   return `usage: cog base [--dotfiles DIR] [MODULE...]
                               build ${base} from lima/dev.yaml and guest/ of this cog and
                               the dotfiles checkout DIR
@@ -51,11 +58,40 @@ function usage(config: Config): string {
        cog list               list the VMs
 
 DIR defaults to ${defaultDotfiles} and is never taken from the current
-directory. COG_CPUS and COG_MEMORY (in GiB) override the size in lima/dev.yaml,
-and COG_BASE replaces the name ${base}. COG_GITHUB_CLIENT_ID,
-COG_GITHUB_WEB_URL and COG_GITHUB_API_URL change the GitHub App authorization.
+directory. It must be the top level of a git checkout with provision.sh,
+.claude/settings.json and tools/configure_codex.py, and its shell, Codex and git
+hooks must read the markers that cog writes. MODULE is a Brewfile module for
+provision.sh (dev by default).
+COG_CPUS and COG_MEMORY (in GiB) override the size in lima/dev.yaml, and
+COG_BASE replaces the name ${base}. COG_GITHUB_CLIENT_ID, COG_GITHUB_WEB_URL
+and COG_GITHUB_API_URL change the GitHub App authorization that cog
+performs, and cog reads COG_GITHUB_WEB_URL to recognize an origin and to build
+the clone URL; the gateway still relays a VM's requests to github.com.
 COG_PROFILES names a file of grant profiles in place of the built-in read and
 cog profiles.
+
+The repository is --repo's, or else the one that the git origin of the current
+directory names, when it is on ${githubWebUrl}. The Mac gateway performs the
+GitHub App device flow when that repository lacks an authorization. Credentials
+stay on the Mac. new clones the repository in the VM at
+~/src/github.com/OWNER/REPO (${dotfilesRepo} is already in ${base}), and opens
+the shell there. With no repository, or with --no-repo, the VM has no GitHub
+grant. Use cog show or cog edit to inspect or change grants while a VM runs.
+
+new installs the Claude token from ${claudeTokenFile}
+when that file exists, and otherwise asks for it without echo: run claude
+setup-token in another terminal first. claude-token asks the same way and writes
+the file (mode 600), so that new never asks again. --no-claude-token skips the
+token, for a VM that will use claude auth login.
+
+new copies this Mac's Codex login, ${codexAuthFile}, into the VM, and
+fails when there is none: run codex login here first, with
+cli_auth_credentials_store = "file" in ~/.codex/config.toml, since with keyring
+or auto the login is in the OS credential store and no file exists.
+--no-codex-auth skips it, for a VM that will use codex login --device-auth.
+
+new also installs the Fireworks API key that cg uses from
+${fireworksKeyFile} when that file exists, and never asks for it.
 `;
 }
 

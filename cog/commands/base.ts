@@ -194,10 +194,15 @@ function treeModes(directory: string, top = true): void {
 }
 
 function checkGuestScripts(guest: string): void {
-  for (const file of readdirSync(guest, {
-    recursive: true,
-    withFileTypes: true,
-  })) {
+  let files;
+  try {
+    files = readdirSync(guest, { recursive: true, withFileTypes: true });
+  } catch {
+    throw new CogError(
+      "the embedded guest/ directory is missing or unreadable",
+    );
+  }
+  for (const file of files) {
     if (!file.isFile() && !file.isDirectory()) {
       throw new CogError("guest/ may hold only regular files and directories");
     }

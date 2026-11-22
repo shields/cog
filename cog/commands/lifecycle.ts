@@ -170,11 +170,12 @@ export async function grant(
   if (!(await context.lima.exists(name))) {
     throw new CogError(`${name} does not exist`);
   }
-  await context
+  const revision = await context
     .gateway()
     .grant(gatewayName(name), repository, () =>
       profileNamed(loadProfiles(context.config), profile),
     );
+  say(`policy revision ${String(revision)}`);
   say(
     `cog: ${name} can now ${profile === "cog" ? "read and push cog branches on" : "read"} ${repository}.`,
   );

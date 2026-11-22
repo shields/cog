@@ -12,15 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: setup ci-tools build test test-bun test-zsh test-python lint lint-ts lint-python lint-shell fmt fmt-check
+.PHONY: setup ci-tools build install test test-bun test-zsh test-python lint lint-ts lint-python lint-shell fmt fmt-check
 
 PRETTIER_SOURCES = .
 
 # Shell scripts to lint and format with shellcheck and shfmt. zsh files
 # (tests/*.zsh) are excluded because neither tool supports zsh.
 SHELL_SOURCES = \
-	bin/cog \
-	bin/cog-gateway \
+	install.sh \
 	cloudflare/context.sh \
 	cloudflare/deploy.sh \
 	cloudflare/guest/agent.sh \
@@ -36,6 +35,10 @@ SHELL_SOURCES = \
 build:
 	bun run tsc --noEmit
 	bun run tsc --noEmit -p cloudflare/tsconfig.json
+	bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig cog/main.ts --outfile build/cog
+
+install:
+	./install.sh
 
 setup:
 	bun install --frozen-lockfile

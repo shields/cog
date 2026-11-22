@@ -72,7 +72,7 @@ download() {
 # cannot see it.
 retry sudo apt-get update
 retry sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-    libarchive-tools zsh
+    jq libarchive-tools openssl perl zsh
 
 # Homebrew is on the image but not on PATH. shfmt 3.14 is newer than
 # Ubuntu's, and gitleaks must have `gitleaks dir`.
