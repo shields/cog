@@ -68,12 +68,12 @@ stdin, and the CA to `setup-github-gateway`'s stdin. `cog new` upgrades the
 agents before it installs any secret, and any failure, or hangup, interrupt,
 quit or terminate signal, after the clone disables the registration and deletes
 the VM. The staged dotfiles tree, its history and `guest/` are scanned with
-gitleaks before anything enters a guest. A `limactl shell`, `start`, `clone`,
-`edit --set` or `list -q` that precedes the final shell reads `/dev/null` unless
-a pipe or file is meant for it, so that none swallows what was typed for the
-shell. Every other child (`git`, `gitleaks`, `tools/stage_tree.sh`,
-`cog-gateway` and the remaining `limactl` subcommands) inherits the terminal and
-has no use for it, and no test checks this.
+gitleaks before anything enters a guest. Every `limactl` and `cog-gateway` call
+reads `/dev/null` unless a pipe or file is meant for it, or it is the final
+shell, so that none swallows what was typed for the shell; `tests/test_cog.zsh`
+holds a line in cog's stdin and checks that only the final shell reads it. `git`,
+`gitleaks` and `tools/stage_tree.sh` inherit the terminal and have no use for
+it, and no test checks that they leave it alone.
 
 ## Contract with dotfiles
 
@@ -92,12 +92,22 @@ marker. The `cog/UUID/*` branch names come from dotfiles' `wt`.
 
 ## Tests
 
-- `tests/test_cog.zsh` and `tests/test_setup_secrets.zsh` use stubs for
-  `limactl` and the gateway and run anywhere. `gateway/*.test.ts` and
-  `cloudflare/*.test.ts` cover the policy, token refresh, live grants, audit and
-  the HTTPS Unix socket. `tests/fake_github.py` and
-  `tests/test_github_app_token.py` cover `guest/github_app_token.py`, which no
-  `cog` flow uses.
+- `tests/test_cog.zsh` stubs `limactl`, `gh`, `curl`, `git`, `gitleaks` and
+  `tools/stage_tree.sh`, and runs a real gateway daemon (`gateway/main.ts` under
+  Bun, since `bin/cog-gateway` needs an installed bundle and Bun at a fixed
+  path) in a per-case `COG_ROOT` under `/tmp`, short because the gateway refuses
+  a socket path over 100 bytes. It copies the certificates issued once per run,
+  seeds fake GitHub authorizations and reads the gateway's instances, grants and
+  events through `tests/gateway_state.ts`. `COG_IMPL` (default `bash`) names the
+  program under test, and the suite chooses how to launch it in one place. It
+  covers the modes of everything cog writes under umasks 000, 022 and 077, a
+  hangup, interrupt or terminate signal at each cleanup stage of `new` and `base`,
+  and files whose contents a parse error could quote.
+  `tests/test_setup_secrets.zsh` uses stubs and runs anywhere.
+  `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
+  refresh, live grants, audit and the HTTPS Unix socket. `tests/fake_github.py`
+  and `tests/test_github_app_token.py` cover `guest/github_app_token.py`, which
+  no `cog` flow uses.
 - No automated test covers what only a running VM shows: the network isolation,
   the relay and the agents' behavior under the installed managed settings. Nor
   does one cover a Wrangler deploy or a build of the agent image.

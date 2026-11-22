@@ -331,16 +331,16 @@ cmd_base() {
     fi
 
     if instance_exists "$base"; then
-        if [[ $(limactl list --format '{{.Protected}}' "$base") == true ]]; then
-            limactl unprotect "$base"
+        if [[ $(limactl list --format '{{.Protected}}' "$base" </dev/null) == true ]]; then
+            limactl unprotect "$base" </dev/null
         fi
-        limactl delete --tty=false --force "$base"
+        limactl delete --tty=false --force "$base" </dev/null
     fi
     base_started=1
     limactl start --tty=false --name="$base" ${size_args[@]+"${size_args[@]}"} "$cog_root/lima/dev.yaml" </dev/null
 
     local mounts
-    mounts=$(limactl list --format '{{len .Config.Mounts}}' "$base")
+    mounts=$(limactl list --format '{{len .Config.Mounts}}' "$base" </dev/null)
     [[ $mounts == 0 ]] || die "$base mounts $mounts host directories, which ~/.lima/_config adds; a throwaway VM mounts none"
 
     local guest_home guest_dir
@@ -362,11 +362,11 @@ cmd_base() {
     limactl shell "$base" sudo truncate -s 0 /etc/machine-id </dev/null
     limactl shell "$base" "$guest_lib/reset-identity.sh" </dev/null
 
-    limactl stop --tty=false "$base"
+    limactl stop --tty=false "$base" </dev/null
     # limactl shell starts the instance's user.shell, not the passwd entry, and
     # limactl edit has a --shell flag for it.
-    limactl edit --tty=false "$base" --shell /usr/bin/zsh
-    limactl protect "$base"
+    limactl edit --tty=false "$base" --shell /usr/bin/zsh </dev/null
+    limactl protect "$base" </dev/null
     base_finished=1
     printf 'cog: %s is ready; make a VM with: cog new [NAME]\n' "$base"
 }
@@ -455,10 +455,10 @@ new_cleanup() {
         [[ $status -ne 0 ]] || status=1
         printf 'cog: removing %s after the failure\n' "$created" >&2
         if ((registered)); then
-            cog-gateway disable "lima:$created" ||
+            cog-gateway disable "lima:$created" </dev/null ||
                 printf 'cog: could not disable GitHub access for %s; run: cog-gateway disable lima:%s\n' "$created" "$created" >&2
         fi
-        limactl delete --tty=false --force "$created" ||
+        limactl delete --tty=false --force "$created" </dev/null ||
             printf 'cog: could not delete %s; run: limactl delete --force %s\n' "$created" "$created" >&2
     fi
     exit "$status"
@@ -517,7 +517,7 @@ cmd_new() {
     need limactl
     need cog-gateway
     need jq
-    cog-gateway health >/dev/null || die "the GitHub gateway is not running; run ./install.sh in the cog checkout"
+    cog-gateway health >/dev/null </dev/null || die "the GitHub gateway is not running; run ./install.sh in the cog checkout"
     set_size_args
     instance_exists "$base" || die "$base does not exist; run cog base first"
     ! instance_exists "$name" || die "$name already exists"
@@ -542,7 +542,7 @@ cmd_new() {
         prompt_claude_token ', run cog claude-token once, or pass --no-claude-token'
         printf 'cog: cog claude-token keeps the token for next time\n' >&2
     fi
-    [[ -z $repo ]] || cog-gateway ensure-auth "$repo"
+    [[ -z $repo ]] || cog-gateway ensure-auth "$repo" </dev/null
 
     trap new_cleanup EXIT
     trap 'exit 129' HUP
@@ -553,10 +553,10 @@ cmd_new() {
     # limactl clone takes limactl edit's --cpus and --memory.
     limactl clone --tty=false ${size_args[@]+"${size_args[@]}"} "$base" "$name" </dev/null
     local registration vm_id host_socket socket_name port_rule guest_home ca_path lima_dir
-    lima_dir=$(limactl list --format '{{.Dir}}' "$name") || die "cannot find the Lima directory of $name"
+    lima_dir=$(limactl list --format '{{.Dir}}' "$name" </dev/null) || die "cannot find the Lima directory of $name"
     [[ $lima_dir == /* ]] || die "invalid Lima directory for $name"
     install -d -m 700 "$lima_dir/sock"
-    registration=$(cog-gateway register "lima:$name" --lima-dir "$lima_dir") || die "cannot register $name with the GitHub gateway"
+    registration=$(cog-gateway register "lima:$name" --lima-dir "$lima_dir" </dev/null) || die "cannot register $name with the GitHub gateway"
     registered=1
     vm_id=$(printf '%s' "$registration" | jq -er .id) || die "the GitHub gateway returned no VM identity"
     host_socket=$(printf '%s' "$registration" | jq -er .socket) || die "the GitHub gateway returned no socket"
@@ -571,14 +571,14 @@ cmd_new() {
     limactl shell "$name" /home/linuxbrew/.linuxbrew/bin/brew upgrade --cask claude-code@latest codex </dev/null
 
     guest_home=$(guest_home_of "$name")
-    ca_path=$(cog-gateway ca-path) || die "cannot find the gateway CA certificate"
+    ca_path=$(cog-gateway ca-path </dev/null) || die "cannot find the gateway CA certificate"
     limactl shell "$name" sudo "$guest_lib/setup-github-gateway" "$vm_id" <"$ca_path"
     limactl shell "$name" curl --fail --silent --show-error --max-time 10 --noproxy '*' \
         --output /dev/null https://api.github.com/__cog__/health </dev/null
 
     local guest_dir='' cloned=0
     if [[ -n $repo ]]; then
-        cog-gateway grant "lima:$name" "$repo" --profile cog
+        cog-gateway grant "lima:$name" "$repo" --profile cog </dev/null
         limactl shell "$name" curl --fail --silent --show-error --max-time 20 --noproxy '*' \
             --output /dev/null "https://api.github.com/repos/$repo" </dev/null
         # The base holds that checkout already, with the Mac's local changes.
@@ -644,7 +644,7 @@ cmd_github() {
     need limactl
     need cog-gateway
     instance_exists "$name" || die "$name does not exist"
-    cog-gateway grant "lima:$name" "$repo" --profile cog
+    cog-gateway grant "lima:$name" "$repo" --profile cog </dev/null
     printf 'cog: %s can now read and push cog branches on %s.\n' "$name" "$repo"
 }
 
@@ -654,14 +654,14 @@ cmd_rm() {
     [[ $1 != "$base" ]] || die "refusing to delete $base; cog base rebuilds it"
     need limactl
     need cog-gateway
-    cog-gateway disable "lima:$1"
-    limactl delete --tty=false --force "$1"
+    cog-gateway disable "lima:$1" </dev/null
+    limactl delete --tty=false --force "$1" </dev/null
     printf 'cog: %s is deleted and its GitHub grants are disabled.\n' "$1"
 }
 
 cmd_list() {
     need limactl
-    limactl list
+    limactl list </dev/null
 }
 
 valid_name "$base"
