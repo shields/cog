@@ -146,6 +146,52 @@ test("the base VM and malformed names cannot be registered", () => {
   }
 });
 
+test("the configured base VM cannot be registered either", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-state-"));
+  const state = new State(directory, { baseName: "my-base" });
+  try {
+    for (const name of ["lima:my-base", "lima:cog-base"]) {
+      assert.throws(
+        () => state.register(name, path.join(directory, "x.sock"), "tester"),
+        /invalid VM name/,
+        name,
+      );
+    }
+    assert.equal(
+      state.register("lima:work", path.join(directory, "w.sock"), "tester")
+        .name,
+      "lima:work",
+    );
+  } finally {
+    state.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an unset base name leaves only cog-base refused", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-state-"));
+  const state = new State(directory, { baseName: undefined });
+  try {
+    assert.throws(
+      () =>
+        state.register(
+          "lima:cog-base",
+          path.join(directory, "x.sock"),
+          "tester",
+        ),
+      /invalid VM name/,
+    );
+    assert.equal(
+      state.register("lima:my-base", path.join(directory, "w.sock"), "tester")
+        .name,
+      "lima:my-base",
+    );
+  } finally {
+    state.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("audit record precedes a request and an interrupted request retains an unknown outcome", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "cog-audit-"));
   const state = new State(directory);

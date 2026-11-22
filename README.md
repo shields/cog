@@ -218,7 +218,7 @@ display name receives a new ID and no old grants. `cog-gateway logs VM-ID` can
 inspect a deleted VM's retained history. The gateway also has `serve`, `init`
 (create the CA and server certificate), `ca-path`, `health`, `register`,
 `disable` and `ensure-auth`, which `cog` calls itself. The gateway refuses to
-register `lima:cog-base`.
+register `lima:cog-base` or the VM that `COG_BASE` names.
 
 The GitHub App uses device flow with expiring user tokens and no private key.
 For your own app, grant repository Contents read/write, and Pull requests,

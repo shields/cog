@@ -71,8 +71,15 @@ interface GrantRow {
 
 export class State {
   readonly db: DatabaseSync;
+  readonly #base: string;
 
-  constructor(directory: string) {
+  // baseName is the base VM that is cloned for every other: the VM it names
+  // is never registered, whatever it is called.
+  constructor(
+    directory: string,
+    options: { baseName?: string | undefined } = {},
+  ) {
+    this.#base = options.baseName ?? "cog-base";
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
     this.db = new DatabaseSync(path.join(directory, "state.sqlite"));
@@ -185,7 +192,8 @@ export class State {
   register(name: string, socket: string, actor: string): Instance {
     if (
       !/^lima:[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/.test(name) ||
-      name === "lima:cog-base"
+      name === "lima:cog-base" ||
+      name === `lima:${this.#base}`
     ) {
       throw new Error("invalid VM name");
     }

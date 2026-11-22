@@ -52,7 +52,12 @@
   current directory. `cloudflare/context.sh` repeats the dotfiles checkout
   checks and the marker list, and a test compares those copies, so change both.
 - `gateway/` holds the policy, state (SQLite), authorization, certificates and
-  the HTTPS-over-Unix-socket server. `cloudflare/` holds the Worker
+  the HTTPS-over-Unix-socket server. `gateway/control.ts` is what the commands
+  that administer it share (locations, health, sync, register and its
+  rollback, disable, grant, revoke, the profile parser and the policy
+  document); it opens the state and the authorizations on first use, and
+  `State` refuses to register `lima:cog-base` and the VM that `COG_BASE`
+  names. `cloudflare/` holds the Worker
   (`worker.ts`), the authority Durable Object, the outbound interceptor, which
   applies `gateway/policy.ts`, and `admin.ts`. The container gets no GitHub
   token. `profiles.yaml` holds the `read` and `cog` templates; the persisted
