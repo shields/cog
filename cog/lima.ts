@@ -25,6 +25,7 @@ import {
 } from "./proc.ts";
 
 export interface ShellOptions {
+  quiet?: boolean;
   workdir?: string;
   stdin?: Stdin;
 }
@@ -35,6 +36,7 @@ export interface Lima {
   list(): Promise<void>;
   // limactl list exits non-zero when no instance matches the name.
   exists(name: string): Promise<boolean>;
+  hasGatewaySocket(name: string, socket: string): Promise<boolean>;
   isProtected(name: string): Promise<boolean>;
   unprotect(name: string): Promise<void>;
   remove(name: string): Promise<void>;
@@ -119,6 +121,13 @@ export function createLima(limactl: string): Lima {
     list: () => call("list", []),
     exists: async (name) =>
       (await runStatus([limactl, "list", "-q", name], { quiet: true })) === 0,
+    hasGatewaySocket: async (name, socket) => {
+      const forwards = await output("list", [
+        "--format",
+        '{{range .Config.PortForwards}}{{if .Reverse}}{{printf "%s\\t%s\\n" $.Name .HostSocket}}{{end}}{{end}}',
+      ]);
+      return forwards.split("\n").includes(`${name}\t${socket}`);
+    },
     isProtected: async (name) =>
       (await output("list", ["--format", "{{.Protected}}", name])) === "true",
     unprotect: (name) => call("unprotect", [name]),
@@ -150,6 +159,7 @@ export function createLima(limactl: string): Lima {
     shell: async (name, command, options = {}) => {
       await call("shell", shellArgs(name, command, options), {
         ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+        ...(options.quiet ? { quiet: true } : {}),
       });
     },
     shellOutput: (name, command) =>

@@ -25,6 +25,7 @@ import { exitStatus } from "./errors.ts";
 import { createLima, findLimactl, type Lima } from "./lima.ts";
 import { validName } from "./names.ts";
 import { note, say } from "./output.ts";
+import { configureTailscale } from "./tailscale.ts";
 import { promptClaudeToken } from "./secrets.ts";
 
 function usage(config: Config): string {
@@ -40,6 +41,8 @@ function usage(config: Config): string {
                               the dotfiles checkout DIR
        cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
                               clone ${base}, install secrets, clone the repository, open a shell
+       cog tailscale config CLIENT-ID
+                              configure automatic Tailscale SSH access to new VMs
        cog grant NAME [OWNER/REPO] [--profile read|cog]
                               grant a repository through the Mac gateway
        cog revoke NAME OWNER/REPO
@@ -109,6 +112,9 @@ async function dispatch(
       return 0;
     case "base":
       await baseVM(args, context);
+      return 0;
+    case "tailscale":
+      await configureTailscale(args, context.config);
       return 0;
     case "new":
       return await newVM(args, context);

@@ -20,6 +20,11 @@ import { dotfilesRepo, guestLib, guestRepo } from "../config.ts";
 import { CogError, Interrupted } from "../errors.ts";
 import { gatewayName, sizeArgs, validName, validRepository } from "../names.ts";
 import { note, say } from "../output.ts";
+import {
+  deleteTailscale,
+  enrollTailscale,
+  tailscaleCredential,
+} from "../tailscale.ts";
 import { signals } from "../proc.ts";
 import { loadProfiles } from "../profiles.ts";
 import {
@@ -40,14 +45,17 @@ type NewContext = LifecycleContext<
   | "enter"
   | "exists"
   | "guestHome"
+  | "hasGatewaySocket"
   | "remove"
-  | "shell",
+  | "shell"
+  | "shellOutput",
   | "certificates"
   | "close"
   | "disable"
   | "ensureAuth"
   | "grant"
   | "health"
+  | "state"
   | "register"
 >;
 
@@ -187,6 +195,13 @@ export async function newVM(
   if (await lima.exists(name)) {
     throw new CogError(`${name} already exists`);
   }
+  const gatewayVM = gatewayName(name);
+  if (gateway.state.tailscaleNode(gatewayVM)) {
+    throw new CogError(
+      `Tailscale cleanup is pending; run cog rm ${name} first`,
+    );
+  }
+  const credential = tailscaleCredential(context.config.tailscaleFile);
   const codex = noCodex ? undefined : readCodexAuth(codexAuthFile);
   const fireworks = fireworksKeyPresent(fireworksKeyFile)
     ? readFireworksKey(fireworksKeyFile)
@@ -207,9 +222,9 @@ export async function newVM(
     await gateway.ensureAuth(repository);
   }
 
-  const gatewayVM = gatewayName(name);
   let ownsClone = false;
-  let registered = false;
+  let registeredId: string | undefined;
+  let enrollment: Instance | undefined;
   let guestDir: string | undefined;
   signals.install();
   try {
@@ -235,7 +250,7 @@ export async function newVM(
     let registration: Instance;
     try {
       registration = await gateway.register(gatewayVM, directory);
-      registered = true;
+      registeredId = registration.id;
     } catch {
       signals.check();
       throw new CogError(`cannot register ${name} with the GitHub gateway`);
@@ -325,6 +340,17 @@ export async function newVM(
       }
     }
 
+    if (credential) {
+      enrollment = registration;
+      const address = await enrollTailscale(
+        lima,
+        gateway.state,
+        credential,
+        name,
+        id,
+      );
+      say(`cog: SSH / Herdr: ${address}`);
+    }
     say(`cog: ${name} is ready.`);
     if (repository === null || guestDir === undefined) {
       say(
@@ -356,8 +382,12 @@ export async function newVM(
     }
     const status = signals.status;
     await signals.cleanup(async () => {
+      if (enrollment) {
+        const active = gateway.state.byName(gatewayVM);
+        if (active && active.id !== enrollment.id) return;
+      }
       cleanupNote(`cog: removing ${name} after the failure`);
-      if (registered) {
+      if (registeredId !== undefined) {
         try {
           await gateway.disable(gatewayVM);
         } catch {
@@ -366,12 +396,34 @@ export async function newVM(
           );
         }
       }
+      let deleted = false;
       try {
-        await lima.remove(name);
+        if (
+          !enrollment ||
+          (await lima.hasGatewaySocket(name, enrollment.socket))
+        ) {
+          await lima.remove(name);
+        }
+        deleted = true;
       } catch {
         cleanupNote(
           `cog: could not delete ${name}; run: limactl delete --force ${name}`,
         );
+      }
+      if (registeredId !== undefined) {
+        try {
+          const record = gateway.state.tailscaleNode(gatewayVM);
+          if (record?.instanceId === registeredId) {
+            await deleteTailscale(context.config.tailscaleFile, record);
+            if (deleted) {
+              gateway.state.forgetTailscale(registeredId);
+            }
+          }
+        } catch {
+          cleanupNote(
+            `cog: Tailscale cleanup is pending; retry with cog rm ${name}`,
+          );
+        }
       }
     });
     throw status === null ? error : new Interrupted(status);

@@ -329,6 +329,18 @@ test.each([0o000, 0o022, 0o077])(
       [
         "shell",
         "base",
+        ["sudo", "systemctl", "mask", "--now", "tailscaled.service"],
+        undefined,
+      ],
+      [
+        "shell",
+        "base",
+        ["sudo", "test", "!", "-e", "/var/lib/tailscale/tailscaled.state"],
+        undefined,
+      ],
+      [
+        "shell",
+        "base",
         ["sudo", "truncate", "-s", "0", "/etc/machine-id"],
         undefined,
       ],

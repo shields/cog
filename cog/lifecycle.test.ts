@@ -23,12 +23,18 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { onTestFinished, test } from "bun:test";
+import { onTestFinished, spyOn, test } from "bun:test";
+import { State } from "../gateway/state.ts";
 import { claudeToken, grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
 import { loadConfig } from "./config.ts";
 import { CommandFailed, Interrupted } from "./errors.ts";
 import { signals } from "./proc.ts";
+import {
+  configureTailscale,
+  enrollTailscale,
+  tailscaleCredential,
+} from "./tailscale.ts";
 
 function home(): string {
   const directory = mkdtempSync(path.join(os.tmpdir(), "cog-lifecycle-"));
@@ -40,6 +46,10 @@ function home(): string {
 
 function fixture() {
   const config = loadConfig({ HOME: home(), COG_BASE: "base", COG_CPUS: "2" });
+  const state = new State(path.join(config.home, "state"));
+  onTestFinished(() => {
+    state.close();
+  });
   const calls: unknown[][] = [];
   const mark = (method: string, ...args: unknown[]): void => {
     calls.push([method, ...args]);
@@ -59,13 +69,15 @@ function fixture() {
       process.emit(failures.signal, failures.signal);
     }
   };
-  const context: Parameters<typeof newVM>[1] = {
+  const context: Parameters<typeof newVM>[1] & Parameters<typeof remove>[1] = {
     config,
     prompt: (input, hint) => {
       mark("prompt", input, hint);
       return Promise.resolve("fake-claude");
     },
     lima: {
+      hasGatewaySocket: () =>
+        Promise.reject(new Error("unexpected socket query")),
       exists: (name) => {
         mark("exists", name);
         return Promise.resolve(name === config.base);
@@ -104,12 +116,14 @@ function fixture() {
         signals.check();
         return Promise.resolve();
       },
+      shellOutput: () => Promise.reject(new Error("unexpected shell query")),
       enter: (name, workdir) => {
         mark("enter", name, workdir);
         return Promise.resolve(17);
       },
     },
     gateway: () => ({
+      state,
       health: () => {
         mark("health");
         return Promise.resolve();
@@ -149,7 +163,7 @@ function fixture() {
         }
         return failures.disableFails
           ? Promise.reject(new Error("cannot sync"))
-          : Promise.resolve();
+          : Promise.resolve(null);
       },
       close: () => {
         mark("close");
@@ -396,3 +410,232 @@ test.each([
     );
   },
 );
+
+async function tailnetVM() {
+  const { context, socket } = fixture();
+  const { config, lima } = context;
+  const promptInput = path.join(config.home, "prompt");
+  const clientSecret = "tskey-client-test";
+  const key = "tskey-auth-test";
+  writeFileSync(promptInput, clientSecret);
+  await configureTailscale(["config", "client"], { ...config, promptInput });
+  assert.equal(statSync(config.tailscaleFile).mode & 0o777, 0o600);
+  const gateway = context.gateway();
+  const { state } = gateway;
+  const remote = {
+    hostname: "",
+    dnsSuffix: "",
+    nodeId: "node-test",
+    enrolled: false,
+    interrupted: false,
+    unavailable: false,
+    deleted: [] as string[],
+    present: true,
+    revoked: false,
+  };
+  const request = (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    assert.ok(typeof input === "string");
+    const route = input.replace("https://api.tailscale.com/api/v2/", "");
+    assert.equal(init?.redirect, "error");
+    if (route === "oauth/token") {
+      assert.ok(init.body instanceof URLSearchParams);
+      assert.equal(init.body.get("client_secret"), clientSecret);
+      return Promise.resolve(Response.json({ access_token: "api-test" }));
+    }
+    assert.equal(
+      new Headers(init.headers).get("authorization"),
+      "Bearer api-test",
+    );
+    if (route === "tailnet/-/keys") {
+      assert.ok(typeof init.body === "string");
+      const body: unknown = JSON.parse(init.body);
+      assert.partialDeepStrictEqual(body, {
+        capabilities: {
+          devices: {
+            create: { reusable: false, ephemeral: false, tags: ["tag:cog"] },
+          },
+        },
+        expirySeconds: 600,
+      });
+      return Promise.resolve(Response.json({ id: "auth-id", key }));
+    }
+    if (route === "tailnet/-/keys/auth-id" && init.method === "DELETE") {
+      remote.revoked = true;
+      return Promise.resolve(new Response(null, { status: 404 }));
+    }
+    const device = {
+      nodeId: remote.nodeId,
+      hostname: remote.hostname,
+      name: remote.hostname + remote.dnsSuffix + ".example.ts.net",
+      sshEnabled: true,
+      authorized: true,
+      tags: ["tag:cog"],
+    };
+    if (route.startsWith("tailnet/-/devices?")) {
+      const query = new URLSearchParams(route.split("?", 2)[1]);
+      assert.equal(query.get("tags"), "tag:cog");
+      assert.equal(query.get("hostname"), remote.hostname);
+      return Promise.resolve(
+        Response.json({
+          devices: remote.enrolled
+            ? [device, { ...device, hostname: "different", nodeId: "other" }]
+            : [],
+        }),
+      );
+    }
+    if (init.method === "DELETE") {
+      assert.equal(route, "device/" + remote.nodeId);
+      if (remote.unavailable)
+        return Promise.resolve(new Response(key, { status: 503 }));
+      remote.deleted.push(remote.nodeId);
+      remote.enrolled = false;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    assert.equal(route, `device/${remote.nodeId}?fields=all`);
+    return Promise.resolve(Response.json(device));
+  };
+  const api = spyOn(globalThis, "fetch").mockImplementation(
+    Object.assign(request, { preconnect: fetch.preconnect }),
+  );
+  onTestFinished(() => {
+    api.mockRestore();
+  });
+  const shell = lima.shell;
+  lima.shell = async (name, args, options) => {
+    assert.ok(!args.join(" ").includes(clientSecret));
+    assert.ok(!args.join(" ").includes(key));
+    if (args.includes("tailscale")) {
+      remote.hostname =
+        args.find((arg) => arg.startsWith("--hostname="))?.slice(11) ?? "";
+      if (args.includes("up")) {
+        assert.equal(options?.quiet, true);
+        assert.deepEqual(options.stdin, new TextEncoder().encode(key));
+        assert.ok(args.includes("--auth-key=file:/dev/stdin"));
+        assert.ok(
+          args.includes("--accept-dns=false") &&
+            args.includes("--accept-routes=false") &&
+            args.includes("--ssh"),
+        );
+        remote.enrolled = true;
+        if (remote.interrupted) process.emit("SIGTERM", "SIGTERM");
+      }
+    }
+    await shell(name, args, options);
+  };
+  lima.shellOutput = (_name, args) => {
+    assert.deepEqual(args, ["id", "-un"]);
+    return Promise.resolve("shields");
+  };
+  lima.hasGatewaySocket = (_name, savedSocket) =>
+    Promise.resolve(remote.present && savedSocket === socket);
+  lima.remove = () => {
+    remote.present = false;
+    return Promise.resolve();
+  };
+  return {
+    context: {
+      ...context,
+      gateway: () => ({
+        ...gateway,
+        register: (name: string) =>
+          Promise.resolve(state.register(name, socket, "test")),
+        disable: (name: string, options?: { forRemoval?: boolean }) =>
+          Promise.resolve(state.disable(name, "test", options)),
+      }),
+    },
+    state,
+    remote,
+  };
+}
+
+test("new enrolls with a one-use key and rm retries after deleting the stopped VM", async () => {
+  const { context, state, remote } = await tailnetVM();
+  assert.equal(await newVM(noSecrets, context), 17);
+  const record = state.tailscaleNode("lima:vm");
+  assert.ok(record);
+  assert.equal(record.nodeId, remote.nodeId);
+  assert.equal(remote.hostname, "cog-vm");
+  remote.unavailable = true;
+  await assert.rejects(remove(["vm"], context), {
+    message: "Tailscale API request failed with HTTP 503",
+  });
+  assert.equal(remote.present, false);
+  assert.equal(state.byId(record.instanceId)?.disabled, true);
+  assert.throws(
+    () => state.register("lima:vm", "/other", "test"),
+    /pending Tailscale cleanup/,
+  );
+  remote.unavailable = false;
+  await remove(["vm"], context);
+  assert.deepEqual(remote.deleted, ["node-test"]);
+  assert.equal(state.tailscaleNode("lima:vm"), null);
+  assert.notEqual(
+    state.register("lima:vm", "/other", "test").id,
+    record.instanceId,
+  );
+});
+
+test("interrupted enrollment revokes the key and cleans up the device before its ID was saved", async () => {
+  const { context, state, remote } = await tailnetVM();
+  remote.interrupted = true;
+  await assert.rejects(newVM(noSecrets, context), { status: 143 });
+  assert.equal(remote.revoked, true);
+  assert.deepEqual(remote.deleted, ["node-test"]);
+  assert.equal(state.tailscaleNode("lima:vm"), null);
+  assert.equal(remote.present, false);
+});
+
+test("a malformed Tailscale credential fails before cloning without quoting its contents", async () => {
+  const { context, calls } = fixture();
+  const file = context.config.tailscaleFile;
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, "private-broken-credential", { mode: 0o600 });
+  await assert.rejects(newVM(noSecrets, context), {
+    message:
+      "cannot read Tailscale credential; run cog tailscale config CLIENT-ID",
+  });
+  assert.ok(calls.every(([method]) => method !== "clone"));
+});
+
+test("each clone gets its own device and reports the assigned MagicDNS name", async () => {
+  const { context, state, remote } = await tailnetVM();
+  const credential = tailscaleCredential(context.config.tailscaleFile);
+  assert.ok(credential);
+  for (const [name, nodeId] of [
+    ["A_1", "first"],
+    ["A.1", "second"],
+  ] as const) {
+    const instance = state.register("lima:" + name, "/" + name, "test");
+    remote.nodeId = nodeId;
+    remote.dnsSuffix = nodeId === "first" ? "" : "-1";
+    const address = await enrollTailscale(
+      context.lima,
+      state,
+      credential,
+      name,
+      instance.id,
+    );
+    assert.equal(address, `shields@cog-a-1${remote.dnsSuffix}.example.ts.net`);
+    assert.equal(state.tailscaleNode(instance.name)?.nodeId, nodeId);
+  }
+});
+
+test("late enrollment failure cannot revoke or delete a replacement VM", async () => {
+  const { context, state, remote } = await tailnetVM();
+  const shell = context.lima.shell;
+  context.lima.shell = async (name, args, options) => {
+    if (args.includes("set")) {
+      await remove([name], context);
+      state.register("lima:" + name, "/different/socket", "test");
+      remote.present = true;
+      throw new Error("original VM disappeared");
+    }
+    await shell(name, args, options);
+  };
+  await assert.rejects(newVM(noSecrets, context), /original VM disappeared/);
+  assert.equal(remote.present, true);
+  assert.equal(state.byName("lima:vm")?.socket, "/different/socket");
+});

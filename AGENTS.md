@@ -94,6 +94,12 @@ shell, so that none swallows what was typed for the shell; `tests/test_cog.zsh`
 holds a line in cog's stdin and checks that only the final shell reads it.
 `cog base` never reads cog's stdin, including during staging.
 
+Tailscale enrollment uses a dedicated Mac OAuth client with `auth_keys` and
+`devices:core` write access scoped to `tag:cog`. Only a one-use auth key
+enters a clone, on stdin. The base masks tailscaled. The gateway database
+records the auth key ID and stable node ID by instance UUID so cleanup works
+after a VM stops or is deleted. The SSH rule lives in `shields/tailscale-config`.
+
 ## Contract with dotfiles
 
 dotfiles reads the two markers and the shape of the settings that cog writes,
@@ -129,5 +135,6 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   `tests/test_github_app_token.py` cover `guest/github_app_token.py`, which no
   `cog` flow uses.
 - No automated test covers a live launchd install, real GitHub authorization,
-  network isolation and the relay in a VM, agent behavior under the installed
+  network isolation and the relay in a VM, live Tailscale enrollment or a
+  Herdr phone connection, agent behavior under the installed
   managed settings, a Wrangler deploy or a build of the agent image.

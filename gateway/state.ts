@@ -31,6 +31,13 @@ export interface Instance {
   disabled: boolean;
 }
 
+export interface TailscaleNode {
+  instanceId: string;
+  socket: string;
+  keyId: string;
+  nodeId: string | null;
+}
+
 export interface AccessLog {
   id: string;
   createdAt: number;
@@ -96,6 +103,11 @@ export class State {
         created_at INTEGER NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS instances_active_name ON instances(name) WHERE disabled = 0;
+      CREATE TABLE IF NOT EXISTS tailscale_nodes (
+        instance_id TEXT PRIMARY KEY REFERENCES instances(id),
+        key_id TEXT NOT NULL,
+        node_id TEXT UNIQUE
+      );
       CREATE TABLE IF NOT EXISTS grants (
         instance_id TEXT NOT NULL REFERENCES instances(id),
         repository TEXT NOT NULL,
@@ -201,6 +213,9 @@ export class State {
       if (existing && !existing.disabled) {
         throw new Error("VM is already registered");
       }
+      if (this.tailscaleNode(name)) {
+        throw new Error("VM still has pending Tailscale cleanup");
+      }
       const id = randomUUID();
       this.db
         .prepare(
@@ -217,10 +232,16 @@ export class State {
     });
   }
 
-  disable(name: string, actor: string): void {
-    this.transaction(() => {
+  disable(
+    name: string,
+    actor: string,
+    options: { forRemoval?: boolean } = {},
+  ): TailscaleNode | null {
+    return this.transaction(() => {
+      const node = this.tailscaleNode(name);
       const instance = this.byName(name);
       if (!instance || instance.disabled) {
+        if (options.forRemoval && node) return node;
         throw new Error("VM is not active");
       }
       const old = this.grants(instance.id);
@@ -235,7 +256,49 @@ export class State {
         disabled: true,
         removed: old,
       });
+      return node;
     });
+  }
+
+  tailscaleNode(name: string): TailscaleNode | null {
+    const row = this.db
+      .prepare(
+        `SELECT i.id AS instanceId, i.socket, t.key_id AS keyId, t.node_id AS nodeId
+         FROM instances i JOIN tailscale_nodes t ON t.instance_id = i.id WHERE i.name = ?`,
+      )
+      .get(name);
+    return (row as unknown as TailscaleNode | undefined) ?? null;
+  }
+
+  beginTailscale(instanceId: string, keyId: string): void {
+    const result = this.db
+      .prepare(
+        `INSERT INTO tailscale_nodes(instance_id, key_id)
+         SELECT id, ? FROM instances WHERE id = ? AND disabled = 0`,
+      )
+      .run(keyId, instanceId);
+    if (!result.changes) {
+      throw new Error("VM is not active");
+    }
+  }
+
+  setTailscaleNode(instanceId: string, nodeId: string): void {
+    const result = this.db
+      .prepare(
+        `UPDATE tailscale_nodes SET node_id = ?
+        WHERE instance_id = ? AND node_id IS NULL AND instance_id IN
+          (SELECT id FROM instances WHERE disabled = 0)`,
+      )
+      .run(nodeId, instanceId);
+    if (!result.changes) {
+      throw new Error("Tailscale enrollment is no longer pending");
+    }
+  }
+
+  forgetTailscale(instanceId: string): void {
+    this.db
+      .prepare("DELETE FROM tailscale_nodes WHERE instance_id = ?")
+      .run(instanceId);
   }
 
   grants(instanceId: string): Record<string, Grant> {

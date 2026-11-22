@@ -277,3 +277,24 @@ test("findLimactl resolves through PATH once, to an absolute path", () => {
     process.env.PATH = previous;
   }
 });
+
+test("a cleanup retry recognizes only the reverse socket belonging to the saved clone", async () => {
+  const { limactl } = stub();
+  const original = process.env.STUB_OUT;
+  try {
+    process.env.STUB_OUT =
+      "other\t/path with spaces/original.sock\nvm\t/another.sock";
+    const lima = createLima(limactl);
+    assert.equal(
+      await lima.hasGatewaySocket("vm", "/path with spaces/original.sock"),
+      false,
+    );
+    assert.equal(
+      await lima.hasGatewaySocket("other", "/path with spaces/original.sock"),
+      true,
+    );
+  } finally {
+    if (original === undefined) delete process.env.STUB_OUT;
+    else process.env.STUB_OUT = original;
+  }
+});

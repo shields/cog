@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import path from "node:path";
+import { locations } from "../gateway/control.ts";
 import { CogError } from "./errors.ts";
 
 export type Env = Readonly<Record<string, string | undefined>>;
@@ -29,6 +30,7 @@ export interface Config {
   readonly githubWebUrl: string;
   readonly promptInput: string;
   readonly profilesFile: string;
+  readonly tailscaleFile: string;
   readonly claudeTokenFile: string;
   readonly fireworksKeyFile: string;
   readonly codexAuthFile: string;
@@ -56,6 +58,7 @@ export function loadConfig(env: Env): Config {
     githubWebUrl: setting(env, "COG_GITHUB_WEB_URL", "https://github.com"),
     promptInput: setting(env, "COG_PROMPT_INPUT"),
     profilesFile: setting(env, "COG_PROFILES"),
+    tailscaleFile: path.join(locations(env).secrets, "tailscale-oauth.json"),
     claudeTokenFile: path.join(
       home,
       ".config",

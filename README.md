@@ -58,6 +58,7 @@ cog base [--dotfiles DIR] [MODULE...]
 cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
 cog grant NAME [OWNER/REPO] [--profile read|cog]
 cog claude-token
+cog tailscale config CLIENT-ID
 cog rm NAME
 cog list
 ```
@@ -131,8 +132,37 @@ VM stays ready; reconnect with `limactl shell NAME`.
 `cog-base`.
 
 Tests replace the terminal and the gateway locations with `COG_PROMPT_INPUT`
-(a file read instead of the Claude token prompt) and `COG_ROOT`; the program
-honours both outside tests.
+(a file supplying the first line for a hidden credential prompt) and
+`COG_ROOT`. The program honours both outside tests.
+
+## Connect from your phone
+
+1. Apply the `tag:cog` policy in `shields/tailscale-config`. That tailnet
+   uses MagicDNS. The SSH rule lets `shields@msrl.com` sign in as `shields`.
+2. In the Tailscale admin console, create a dedicated **OAuth client** with
+   **Auth Keys** (`auth_keys`) and **Devices / Core** (`devices:core`) write
+   access, restricted to `tag:cog`. Run `cog tailscale config CLIENT-ID` on
+   the Mac and paste the client secret at the hidden prompt. Cog saves it in
+   `~/.config/secrets/cog/tailscale-oauth.json` with mode 0600.
+3. After updating cog, rebuild an older base once with `cog base`. Run
+   `cog new demo`. The Mac issues a short-lived, single-use key and the clone
+   joins as its own persistent device. Cog prints the login and the assigned
+   MagicDNS hostname, including any suffix Tailscale added.
+4. Connect the phone to the same tailnet. In Herdr mobile, add the printed
+   hostname on port 22 and enter the printed username. Tailscale SSH uses the
+   phone's sign-in. The same address works in a phone SSH client.
+
+The Mac must be awake and the VM running for a connection. A VM keeps its
+address through stops and restarts. `cog rm NAME` removes its device even
+when the VM is stopped. If cleanup fails, restore connectivity or the
+credential and repeat `cog rm NAME`. Cog keeps the device ID on the Mac until
+cleanup succeeds.
+
+Enrollment starts with new Lima clones created after configuration. On a
+Mac without the credential, `cog new` creates local VMs as usual. Removing
+the credential turns off enrollment. Cleaning up enrolled VMs still requires
+a credential. To rotate it, run the configuration command again with a client
+for the same tailnet.
 
 ## GitHub access
 
@@ -288,6 +318,9 @@ Isolated, with `lima/dev.yaml` as the source:
 - No guest port is forwarded to the Mac. Lima still opens `127.0.0.1` ports on
   the Mac for SSH and for its DNS resolver, which other programs on the Mac can
   reach. The GitHub gateway has one reverse Unix socket forward per VM.
+- On enrolled VMs, the Tailscale interface accepts SSH. Guest services on
+  other ports and forwarded traffic are dropped. The VM keeps Lima DNS and
+  does not accept subnet routes.
 - The SSH agent is not forwarded, and the proxy environment is not propagated.
 - An nftables filter in the guest rejects connections to the Mac
   (`192.168.5.2`, also `host.lima.internal`, whose other ports reach the Mac's

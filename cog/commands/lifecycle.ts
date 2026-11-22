@@ -29,6 +29,7 @@ import {
   toBytes,
   writeSecretFile,
 } from "../secrets.ts";
+import { deleteTailscale } from "../tailscale.ts";
 import type { LifecycleContext } from "./context.ts";
 
 export async function inferRepository(webUrl: string): Promise<string | null> {
@@ -86,7 +87,7 @@ export async function claudeToken(
 
 export async function remove(
   args: readonly string[],
-  context: LifecycleContext<"remove", "disable">,
+  context: LifecycleContext<"remove" | "hasGatewaySocket", "disable" | "state">,
 ): Promise<void> {
   const [first, ...rest] = args;
   if (first === undefined || rest.length !== 0) {
@@ -98,7 +99,19 @@ export async function remove(
     throw new CogError(`refusing to delete ${name}; cog base rebuilds it`);
   }
   const lima = context.lima;
-  await context.gateway().disable(gatewayName(name));
+  const gateway = context.gateway();
+  const record = await gateway.disable(gatewayName(name), { forRemoval: true });
+  if (record) {
+    if (await lima.hasGatewaySocket(name, record.socket)) {
+      await lima.remove(name);
+    }
+    await deleteTailscale(context.config.tailscaleFile, record);
+    gateway.state.forgetTailscale(record.instanceId);
+    say(
+      `cog: removed the Tailscale device for ${name} and disabled its GitHub grants.`,
+    );
+    return;
+  }
   await lima.remove(name);
   say(`cog: ${name} is deleted and its GitHub grants are disabled.`);
 }

@@ -32,6 +32,7 @@ import {
   type AccessLog,
   type Instance,
   type PolicyEvent,
+  type TailscaleNode,
 } from "./state.ts";
 
 export type Env = Readonly<Record<string, string | undefined>>;
@@ -287,9 +288,13 @@ export class Control {
     return instance;
   }
 
-  async disable(name: string): Promise<void> {
-    this.state.disable(name, this.actor);
+  async disable(
+    name: string,
+    options: { forRemoval?: boolean } = {},
+  ): Promise<TailscaleNode | null> {
+    const node = this.state.disable(name, this.actor, options);
     await this.sync();
+    return node;
   }
 
   async authorize(repository: string): Promise<void> {

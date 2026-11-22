@@ -477,6 +477,20 @@ export async function baseVM(
       ],
       workdir,
     );
+    await lima.shell(base, [
+      "sudo",
+      "systemctl",
+      "mask",
+      "--now",
+      "tailscaled.service",
+    ]);
+    await lima.shell(base, [
+      "sudo",
+      "test",
+      "!",
+      "-e",
+      "/var/lib/tailscale/tailscaled.state",
+    ]);
     await lima.shell(base, ["sudo", "truncate", "-s", "0", "/etc/machine-id"]);
     await lima.shell(base, [`${guestLib}/reset-identity.sh`]);
 

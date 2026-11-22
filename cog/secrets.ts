@@ -188,25 +188,32 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 stty -echo || exit 1
+printf %s "$1" >&2
 IFS= read -r line
 printf %s "$line"`;
 
-async function readHidden(promptText: string, orElse: string): Promise<string> {
+async function readHidden(
+  promptText: string,
+  subject: string,
+  orElse: string,
+): Promise<string> {
   let terminal: number;
   try {
     terminal = openSync("/dev/tty", "r+");
   } catch {
     throw new CogError(
-      `there is no terminal to ask for the Claude token; run in a terminal${orElse}`,
+      `there is no terminal to ask for the ${subject}; run in a terminal${orElse}`,
     );
   }
   try {
-    writeAll(terminal, promptText);
-    const helper = Bun.spawn(["/bin/sh", "-c", hiddenRead], {
-      stdin: terminal,
-      stdout: "pipe",
-      stderr: "ignore",
-    });
+    const helper = Bun.spawn(
+      ["/bin/sh", "-c", hiddenRead, "prompt", promptText],
+      {
+        stdin: terminal,
+        stdout: "pipe",
+        stderr: terminal,
+      },
+    );
     const output = new Response(helper.stdout).arrayBuffer();
     const status = await helper.exited;
     writeAll(terminal, "\n");
@@ -214,7 +221,7 @@ async function readHidden(promptText: string, orElse: string): Promise<string> {
       throw new Interrupted(status);
     }
     if (status !== 0) {
-      throw new CogError("cannot read the Claude token from the terminal");
+      throw new CogError(`cannot read the ${subject} from the terminal`);
     }
     return latin1(new Uint8Array(await output));
   } finally {
@@ -227,29 +234,34 @@ function firstLine(text: string): string {
   return end === -1 ? text : text.slice(0, end);
 }
 
+export async function promptSecretLine(
+  input: string,
+  prompt: string,
+  subject: string,
+  hint = "",
+): Promise<string> {
+  if (input === "") {
+    return firstLine(await readHidden(prompt, subject, hint));
+  }
+  if (!readable(input)) throw new CogError("cannot read COG_PROMPT_INPUT");
+  try {
+    return firstLine(latin1(readFileSync(input)));
+  } catch {
+    return "";
+  }
+}
+
 // promptInput names a file to read instead of the terminal, for tests.
 export async function promptClaudeToken(
   promptInput: string,
   orElse = "",
 ): Promise<string> {
-  let line: string;
-  if (promptInput === "") {
-    line = firstLine(
-      await readHidden(
-        "Paste the output of claude setup-token (no echo), then press Enter: ",
-        orElse,
-      ),
-    );
-  } else {
-    if (!readable(promptInput)) {
-      throw new CogError("cannot read COG_PROMPT_INPUT");
-    }
-    try {
-      line = firstLine(latin1(readFileSync(promptInput)));
-    } catch {
-      line = "";
-    }
-  }
+  const line = await promptSecretLine(
+    promptInput,
+    "Paste the output of claude setup-token (no echo), then press Enter: ",
+    "Claude token",
+    orElse,
+  );
   return setOneWord(
     line,
     `the Claude token is empty; run claude setup-token in another terminal and paste its output${orElse}`,

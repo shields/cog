@@ -148,7 +148,7 @@ def test_the_firewall_replaces_only_its_own_table_and_loads_at_boot(
     assert "table inet lima_isolation\ndelete table inet lima_isolation\n" in script
     assert "flush ruleset" not in script
     assert "systemctl enable nftables.service" in script
-    assert "systemctl restart nftables.service" in script
+    assert "systemctl reload-or-restart nftables.service" in script
 
 
 def test_the_firewall_rejects_the_host_and_the_private_ranges(lima_home: Path) -> None:
@@ -202,3 +202,19 @@ def test_the_readiness_probe_checks_the_filter_and_dns(lima_home: Path) -> None:
     assert "for command in zsh git rsync curl socat jq openssl; do" in script
     assert 'command -v "$command" >/dev/null\n' in script
     assert "hc --version" in script
+
+
+def test_tailscale_is_installed_masked_and_only_ssh_can_enter(lima_home: Path) -> None:
+    dependency = query(
+        lima_home, '.provision[] | select(.mode == "dependency") | .script'
+    )
+    assert dependency.index("systemctl mask tailscaled.service") < dependency.index(
+        "install -y --no-install-recommends tailscale"
+    )
+    assert "signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg" in dependency
+    rules = firewall(lima_home)
+    accept = rules.index('iifname "tailscale0" tcp dport 22 accept')
+    assert (
+        rules.index("chain input {") < accept < rules.index('iifname "tailscale0" drop')
+    )
+    assert 'iifname "tailscale0" drop' in rules[rules.index("chain forward {") :]

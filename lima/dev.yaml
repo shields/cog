@@ -48,6 +48,14 @@ provision:
       #!/bin/bash
       set -eux -o pipefail
       export DEBIAN_FRONTEND=noninteractive
+      apt_update() {
+        attempts=0
+        until apt-get -o DPkg::Lock::Timeout=300 update; do
+          attempts=$((attempts + 1))
+          [ "$attempts" -lt 20 ] || return 1
+          sleep 15
+        done
+      }
       missing=0
       for command in nft zsh git rsync curl socat jq openssl; do
         command -v "$command" >/dev/null || missing=1
@@ -55,14 +63,18 @@ provision:
       if [ "$missing" -eq 1 ]; then
         # apt-get update takes the lists lock without waiting, and an
         # apt-daily run can hold it at first boot.
-        attempts=0
-        until apt-get -o DPkg::Lock::Timeout=300 update; do
-          attempts=$((attempts + 1))
-          [ "$attempts" -lt 20 ] || exit 1
-          sleep 15
-        done
+        apt_update
         apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
           nftables zsh git rsync curl socat jq openssl ca-certificates
+      fi
+
+      if [ ! -x /usr/bin/tailscale ]; then
+        systemctl mask tailscaled.service
+        curl -fsSLo /usr/share/keyrings/tailscale-archive-keyring.gpg \
+          https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
+        echo 'deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian trixie main' >/etc/apt/sources.list.d/tailscale.list
+        apt_update
+        apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends tailscale
       fi
 
       if [ ! -x /usr/local/bin/hc ]; then
@@ -101,6 +113,15 @@ provision:
       table inet lima_isolation
       delete table inet lima_isolation
       table inet lima_isolation {
+        chain input {
+          type filter hook input priority filter; policy accept;
+          iifname "tailscale0" tcp dport 22 accept
+          iifname "tailscale0" drop
+        }
+        chain forward {
+          type filter hook forward priority filter; policy accept;
+          iifname "tailscale0" drop
+        }
         chain output {
           type filter hook output priority filter; policy accept;
           oifname "lo" accept
@@ -114,7 +135,7 @@ provision:
       }
       EOF
       systemctl enable nftables.service
-      systemctl restart nftables.service
+      systemctl reload-or-restart nftables.service
 
 probes:
   - mode: readiness
@@ -127,6 +148,7 @@ probes:
       for command in zsh git rsync curl socat jq openssl; do
         command -v "$command" >/dev/null
       done
+      tailscale version
       hc --version
     hint: |
       The firewall script or the package step failed, or the filter blocks the
