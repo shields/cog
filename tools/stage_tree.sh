@@ -88,7 +88,7 @@ done
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 script_root=$(cd "$script_dir/.." && pwd -P)
 if ((have_source)); then
-    root=$(cd "$source_arg" 2>/dev/null && pwd -P) || die "--source $source_arg is not a directory"
+    root=$(cd -- "$source_arg" 2>/dev/null && pwd -P) || die "--source $source_arg is not a directory"
 else
     root=$script_root
 fi
@@ -96,6 +96,14 @@ top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || die "$root is not
 [[ $top == "$root" ]] || die "$root is not the top level of a git repository"
 git_dir=$(git -C "$root" rev-parse --absolute-git-dir)
 git_common_dir=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)
+# A linked worktree keeps its git directories outside its working tree, so
+# script_root does not cover them.
+script_git_dir=
+script_git_common_dir=
+if git -C "$script_root" rev-parse --git-dir >/dev/null 2>&1; then
+    script_git_dir=$(git -C "$script_root" rev-parse --absolute-git-dir)
+    script_git_common_dir=$(cd "$(git -C "$script_root" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)
+fi
 
 [[ -n ${HOME:-} ]] || die "HOME is not set"
 home=$(cd "$HOME" 2>/dev/null && pwd -P) || home=$HOME
@@ -123,12 +131,12 @@ else
     dest=$parent/$base
 fi
 
-for protected in "$home" "$root" "$script_root" "$git_dir" "$git_common_dir"; do
+for protected in "$home" "$root" "$script_root" "$git_dir" "$git_common_dir" ${script_git_dir:+"$script_git_dir" "$script_git_common_dir"}; do
     if within "$protected" "$dest"; then
         die "refusing to replace $dest: it is or contains $protected"
     fi
 done
-for git_area in "$git_dir" "$git_common_dir"; do
+for git_area in "$git_dir" "$git_common_dir" ${script_git_dir:+"$script_git_dir" "$script_git_common_dir"}; do
     if within "$dest" "$git_area"; then
         die "refusing to replace $dest: it is inside $git_area"
     fi
@@ -145,7 +153,7 @@ if within "$dest" "$root"; then
         rel=${walk##*/}${rel:+/}$rel
         walk=${walk%/*}
     done
-    tracked=$(git --icase-pathspecs -C "$root" ls-files -- ":(literal)$rel") ||
+    tracked=$(git --icase-pathspecs -C "$root" -c core.fsmonitor=false ls-files -- ":(literal)$rel") ||
         die "cannot list the tracked files under $dest"
     [[ -z $tracked ]] || die "refusing to replace $dest: it contains tracked files"
 fi
@@ -192,7 +200,7 @@ mkdir -p "$dest/.git"
 # list below from mentioning DEST when DEST is inside the source repository.
 : >"$dest/.git/stage_tree"
 
-git -C "$root" ls-files -z --cached --others --exclude-standard --deduplicate >"$all"
+git -C "$root" -c core.fsmonitor=false ls-files -z --cached --others --exclude-standard --deduplicate >"$all"
 
 count=0
 while IFS= read -r -d '' path; do

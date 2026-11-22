@@ -1174,6 +1174,51 @@ def test_the_scripts_own_repository_stays_protected_with_another_source(
         assert layout.state() == before, dest
 
 
+def test_a_linked_worktree_scripts_git_directories_stay_protected_with_another_source(
+    layout: Layout,
+) -> None:
+    worktree = layout.base / "work/wt"
+    _ = layout.git("worktree", "add", "-q", "-b", "side", str(worktree))
+    script = worktree / "tools/stage_tree.sh"
+    source = make_source(layout)
+    empty = layout.repo / ".git/empty"
+    empty.mkdir()
+    git_dir = layout.repo / ".git/worktrees/wt"
+    for dest in (
+        layout.repo / ".git",
+        empty,
+        layout.repo / ".git/stage",
+        git_dir,
+        git_dir / "stage",
+    ):
+        before = layout.state()
+        result = layout.stage(args=["--source", str(source), str(dest)], script=script)
+        assert result.returncode != 0, dest
+        assert result.stderr.startswith("stage_tree: "), dest
+        assert layout.state() == before, dest
+
+
+def test_a_destination_that_holds_the_scripts_worktree_repository_is_refused(
+    layout: Layout,
+) -> None:
+    first = layout.stage()
+    assert first.returncode == 0, first.stderr
+    _ = layout.git("commit", "-q", "-m", "first", cwd=layout.dest)
+    worktree = layout.base / "work/wt"
+    _ = layout.git(
+        "worktree", "add", "-q", "-b", "side", str(worktree), cwd=layout.dest
+    )
+    source = make_source(layout)
+    before = layout.state()
+    result = layout.stage(
+        args=["--source", str(source), str(layout.dest)],
+        script=worktree / "tools/stage_tree.sh",
+    )
+    assert result.returncode != 0
+    assert result.stderr.startswith("stage_tree: ")
+    assert layout.state() == before
+
+
 def test_a_source_subdirectory_is_refused(layout: Layout) -> None:
     result = stage_source(layout, layout.repo / "src")
     assert result.returncode != 0
@@ -1191,6 +1236,16 @@ def test_an_unusable_source_is_refused(layout: Layout, kind: str) -> None:
     result = stage_source(layout, source)
     assert result.returncode != 0
     assert result.stderr.startswith("stage_tree: ")
+    assert not layout.dest.exists()
+
+
+def test_a_source_that_looks_like_an_option_to_cd_is_not_a_directory(
+    layout: Layout,
+) -> None:
+    _ = layout.git("init", "-q", cwd=layout.home)
+    result = layout.stage(args=["--source=-P", str(layout.dest)])
+    assert result.returncode != 0
+    assert "--source -P is not a directory" in result.stderr
     assert not layout.dest.exists()
 
 
@@ -1232,3 +1287,18 @@ def test_a_source_staging_scans_the_source_for_secrets(layout: Layout) -> None:
     assert "leak.txt" in result.stderr
     assert planted_secret() not in result.stderr
     assert not layout.dest.exists()
+
+
+@pytest.mark.parametrize("inside", [False, True], ids=["outside", "context-dir"])
+def test_a_repositorys_fsmonitor_command_is_not_run(
+    layout: Layout, *, inside: bool
+) -> None:
+    ran = layout.base / "fsmonitor-ran"
+    script = f"#!/bin/sh\n: >{shlex.quote(str(ran))}\n"
+    hook = tool_dir(layout, "hook", {}, {"fsmonitor": script}) / "fsmonitor"
+    _ = layout.git("config", "core.fsmonitor", str(hook))
+    result = layout.stage(layout.repo / ".context" if inside else layout.dest)
+    assert result.returncode == 0, result.stderr
+    assert not ran.exists()
+    _ = layout.git("ls-files")
+    assert ran.exists()
