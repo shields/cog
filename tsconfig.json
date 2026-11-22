@@ -30,5 +30,10 @@
     "types": ["bun"],
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["gateway/**/*.ts", "tests/**/*.ts", "eslint.config.ts"]
+  "include": [
+    "cog/**/*.ts",
+    "gateway/**/*.ts",
+    "tests/**/*.ts",
+    "eslint.config.ts"
+  ]
 }

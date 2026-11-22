@@ -47,7 +47,7 @@ ci-tools:
 test: test-bun test-zsh test-python
 
 test-bun:
-	bun test gateway/*.test.ts cloudflare/*.test.ts
+	bun test cog/*.test.ts gateway/*.test.ts cloudflare/*.test.ts
 
 test-zsh:
 	zsh tests/test_cog.zsh

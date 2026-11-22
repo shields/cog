@@ -25,7 +25,15 @@
   or expansion of an empty array under `set -u`. `bin/cog-gateway` runs
   `~/.local/share/cog/main.mjs` with Bun; nothing builds or installs that bundle
   yet (`install.sh` is not written), and `gateway/main.ts` is the same program
-  run directly. A TypeScript `cog` that replaces both is planned.
+  run directly. A TypeScript `cog` that replaces both is being written in
+  `cog/`; `bin/` does not call it yet. Its modules never use a host shell,
+  give a child no standard input unless it is meant for it, inherit the
+  environment unchanged, read `HOME` from the environment, set no umask, write
+  every file with an explicit mode, and use fixed error texts that never quote
+  a file or a parse error. `cog/resources.ts` embeds `lima/dev.yaml`, `guest/`,
+  `profiles.yaml` and `tools/stage_tree.sh` as text; a new file in `guest/`
+  needs an import there, and `cog/embedded.d.ts` declares each import's type,
+  since bun-types types `*.yaml` as a parsed object.
 - `cloudflare/deploy.sh`, `cloudflare/context.sh` and `tools/stage_tree.sh` also
   run on the Mac under bash 3.2. `guest/` and `cloudflare/guest/` run in the
   guest (Debian 13) and are installed root-owned in `/usr/local/lib/cog` by
