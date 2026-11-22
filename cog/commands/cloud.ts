@@ -15,11 +15,13 @@
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { AppAuth } from "../../gateway/auth.ts";
-import { parseProfiles, profileNamed } from "../../gateway/control.ts";
-import { normalizeRepository, parseGrants } from "../../gateway/policy.ts";
+import {
+  grantProfiles,
+  normalizeRepository,
+  parseGrants,
+} from "../../gateway/policy.ts";
 import type { Config } from "../config.ts";
 import { CogError } from "../errors.ts";
-import { profilesYaml } from "../resources.ts";
 import { writeSecretFile } from "../secrets.ts";
 
 const usage = "usage: cog cloud";
@@ -181,7 +183,7 @@ export async function cloudCommand(
   args: string[],
   config: Config,
 ): Promise<unknown> {
-  const [action, first, second, option, profile] = args;
+  const [action, first, second, option, profile = "cog"] = args;
   const urlFile = path.join(config.home, ".config", "cog", "cloudflare-url");
   const secretDir = path.join(config.home, ".config", "secrets", "cog");
   const api = () =>
@@ -253,22 +255,15 @@ export async function cloudCommand(
     }
     case "grant":
     case "revoke": {
-      if (action === "grant") {
-        if (
-          !second ||
-          (args.length !== 3 &&
-            !(
-              args.length === 5 &&
-              option === "--profile" &&
-              (profile === "read" || profile === "cog")
-            ))
-        ) {
-          throw new CogError(
-            `${usage} grant VM-ID OWNER/REPO [--profile read|cog]`,
-          );
-        }
-      } else if (args.length !== 3 || !second) {
-        throw new CogError(`${usage} revoke VM-ID OWNER/REPO`);
+      const explicitProfile =
+        action === "grant" && args.length === 5 && option === "--profile";
+      if (
+        !second ||
+        (args.length !== 3 && !explicitProfile) ||
+        (profile !== "read" && profile !== "cog")
+      ) {
+        const options = action === "grant" ? " [--profile read|cog]" : "";
+        throw new CogError(`${usage} ${action} VM-ID OWNER/REPO${options}`);
       }
       const route = instanceRoute(first);
       const repository = normalizeRepository(second);
@@ -281,10 +276,7 @@ export async function cloudCommand(
         action === "grant"
           ? {
               ...current.grants,
-              [repository]: profileNamed(
-                parseProfiles(profilesYaml),
-                profile ?? "cog",
-              ),
+              [repository]: grantProfiles[profile],
             }
           : Object.fromEntries(
               Object.entries(current.grants).filter(

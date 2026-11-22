@@ -30,23 +30,11 @@ import {
 import path from "node:path";
 import { onTestFinished, test } from "bun:test";
 import YAML from "yaml";
-import {
-  Control,
-  controlOptions,
-  locations,
-  parseProfiles,
-  profileNamed,
-} from "../gateway/control.ts";
+import { Control, controlOptions, locations } from "../gateway/control.ts";
+import { grantProfiles } from "../gateway/policy.ts";
 import { State } from "../gateway/state.ts";
 
 const main = path.join(import.meta.dirname, "main.ts");
-
-function profiles(): string {
-  return readFileSync(
-    path.join(import.meta.dirname, "../profiles.yaml"),
-    "utf8",
-  );
-}
 
 test("CLI grants and edits apply live and disabled VM logs stay addressable by ID", async () => {
   const root = mkdtempSync("/tmp/cog-");
@@ -122,9 +110,7 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
     assert.match(instance.id, /^[0-9a-f-]{36}$/);
     assert.match(instance.socket, /\/sock\/github-[0-9a-f-]{36}\.sock$/);
     assert.equal(
-      await control.grant("lima:trial", repository, () =>
-        profileNamed(parseProfiles(profiles()), "cog"),
-      ),
+      await control.grant("lima:trial", repository, grantProfiles.cog),
       1,
     );
     control.close();

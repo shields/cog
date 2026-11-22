@@ -23,11 +23,15 @@ import {
   type ValueNode,
 } from "graphql";
 
-export type Profile = "read" | "cog";
 export interface Grant {
   read: boolean;
   pushCogBranches: boolean;
 }
+export const grantProfiles = {
+  read: { read: true, pushCogBranches: false },
+  cog: { read: true, pushCogBranches: true },
+} as const satisfies Record<string, Grant>;
+export type Profile = keyof typeof grantProfiles;
 export type Access = "anonymous" | "authenticated";
 export type Operation =
   | "git.read"

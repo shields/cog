@@ -27,7 +27,6 @@ import { compareCodeUnits } from "../gateway/policy.ts";
 import {
   guestFiles,
   limaTemplate,
-  profilesYaml,
   stageTree,
   writeResources,
 } from "./resources.ts";
@@ -38,7 +37,6 @@ const onDisk = (...parts: string[]): string =>
 
 test("the embedded files are the files of the checkout", () => {
   assert.equal(limaTemplate, onDisk("lima", "dev.yaml"));
-  assert.equal(profilesYaml, onDisk("profiles.yaml"));
   assert.equal(stageTree, onDisk("tools", "stage_tree.sh"));
   for (const file of guestFiles) {
     assert.equal(file.text, onDisk("guest", file.name), file.name);
@@ -57,7 +55,6 @@ test("every file of guest/ is embedded", () => {
 
 test("the embedded text is text", () => {
   assert.match(limaTemplate, /\S/);
-  assert.match(profilesYaml, /pushCogBranches/);
   assert.match(stageTree, /^#!\/bin\/bash/);
   for (const file of guestFiles) {
     assert.match(file.text, /^#!/, file.name);

@@ -20,17 +20,7 @@ declare module "*/dev.yaml" {
   export default text;
 }
 
-declare module "*/profiles.yaml" {
-  const text: string;
-  export default text;
-}
-
 declare module "*.sh" {
-  const text: string;
-  export default text;
-}
-
-declare module "*.py" {
   const text: string;
   export default text;
 }

@@ -16,19 +16,22 @@
 
 set -euo pipefail
 
-usage='usage: sudo agent.sh --user NAME'
-
 die() {
-    printf 'agent.sh: %s\n' "$*" >&2
+    printf 'configure-github-access.sh: %s\n' "$*" >&2
     exit 1
 }
 
-[[ $# -eq 2 && $1 == --user && -n $2 && $2 != -* ]] || die "$usage"
-user=$2
+[[ $# -eq 2 && -n $1 && $1 != -* && -n $2 ]] || die 'usage: configure-github-access.sh USER MARKER'
+user=$1
+marker=$2
 [[ $(id -u) -eq 0 ]] || die 'run as root'
 entry=$(getent passwd "$user") || die "no such user: $user"
-home=$(cut -d: -f6 <<<"$entry")
-[[ -n $home && -d $home ]] || die "cannot find the home directory of $user"
+guest_home=$(cut -d: -f6 <<<"$entry")
+[[ $guest_home == /* && -d $guest_home ]] || die "cannot find the home directory of $user"
+
+lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+helper=$lib_dir/github-gateway-credential
+[[ -x $helper ]] || die "$helper is missing"
 
 settings=/etc/claude-code/managed-settings.json
 [[ -f $settings ]] || die 'managed settings are missing'
@@ -47,10 +50,8 @@ jq '(.permissions.deny | length) as $before
 chmod 644 "$managed"
 mv -f "$managed" "$settings"
 
-helper=/usr/local/lib/cog/github-gateway-credential
-[[ -x $helper ]] || die "$helper is missing"
-rm -f "$home/.codex/rules/no-push.rules"
-sudo -H -u "$user" mkdir -p "$home/.config/git"
-sudo -H -u "$user" git config --file "$home/.config/git/config" --replace-all credential.https://github.com.helper "!$helper"
-printf '%s\n' cloudflare >/etc/cog-github-gateway
+rm -f "$guest_home/.codex/rules/no-push.rules"
+sudo -H -u "$user" mkdir -p "$guest_home/.config/git"
+sudo -H -u "$user" git config --file "$guest_home/.config/git/config" --replace-all credential.https://github.com.helper "!$helper"
+printf '%s\n' "$marker" >/etc/cog-github-gateway
 chmod 644 /etc/cog-github-gateway

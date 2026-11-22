@@ -184,7 +184,7 @@ check_marker_readers "$dest/dotfiles"
 mkdir "$dest/guest" "$dest/cloudflare"
 copy_tree "$work/cog/guest" "$dest/guest"
 copy_tree "$work/cog/cloudflare/guest" "$dest/cloudflare"
-for file in guest/throwaway.sh guest/reset-identity.sh guest/github-gateway-credential cloudflare/agent.sh cloudflare/entrypoint.sh; do
+for file in guest/throwaway.sh guest/reset-identity.sh guest/github-gateway-credential guest/configure-github-access.sh cloudflare/entrypoint.sh; do
     [[ -f $dest/$file && -x $dest/$file ]] || die "$file is missing from the assembled context, or is not executable"
 done
 

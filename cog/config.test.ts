@@ -25,7 +25,6 @@ test("the defaults come from HOME alone", () => {
     memory: "",
     githubWebUrl: "https://github.com",
     promptInput: "",
-    profilesFile: "",
     tailscaleFile: "/h/.config/secrets/cog/tailscale-oauth.json",
     claudeTokenFile: "/h/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN",
     fireworksKeyFile: "/h/.config/secrets/FIREWORKS_API_KEY",
@@ -42,14 +41,12 @@ test("the COG variables replace the defaults and an empty one counts as unset", 
     COG_MEMORY: "8",
     COG_GITHUB_WEB_URL: "https://git.example.com",
     COG_PROMPT_INPUT: "/p",
-    COG_PROFILES: "/profiles.yaml",
   });
   assert.equal(config.base, "other-base");
   assert.equal(config.cpus, "4");
   assert.equal(config.memory, "8");
   assert.equal(config.githubWebUrl, "https://git.example.com");
   assert.equal(config.promptInput, "/p");
-  assert.equal(config.profilesFile, "/profiles.yaml");
   const empty = loadConfig({
     HOME: "/h",
     COG_BASE: "",

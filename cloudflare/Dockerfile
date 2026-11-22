@@ -52,9 +52,9 @@ RUN /home/linuxbrew/.linuxbrew/bin/brew --prefix awscli >/dev/null
 COPY guest/ /usr/local/lib/cog/
 COPY cloudflare/ /usr/local/lib/cog/cloudflare/
 
-RUN sudo /usr/local/lib/cog/throwaway.sh --claude-settings .claude/settings.json --user shields --no-github-timer \
+RUN sudo /usr/local/lib/cog/throwaway.sh --claude-settings .claude/settings.json \
     && PATH="/home/linuxbrew/.linuxbrew/bin:$PATH" /home/linuxbrew/.linuxbrew/bin/uv run --no-dev python tools/configure_codex.py "$HOME/.codex/config.toml" \
     && /usr/local/lib/cog/reset-identity.sh \
-    && sudo /usr/local/lib/cog/cloudflare/agent.sh --user shields
+    && sudo /usr/local/lib/cog/configure-github-access.sh shields cloudflare
 
 CMD ["sleep", "infinity"]

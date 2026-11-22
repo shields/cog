@@ -208,6 +208,11 @@ test("cloud commands use an HTTPS Worker and put the admin token only in Authori
   assert.deepEqual(await run(["start", id]), { started: true, running: true });
   assert.deepEqual(await run(["logs", id]), [{ decision: "allow" }]);
   assert.deepEqual(await run(["events", id]), [{ revision: 2 }]);
+  for (const options of [["--profile"], ["--profile", "constructor"]]) {
+    await assert.rejects(run(["grant", id, "A/New", ...options]), {
+      message: "usage: cog cloud grant VM-ID OWNER/REPO [--profile read|cog]",
+    });
+  }
   assert.deepEqual(await run(["grant", id, "A/New"]), { revision: 3 });
   assert.deepEqual(await run(["grant", id, "A/New", "--profile", "read"]), {
     revision: 3,

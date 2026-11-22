@@ -28,9 +28,7 @@ import {
   controlOptions,
   locations,
   parseEdit,
-  parseProfiles,
   policyDocument,
-  profileNamed,
 } from "./control.ts";
 import { compareCodeUnits, type Grant } from "./policy.ts";
 
@@ -86,17 +84,11 @@ test("locations come from COG_ROOT, else from HOME", () => {
     state: "/r/state",
     secrets: "/r/secrets",
     admin: "/r/state/admin.sock",
-    profiles: "/r/profiles.yaml",
   });
-  assert.deepEqual(
-    locations({ COG_ROOT: "/r", COG_PROFILES: "/p.yaml" }).profiles,
-    "/p.yaml",
-  );
   assert.deepEqual(locations({ HOME: "/h" }), {
     state: "/h/.local/state/cog",
     secrets: "/h/.config/secrets/cog",
     admin: "/h/.local/state/cog/admin.sock",
-    profiles: "/h/.config/cog/profiles.yaml",
   });
   assert.throws(() => locations({}), /HOME is not set/);
   assert.throws(() => locations({ HOME: "" }), /HOME is not set/);
@@ -190,75 +182,15 @@ test("health fails without a daemon", async () => {
   await assert.rejects(result.health());
 });
 
-test("profiles are a mapping of valid grants with read and cog", () => {
-  const text = YAML.stringify({ read, cog });
-  assert.deepEqual(parseProfiles(text), { read, cog });
-  assert.deepEqual(parseProfiles(YAML.stringify({ read, cog, extra: read })), {
-    read,
-    cog,
-    extra: read,
-  });
-  for (const [name, profile] of [
-    ["cog", { ...cog, pushCogBranches: "false" }],
-    ["Cog", cog],
-    ["1x", cog],
-  ] as const) {
-    assert.throws(
-      () => parseProfiles(YAML.stringify({ read, cog, [name]: profile })),
-      new Error(`invalid profile ${name}`),
-    );
-  }
-  assert.throws(
-    () => parseProfiles(YAML.stringify({ read })),
-    /read and cog profiles are required/,
-  );
-  assert.throws(() => parseProfiles("- a\n"), /profiles must be a mapping/);
-  assert.throws(
-    () => parseProfiles("read: {}\nread: {}\n"),
-    /invalid profile definitions/,
-  );
-});
-
-test("a profile name inherited from Object.prototype is unknown", () => {
-  const profiles = parseProfiles(YAML.stringify({ read, cog }));
-  assert.equal(profileNamed(profiles, "cog"), profiles.cog);
-  for (const name of [
-    "constructor",
-    "toString",
-    "__proto__",
-    "hasOwnProperty",
-    "nothing",
-  ]) {
-    assert.throws(
-      () => profileNamed(profiles, name),
-      new Error(`unknown profile ${name}`),
-    );
-  }
-});
-
-test("grant resolves the profile before it authorizes anything", async () => {
-  const directory = root();
-  const result = control(directory);
-  result.state.register("lima:t1", path.join(directory, "t1.sock"), "tester");
-  await assert.rejects(
-    result.grant("lima:t1", "shields/dotfiles", () => {
-      throw new Error("unknown profile x");
-    }),
-    /unknown profile x/,
-  );
-  assert.equal(existsSync(path.join(directory, "secrets")), false);
-});
-
 test("grant checks the repository and then the VM", async () => {
   const directory = root();
   const result = control(directory);
-  const never = (): Grant => assert.fail("the profile must not be resolved");
   await assert.rejects(
-    result.grant("lima:t1", "not a repository", never),
+    result.grant("lima:t1", "not a repository", cog),
     /repository/,
   );
   await assert.rejects(
-    result.grant("lima:t1", "shields/dotfiles", never),
+    result.grant("lima:t1", "shields/dotfiles", cog),
     /lima:t1 is not a registered VM/,
   );
 });
@@ -272,15 +204,12 @@ test("grant and revoke change the policy one revision at a time", async () => {
     path.join(directory, "t1.sock"),
     "tester",
   );
-  assert.equal(await result.grant("lima:t1", "Shields/Dotfiles", () => cog), 1);
+  assert.equal(await result.grant("lima:t1", "Shields/Dotfiles", cog), 1);
   assert.deepEqual(result.state.grants(instance.id), {
     "shields/dotfiles": cog,
   });
-  assert.equal(await result.grant("lima:t1", "shields/dotfiles", () => cog), 1);
-  assert.equal(
-    await result.grant("lima:t1", "shields/dotfiles", () => read),
-    2,
-  );
+  assert.equal(await result.grant("lima:t1", "shields/dotfiles", cog), 1);
+  assert.equal(await result.grant("lima:t1", "shields/dotfiles", read), 2);
   assert.throws(
     () => result.revoke("lima:t1", "shields/other"),
     /shields\/other is not granted to lima:t1/,

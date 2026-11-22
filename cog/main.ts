@@ -21,7 +21,7 @@ import { claudeToken, grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
 import { authorize, edit, logs, revoke, show } from "./commands/policy.ts";
 import { dotfilesRepo, loadConfig, type Config, type Env } from "./config.ts";
-import { exitStatus } from "./errors.ts";
+import { CogError, exitStatus } from "./errors.ts";
 import { createLima, findLimactl, type Lima } from "./lima.ts";
 import { validName } from "./names.ts";
 import { note, say } from "./output.ts";
@@ -72,8 +72,7 @@ COG_BASE replaces the name ${base}. For Lima, COG_GITHUB_CLIENT_ID,
 COG_GITHUB_WEB_URL and COG_GITHUB_API_URL configure GitHub App authorization.
 new checks anonymous access at the configured API URL. COG_GITHUB_WEB_URL
 determines which origins cog recognizes and which host it uses to clone.
-The gateway relays a VM's requests to github.com. COG_PROFILES overrides the
-built-in read and cog profiles for the cog grant command.
+The gateway relays a VM's requests to github.com.
 
 The repository is --repo's, or else the one that the git origin of the current
 directory names, if the origin uses the configured GitHub host. new reads public
@@ -129,6 +128,11 @@ async function dispatch(
       await remove(args, context);
       return 0;
     case "grant":
+      if (context.env.COG_PROFILES) {
+        throw new CogError(
+          "unset COG_PROFILES and select a built-in grant profile (read or cog)",
+        );
+      }
       await grant(args, context);
       return 0;
     case "show":

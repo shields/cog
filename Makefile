@@ -22,8 +22,8 @@ SHELL_SOURCES = \
 	install.sh \
 	cloudflare/context.sh \
 	cloudflare/deploy.sh \
-	cloudflare/guest/agent.sh \
 	cloudflare/guest/entrypoint.sh \
+	guest/configure-github-access.sh \
 	guest/github-gateway-credential \
 	guest/reset-identity.sh \
 	guest/setup-github-gateway \

@@ -14,17 +14,16 @@
 
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import githubAppToken from "../guest/github_app_token.py" with { type: "text" };
+import configureGithubAccess from "../guest/configure-github-access.sh" with { type: "text" };
 import githubGatewayCredential from "../guest/github-gateway-credential" with { type: "text" };
 import resetIdentity from "../guest/reset-identity.sh" with { type: "text" };
 import setupGithubGateway from "../guest/setup-github-gateway" with { type: "text" };
 import setupSecrets from "../guest/setup-secrets" with { type: "text" };
 import throwaway from "../guest/throwaway.sh" with { type: "text" };
 import limaTemplate from "../lima/dev.yaml" with { type: "text" };
-import profilesYaml from "../profiles.yaml" with { type: "text" };
 import stageTree from "../tools/stage_tree.sh" with { type: "text" };
 
-export { limaTemplate, profilesYaml, stageTree };
+export { limaTemplate, stageTree };
 
 export interface ResourceFile {
   readonly name: string;
@@ -33,7 +32,7 @@ export interface ResourceFile {
 
 // guest/ as installed in the guest's /usr/local/lib/cog.
 export const guestFiles: readonly ResourceFile[] = [
-  { name: "github_app_token.py", text: githubAppToken },
+  { name: "configure-github-access.sh", text: configureGithubAccess },
   { name: "github-gateway-credential", text: githubGatewayCredential },
   { name: "reset-identity.sh", text: resetIdentity },
   { name: "setup-github-gateway", text: setupGithubGateway },

@@ -10,9 +10,8 @@
   pytest test fail the run, so a test that needs a tool needs it added to
   `tools/install_ci_tools.sh`, not a skip. Bun and zsh tests have no skip
   mechanism; keep it that way. The Python tests that need `codex`, `limactl`
-  or `jq` fail when it is missing, so a Mac needs all three on `PATH` too. The
-  token tool's Python 3.13 check runs through `uv`, which fetches that
-  interpreter itself. `make lint` also needs the `gh actions-lock` extension,
+  or `jq` fail when it is missing, so a Mac needs all three on `PATH` too.
+  `make lint` also needs the `gh actions-lock` extension,
   which `make actions-lock-install` installs.
 - **Formatting**: `make fmt` runs Prettier, Ruff and shfmt; `make lint` checks
   them. Markdown wraps at 80 columns.
@@ -34,7 +33,7 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   unless it is meant for them, inherits the environment unchanged, reads
   `HOME` from the environment, and uses fixed secret-validation and spawn
   errors. Only `gateway serve` sets a global umask. `cog/resources.ts` embeds
-  `lima/dev.yaml`, `guest/`, `profiles.yaml` and `tools/stage_tree.sh` as text;
+  `lima/dev.yaml`, `guest/` and `tools/stage_tree.sh` as text;
   a new file in `guest/` needs an import there, and `cog/embedded.d.ts` declares
   each import's type, since bun-types types `*.yaml` as a parsed object.
   Both native builds disable Bun's dotenv and bunfig autoloaders.
@@ -43,10 +42,8 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   guest (Debian 13) and are installed root-owned in `/usr/local/lib/cog` by
   `cog base` (`sudo tar -x --no-same-owner --no-same-permissions` after
   `gitleaks dir`) or by the image's `COPY`. Nothing of cog goes in the guest's
-  `~/bin`. `setup-github-gateway` and `setup-secrets` find their siblings
-  through their own directory, but `throwaway.sh`'s timer unit and
-  `cloudflare/guest/agent.sh`'s credential helper name `/usr/local/lib/cog`
-  itself, so `guest/` cannot move.
+  `~/bin`. Both backends run `guest/configure-github-access.sh` for the push
+  rules, dummy credential helper and gateway marker.
 - The committed `cloudflare/wrangler.jsonc` is a template: `deploy.sh` rewrites
   its `dockerfile` and `build_context` in a staged copy to the context that
   `context.sh` assembles, and `jq` reads it, so it takes no comments.
@@ -57,19 +54,17 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
 - `gateway/` holds the policy, state (SQLite), authorization, certificates and
   the HTTPS-over-Unix-socket server. `gateway/control.ts` is what the commands
   that administer it share (locations, health, sync, register and its
-  rollback, disable, grant, revoke, the profile parser and the policy
-  document); it opens the state and the authorizations on first use, and
+  rollback, disable, grant, revoke and the policy document). It opens the
+  state and the authorizations on first use, and
   `State` refuses to register `lima:cog-base` and the VM that `COG_BASE`
   names. `cloudflare/` holds the Worker (`worker.ts`), the authority Durable
   Object and the outbound interceptor, which applies `gateway/policy.ts`. The
   container gets no GitHub token. `cog/commands/cloud.ts` administers the Worker
   using the HTTPS origin saved by `cog cloud config` and the admin token file
   written by `cloudflare/deploy.sh`. It refuses redirects and does not depend
-  on the checkout. `profiles.yaml` holds the `read` and `cog` templates; the
-  persisted grant field that enables pushes is `pushCogBranches`. `cog cloud`
-  uses the embedded profiles; `COG_PROFILES` only overrides the Lima profiles.
-  `cog new` reads public repositories anonymously. A private checkout gets a
-  fixed read-only grant, even when a custom profile enables pushes.
+  on the checkout. `gateway/policy.ts` defines both built-in grant profiles.
+  `pushCogBranches` enables pushes in a persisted grant. `cog new` reads public
+  repositories anonymously and grants read-only access to a private checkout.
 - Names: the push namespace is `cog/VM-ID/*`; the markers are
   `/etc/cog-throwaway` and `/etc/cog-github-gateway`; the base is `cog-base`
   (`COG_BASE`); the guest socket is `/tmp/cog-github.sock`; the health path is
@@ -112,9 +107,9 @@ and cog reads dotfiles' `provision.sh`, `.claude/settings.json`,
 `tools/configure_codex.py` and `~/.codex/rules/no-push.rules`. The README's "The
 contract with dotfiles" lists them, and dotfiles' README states the same.
 Renaming a marker, changing what a marker holds (`cog-github-gateway` is a VM
-UUID or `cloudflare`), or changing what `throwaway.sh` and the removal of the
-push deny rules (`setup-github-gateway`, `cloudflare/guest/agent.sh`) require of
-the settings file (a non-empty `permissions.deny`, a `PreToolUse` hook
+UUID or `cloudflare`), or changing what `throwaway.sh` and
+`configure-github-access.sh` require of the settings file (a non-empty
+`permissions.deny`, a `PreToolUse` hook
 containing `git_guard.py`, the five `git push` deny rules, at least one of which
 must be present) needs the same change in dotfiles. The marker lists in
 `cog/commands/base.ts` and `cloudflare/context.sh` must include every dotfiles
@@ -130,15 +125,13 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   seeds fake authorizations and reads gateway state via `tests/gateway_state.ts`.
   The stubs record argv, environment and stdin in isolated fixture environments.
   Tests cover umasks 000, 022 and 077, signals at the cleanup stages of `new` and
-  `base`, and redaction of parse errors. `tests/test_setup_secrets.zsh` uses
-  stubs and runs anywhere.
+  `base`, and redaction of parse errors. `tests/test_setup_secrets.zsh` runs
+  in temporary guest homes.
 - `tests/test_install.py` gives the installer a temporary home and substitutes
   launchctl, Bun and plutil. `gateway/*.test.ts` and `cloudflare/*.test.ts` cover
   the policy, token refresh, live grants, audit and the HTTPS Unix socket.
   `cog/*.test.ts` cover the CLI and foundation modules; the no-echo prompt
-  runs under a pseudo-terminal and needs `stty`. `tests/fake_github.py` and
-  `tests/test_github_app_token.py` cover `guest/github_app_token.py`, which no
-  `cog` flow uses.
+  runs under a pseudo-terminal and needs `stty`.
 - No automated test covers a live launchd install, real GitHub authorization,
   network isolation and the relay in a VM, live Tailscale enrollment or a
   Herdr phone connection, agent behavior under the installed

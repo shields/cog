@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { profileNamed } from "../../gateway/control.ts";
+import { grantProfiles, type Profile } from "../../gateway/policy.ts";
 import { CogError, CommandFailed } from "../errors.ts";
 import {
   gatewayName,
@@ -23,7 +23,6 @@ import {
 } from "../names.ts";
 import { note, say } from "../output.ts";
 import { capture, run } from "../proc.ts";
-import { loadProfiles } from "../profiles.ts";
 import {
   requireRegularOrAbsent,
   toBytes,
@@ -121,14 +120,14 @@ const grantUsage = "usage: cog grant NAME [OWNER/REPO] [--profile read|cog]";
 function parseGrant(args: readonly string[]): {
   name: string;
   repository: string;
-  profile: "read" | "cog";
+  profile: Profile;
 } {
   const [name, ...rest] = args;
   if (name === undefined) {
     throw new CogError(grantUsage);
   }
   let repository: string | undefined;
-  let profile: "read" | "cog" | undefined;
+  let profile: Profile | undefined;
   const options = rest.values();
   for (const argument of options) {
     if (argument === "--profile" || argument.startsWith("--profile=")) {
@@ -183,18 +182,20 @@ export async function grant(
   if (!(await context.lima.exists(name))) {
     throw new CogError(`${name} does not exist`);
   }
-  const revision = await context.gateway().grant(
-    gatewayName(name),
-    repository,
-    () => profileNamed(loadProfiles(context.config), profile),
-    async (userCode, verificationUri) => {
-      await run(["pbcopy"], { stdin: Buffer.from(userCode), quiet: true });
-      note(
-        `cog: Paste the copied code ${userCode} at ${verificationUri} to authorize ${repository}.`,
-      );
-      await run(["open", verificationUri]);
-    },
-  );
+  const revision = await context
+    .gateway()
+    .grant(
+      gatewayName(name),
+      repository,
+      grantProfiles[profile],
+      async (userCode, verificationUri) => {
+        await run(["pbcopy"], { stdin: Buffer.from(userCode), quiet: true });
+        note(
+          `cog: Paste the copied code ${userCode} at ${verificationUri} to authorize ${repository}.`,
+        );
+        await run(["open", verificationUri]);
+      },
+    );
   say(`policy revision ${String(revision)}`);
   say(
     `cog: ${name} can now ${profile === "cog" ? "read and push cog branches on" : "read"} ${repository}.`,

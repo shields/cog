@@ -23,7 +23,6 @@ import {
   compareCodeUnits,
   cogPrefix,
   normalizeRepository,
-  parseGrant,
   parseGrants,
   type Access,
   type Grant,
@@ -42,7 +41,6 @@ export interface Locations {
   state: string;
   secrets: string;
   admin: string;
-  profiles: string;
 }
 
 // HOME comes from the environment, not from the passwd entry.
@@ -53,7 +51,6 @@ export function locations(env: Env): Locations {
       state: path.join(root, "state"),
       secrets: path.join(root, "secrets"),
       admin: path.join(root, "state", "admin.sock"),
-      profiles: env.COG_PROFILES ?? path.join(root, "profiles.yaml"),
     };
   }
   const home = env.HOME;
@@ -65,8 +62,6 @@ export function locations(env: Env): Locations {
     state,
     secrets: path.join(home, ".config", "secrets", "cog"),
     admin: path.join(state, "admin.sock"),
-    profiles:
-      env.COG_PROFILES ?? path.join(home, ".config", "cog", "profiles.yaml"),
   };
 }
 
@@ -95,42 +90,6 @@ export function required(
     throw new Error(`missing ${description}`);
   }
   return value;
-}
-
-export function parseProfiles(text: string): Record<string, Grant> {
-  const document = YAML.parseDocument(text, { uniqueKeys: true });
-  if (document.errors.length > 0) {
-    throw new Error(
-      `invalid profile definitions: ${document.errors[0]?.message ?? "unknown error"}`,
-    );
-  }
-  const raw = document.toJS() as unknown;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("profiles must be a mapping");
-  }
-  const profiles: Record<string, Grant> = {};
-  for (const [name, input] of Object.entries(raw as Record<string, unknown>)) {
-    const grant = /^[a-z][a-z0-9-]*$/.test(name) ? parseGrant(input) : null;
-    if (!grant) {
-      throw new Error(`invalid profile ${name}`);
-    }
-    profiles[name] = grant;
-  }
-  if (!profiles.read || !profiles.cog) {
-    throw new Error("read and cog profiles are required");
-  }
-  return profiles;
-}
-
-export function profileNamed(
-  profiles: Record<string, Grant>,
-  name: string,
-): Grant {
-  const grant = Object.hasOwn(profiles, name) ? profiles[name] : undefined;
-  if (!grant) {
-    throw new Error(`unknown profile ${name}`);
-  }
-  return grant;
 }
 
 function branchPrefix(instance: Instance): string {
@@ -328,17 +287,14 @@ export class Control {
     return "authenticated";
   }
 
-  // resolveGrant runs after the repository and the VM are checked and before
-  // anything is authorized.
   async grant(
     name: string,
     repositoryName: string,
-    resolveGrant: () => Grant,
+    grant: Grant,
     prompt?: DeviceCodePrompt,
   ): Promise<number> {
     const repository = normalizeRepository(repositoryName);
     const instance = this.active(name);
-    const grant = resolveGrant();
     if (!this.auth.has(repository)) {
       await this.auth.authorize(repository, prompt);
     }

@@ -12,31 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# guest/setup-github-gateway and cloudflare/guest/agent.sh edit root-owned files
-# in a guest, so they cannot run here. These tests run the jq program that each
-# applies to the managed settings, and the lines that write the credential
-# helper, in a scratch home under a sudo shim.
-
 import json
 import os
-import re
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, final
 
 import pytest
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-REPO = Path(__file__).resolve().parents[1]
-SCRIPTS = (
-    REPO / "guest" / "setup-github-gateway",
-    REPO / "cloudflare" / "guest" / "agent.sh",
-)
-
+GUEST = Path(__file__).resolve().parents[1] / "guest"
 PUSH_RULES = [
     "Bash(git push*)",
     "Bash(git -C * push*)",
@@ -45,71 +29,124 @@ PUSH_RULES = [
     "Bash(git --work-tree* push*)",
 ]
 OTHER_RULES = ["Bash(git commit*)", "Bash(gh pr merge*)", "Read(~/.ssh/**)"]
+SETTINGS = Path("etc/claude-code/managed-settings.json")
+MARKER = Path("etc/cog-github-gateway")
 
 
-@pytest.fixture(autouse=True)
-def _jq_is_installed() -> None:
-    if shutil.which("jq") is None:
-        pytest.fail("jq is required")
+@pytest.fixture
+def guest(tmp_path: Path) -> Path:
+    (tmp_path / SETTINGS.parent).mkdir(parents=True)
+    (tmp_path / "home/.codex/rules").mkdir(parents=True)
+    (tmp_path / "home/.codex/rules/no-push.rules").touch()
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    script = GUEST / "configure-github-access.sh"
+    # Relative etc paths confine the guest's system settings to the fixture.
+    _ = (lib / script.name).write_text(script.read_text().replace("/etc/", "etc/"))
+    _ = shutil.copy2(GUEST / "github-gateway-credential", lib)
+    for name, body in {
+        "id": '[ "$1" = -u ] && echo 0',
+        "getent": '[ "$*" = "passwd tester" ] && echo "tester:x:42:42::$HOME:/bin/sh"',
+        "sudo": '[ "$1 $2 $3" = "-H -u tester" ] || exit 1\nshift 3\nexec "$@"',
+    }.items():
+        shim = lib / name
+        _ = shim.write_text(f"#!/bin/sh\n{body}\n")
+        shim.chmod(0o755)
+    return tmp_path
 
 
-@pytest.fixture(params=SCRIPTS, ids=[script.name for script in SCRIPTS])
-def script(request: pytest.FixtureRequest) -> Path:
-    return cast("Path", request.param)
-
-
-def program(script: Path) -> str:
-    match = re.search(r"\njq '(.*?)' \\\n", script.read_text(), re.DOTALL)
-    assert match, f"the jq program is missing from {script.name}"
-    return match.group(1)
-
-
-def filter_settings(
-    script: Path, settings: Mapping[str, object]
+def run(
+    guest: Path, *args: str, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["jq", program(script)],
-        input=json.dumps(settings),
+        args,
+        cwd=guest,
+        env={
+            "HOME": str(guest / "home"),
+            "PATH": f"{guest / 'lib'}:{os.environ['PATH']}",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+        input=stdin,
         capture_output=True,
         text=True,
-        check=False,
         timeout=30,
+        check=False,
     )
 
 
-def deny_after(result: subprocess.CompletedProcess[str]) -> list[str]:
-    assert result.returncode == 0, result.stderr
-    out = cast("dict[str, dict[str, list[str]]]", json.loads(result.stdout))
-    return out["permissions"]["deny"]
+def configure(
+    guest: Path, marker: str, settings: dict[str, object]
+) -> subprocess.CompletedProcess[str]:
+    _ = (guest / SETTINGS).write_text(json.dumps(settings))
+    return run(guest, "bash", "lib/configure-github-access.sh", "tester", marker)
 
 
-def test_both_scripts_apply_the_same_program() -> None:
-    assert len({program(script) for script in SCRIPTS}) == 1
-
-
-def test_exactly_the_five_push_rules_are_removed(script: Path) -> None:
-    settings = {
-        "permissions": {"deny": [*OTHER_RULES[:1], *PUSH_RULES, *OTHER_RULES[1:]]},
+@pytest.mark.parametrize(
+    "marker", ["cloudflare", "46548c62-8ea4-4c8a-b09d-070a70d5844c"]
+)
+def test_gateway_access(guest: Path, marker: str) -> None:
+    home = guest / "home"
+    config = home / ".config/git/config"
+    config.parent.mkdir(parents=True)
+    _ = config.write_text(
+        """[credential "https://gist.github.com"]
+    helper = !gh auth git-credential
+[credential "https://github.com"]
+    helper = !stale
+    helper = !other
+"""
+    )
+    gitconfig = home / ".gitconfig"
+    original = "[user]\n\tname = Someone\n"
+    _ = gitconfig.write_text(original)
+    like_push = ["Bash(git push)", "Bash(git push*) ", "Bash(git -C * push)"]
+    settings: dict[str, object] = {
+        "permissions": {"deny": [*OTHER_RULES, *PUSH_RULES, *like_push]},
         "sandbox": {"enabled": False},
     }
-    result = filter_settings(script, settings)
-    assert deny_after(result) == OTHER_RULES
-    assert json.loads(result.stdout)["sandbox"] == {"enabled": False}
-
-
-def test_a_rule_like_a_push_rule_but_not_identical_stays(script: Path) -> None:
-    lookalikes = ["Bash(git push)", "Bash(git push*) ", "Bash(git -C * push)"]
-    result = filter_settings(
-        script, {"permissions": {"deny": [*PUSH_RULES, *lookalikes]}}
+    result = configure(guest, marker, settings)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((guest / SETTINGS).read_text()) == {
+        **settings,
+        "permissions": {"deny": [*OTHER_RULES, *like_push]},
+    }
+    assert (guest / SETTINGS).stat().st_mode & 0o777 == 0o644
+    assert (guest / MARKER).read_text() == f"{marker}\n"
+    assert (guest / MARKER).stat().st_mode & 0o777 == 0o644
+    assert not (home / ".codex/rules/no-push.rules").exists()
+    assert gitconfig.read_text() == original
+    for host, helper in {
+        "gist.github.com": "!gh auth git-credential",
+        "github.com": f"!{guest / 'lib/github-gateway-credential'}",
+    }.items():
+        read = run(
+            guest,
+            "git",
+            "config",
+            "--file",
+            str(config),
+            "--get-all",
+            f"credential.https://{host}.helper",
+        )
+        assert read.stdout.splitlines() == [helper]
+    filled = run(
+        guest, "git", "credential", "fill", stdin="protocol=https\nhost=github.com\n\n"
     )
-    assert deny_after(result) == lookalikes
+    assert filled.returncode == 0, filled.stderr
+    assert "password=cog" in filled.stdout.splitlines()
 
 
-def test_a_partial_set_is_still_removed(script: Path) -> None:
-    result = filter_settings(
-        script, {"permissions": {"deny": [PUSH_RULES[0], *OTHER_RULES]}}
+def test_a_partial_rule_set_and_a_fresh_home(guest: Path) -> None:
+    result = configure(
+        guest, "cloudflare", {"permissions": {"deny": [PUSH_RULES[0], *OTHER_RULES]}}
     )
-    assert deny_after(result) == OTHER_RULES
+    assert result.returncode == 0, result.stderr
+    assert json.loads((guest / SETTINGS).read_text()) == {
+        "permissions": {"deny": OTHER_RULES}
+    }
+    assert (guest / "home/.config/git/config").is_file()
+    assert not (guest / "home/.gitconfig").exists()
 
 
 @pytest.mark.parametrize(
@@ -121,146 +158,12 @@ def test_a_partial_set_is_still_removed(script: Path) -> None:
         {},
     ],
 )
-def test_settings_without_a_push_rule_fail(
-    script: Path, settings: Mapping[str, object]
+def test_missing_push_rules_stop_setup(
+    guest: Path, settings: dict[str, object]
 ) -> None:
-    result = filter_settings(script, settings)
+    result = configure(guest, "cloudflare", settings)
     assert result.returncode != 0
-    assert result.stdout == ""
-
-
-SUDO_LINE = re.compile(r"^sudo -H -u .*$", re.MULTILINE)
-GIST_HELPER = "!gh auth git-credential"
-
-
-def sudo_lines(script: Path) -> str:
-    lines = cast("list[str]", SUDO_LINE.findall(script.read_text()))
-    assert len(lines) == 2, f"expected the mkdir and the git config in {script.name}"
-    assert all("--global" not in line for line in lines)
-    return "\n".join(lines)
-
-
-HELPER_SCRIPT = """#!/bin/sh
-[ "$1" = get ] || exit 0
-printf 'username=cog\\npassword=dummy\\n'
-"""
-
-
-@final
-class Guest:
-    def __init__(self, root: Path) -> None:
-        self.home: Path = root / "home"
-        self.lib: Path = root / "lib"
-        self.home.mkdir()
-        self.lib.mkdir()
-        self.helper: Path = self.lib / "github-gateway-credential"
-        _ = self.helper.write_text(HELPER_SCRIPT)
-        self.helper.chmod(0o755)
-        self.config: Path = self.home / ".config" / "git" / "config"
-        self.gitconfig: Path = self.home / ".gitconfig"
-        self.env: dict[str, str] = {
-            "PATH": os.environ["PATH"],
-            "HOME": str(self.home),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_TERMINAL_PROMPT": "0",
-        }
-
-    def git(
-        self, *args: str, stdin: str | None = None
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-            env=self.env,
-            input=stdin,
-        )
-
-    def run(self, script: Path) -> None:
-        variables = {
-            "SUDO_USER": "guest",
-            "user": "guest",
-            "guest_home": str(self.home),
-            "home": str(self.home),
-            "lib_dir": str(self.lib),
-            "helper": str(self.helper),
-        }
-        assignments = "\n".join(f"{k}={shlex.quote(v)}" for k, v in variables.items())
-        body = (
-            'sudo() { [ "$1 $2" = "-H -u" ] && shift 3 && "$@"; }\n'
-            f"{assignments}\n{sudo_lines(script)}\n"
-        )
-        result = subprocess.run(
-            ["bash", "-euo", "pipefail", "-c", body],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-            env=self.env,
-        )
-        assert result.returncode == 0, result.stderr
-
-    def helper_values(self, key: str) -> list[str]:
-        result = self.git("config", "--file", str(self.config), "--get-all", key)
-        return result.stdout.splitlines()
-
-
-@pytest.fixture
-def guest(tmp_path: Path) -> Guest:
-    return Guest(tmp_path)
-
-
-def test_the_helper_goes_in_the_xdg_config_not_gitconfig(
-    script: Path, guest: Guest
-) -> None:
-    _ = guest.gitconfig.write_text("[user]\n\tname = Someone\n")
-    before = guest.gitconfig.read_bytes()
-    guest.run(script)
-    assert guest.gitconfig.read_bytes() == before
-    assert guest.helper_values("credential.https://github.com.helper") == [
-        f"!{guest.helper}"
-    ]
-    filled = guest.git(
-        "credential", "fill", stdin="protocol=https\nhost=github.com\n\n"
-    )
-    assert filled.returncode == 0, filled.stderr
-    assert "password=dummy" in filled.stdout.splitlines()
-
-
-def test_no_gitconfig_is_created(script: Path, guest: Guest) -> None:
-    guest.run(script)
-    assert not guest.gitconfig.exists()
-
-
-def test_the_gist_helper_is_left_alone(script: Path, guest: Guest) -> None:
-    guest.config.parent.mkdir(parents=True)
-    _ = guest.config.write_text(
-        f"""[credential "https://gist.github.com"]
-\thelper = {GIST_HELPER}
-[credential "https://github.com"]
-\thelper = !stale
-"""
-    )
-    guest.run(script)
-    assert guest.helper_values("credential.https://gist.github.com.helper") == [
-        GIST_HELPER
-    ]
-    assert guest.helper_values("credential.https://github.com.helper") == [
-        f"!{guest.helper}"
-    ]
-
-
-def test_a_second_run_changes_nothing(script: Path, guest: Guest) -> None:
-    guest.run(script)
-    first = guest.config.read_bytes()
-    guest.run(script)
-    assert guest.config.read_bytes() == first
-    assert len(guest.helper_values("credential.https://github.com.helper")) == 1
-
-
-def test_a_missing_config_directory_is_created(script: Path, guest: Guest) -> None:
-    assert not guest.config.parent.exists()
-    guest.run(script)
-    assert guest.config.is_file()
+    assert "cannot remove the git push deny rules" in result.stderr
+    assert json.loads((guest / SETTINGS).read_text()) == settings
+    assert (guest / "home/.codex/rules/no-push.rules").exists()
+    assert not (guest / MARKER).exists()

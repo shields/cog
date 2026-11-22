@@ -14,6 +14,7 @@
 
 import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { grantProfiles } from "../../gateway/policy.ts";
 import type { Instance } from "../../gateway/state.ts";
 import { dotfilesRepo, guestLib, guestRepo } from "../config.ts";
 import { CogError, Interrupted } from "../errors.ts";
@@ -296,10 +297,11 @@ export async function newVM(
     let cloned = false;
     if (repository !== null) {
       if (access === "authenticated") {
-        const revision = await gateway.grant(gatewayVM, repository, () => ({
-          read: true,
-          pushCogBranches: false,
-        }));
+        const revision = await gateway.grant(
+          gatewayVM,
+          repository,
+          grantProfiles.read,
+        );
         signals.check();
         say(`policy revision ${String(revision)}`);
         await lima.shell(

@@ -307,7 +307,6 @@ test.each([0o000, 0o022, 0o077])(
           `${guestLib}/throwaway.sh`,
           "--claude-settings",
           `${guest}/.claude/settings.json`,
-          "--no-github-timer",
         ],
         undefined,
       ],

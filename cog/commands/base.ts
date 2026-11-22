@@ -208,6 +208,7 @@ function checkGuestScripts(guest: string): void {
     }
   }
   for (const name of [
+    "configure-github-access.sh",
     "github-gateway-credential",
     "reset-identity.sh",
     "setup-github-gateway",
@@ -461,7 +462,6 @@ export async function baseVM(
       `${guestLib}/throwaway.sh`,
       "--claude-settings",
       `${guestDir}/.claude/settings.json`,
-      "--no-github-timer",
     ]);
     await lima.shell(
       base,

@@ -83,9 +83,6 @@ export PATH="$brew_prefix/bin:$local_prefix/bin:$PATH"
 printf '%s\n' "$brew_prefix/bin" "$local_prefix/bin" >>"$GITHUB_PATH"
 
 retry uv tool install basedpyright
-# tests/test_github_app_token.py runs the token tool under Python 3.13. A
-# download that uv started inside the test would not be retried.
-retry uv python install 3.13
 
 mkdir -p "$local_prefix/bin"
 download "https://github.com/lima-vm/lima/releases/download/v$lima_version/lima-$lima_version-Linux-x86_64.tar.gz" \

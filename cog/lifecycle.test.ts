@@ -153,7 +153,7 @@ function fixture() {
         return { ca, key: "unused", cert: "unused" };
       },
       grant: (name, repository, profile) => {
-        mark("grant", name, repository, profile().pushCogBranches);
+        mark("grant", name, repository, profile.pushCogBranches);
         return Promise.resolve(1);
       },
       disable: (name) => {

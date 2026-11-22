@@ -27,7 +27,7 @@
 #
 set -euo pipefail
 
-usage="usage: sudo guest/throwaway.sh --claude-settings FILE [--etc-dir DIR] [--user NAME | --no-github-timer]"
+usage="usage: sudo guest/throwaway.sh --claude-settings FILE [--etc-dir DIR]"
 
 die() {
     printf 'throwaway.sh: %s\n' "$*" >&2
@@ -35,8 +35,6 @@ die() {
 }
 
 etc=/etc
-user=${SUDO_USER:-}
-timer=1
 settings=
 while (($#)); do
     case $1 in
@@ -54,25 +52,12 @@ while (($#)); do
         etc=$2
         shift 2
         ;;
-    --user)
-        [[ $# -ge 2 && -n $2 ]] || die "$usage"
-        user=$2
-        shift 2
-        ;;
-    --no-github-timer)
-        timer=0
-        shift
-        ;;
     *) die "$usage" ;;
     esac
 done
 [[ -n $settings ]] || die "$usage"
 if [[ $etc == /etc && $(id -u) -ne 0 ]]; then
     die "must run as root; use: sudo $0"
-fi
-if ((timer)); then
-    [[ -n $user ]] || die "cannot tell which user runs the GitHub token timer; pass --user NAME, or --no-github-timer"
-    [[ $user =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || die "invalid user name: $user"
 fi
 command -v jq >/dev/null || die "jq is not installed"
 
@@ -147,51 +132,9 @@ without the sandbox and permission prompts. The agents' policy is in
 claude-code/managed-settings.json and codex/config.toml beside it.
 EOF
 
-if ((timer)); then
-    cat >"$work/github-app-refresh.service" <<EOF
-[Unit]
-Description=Renew the GitHub App token of $user
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=$user
-Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
-ExecCondition=/bin/sh -c 'test -e "\$\$HOME/.config/github-app/auth.json"'
-ExecStart=/usr/local/lib/cog/github_app_token.py refresh-if-needed
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=full
-EOF
-    cat >"$work/github-app-refresh.timer" <<'EOF'
-[Unit]
-Description=Renew the GitHub App token every few minutes
-
-[Timer]
-OnBootSec=1min
-OnCalendar=*:0/5
-Persistent=yes
-
-[Install]
-WantedBy=timers.target
-EOF
-fi
-
 chmod 644 "$work"/*
 mkdir -p "$codex_dir/rules"
 mv -f "$work/managed-settings.json" "$claude_dir/managed-settings.json"
 mv -f "$work/config.toml" "$codex_dir/config.toml"
 mv -f "$work/throwaway.rules" "$codex_dir/rules/throwaway.rules"
 mv -f "$work/cog-throwaway" "$etc/cog-throwaway"
-
-if ((timer)); then
-    units=$etc/systemd/system
-    mkdir -p "$units/timers.target.wants"
-    mv -f "$work/github-app-refresh.service" "$units/github-app-refresh.service"
-    mv -f "$work/github-app-refresh.timer" "$units/github-app-refresh.timer"
-    ln -sfn ../github-app-refresh.timer "$units/timers.target.wants/github-app-refresh.timer"
-    if [[ $etc == /etc && -d /run/systemd/system ]]; then
-        systemctl daemon-reload
-    fi
-fi

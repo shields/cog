@@ -362,11 +362,11 @@ BUILD="$TMPBASE/build"
 COGTREE="$TMPBASE/installed"
 COGBIN="$COGTREE/bin/cog"
 mkdir -p "$BUILD/tools" "$COGTREE/bin"
-cp -R "$HERE/../cog" "$HERE/../gateway" "$HERE/../lima" "$HERE/../guest" "$HERE/../profiles.yaml" "$BUILD/"
+cp -R "$HERE/../cog" "$HERE/../gateway" "$HERE/../lima" "$HERE/../guest" "$BUILD/"
 rm -rf "$BUILD/guest/__pycache__"
 GUEST_FILES=$(cd "$BUILD/guest" && find . -type f | sort)
 mkdir -p "$BUILD/guest/__pycache__"
-: > "$BUILD/guest/__pycache__/github_app_token.cpython-313.pyc"
+: > "$BUILD/guest/__pycache__/stray.pyc"
 ln -s "$HERE/../node_modules" "$BUILD/node_modules"
 
 # The shipping binary must not expose the test's staging fault injection.
@@ -451,14 +451,10 @@ gateway_state() {
     COG_ROOT="$GATEWAY_ROOT" bun --no-env-file "$GATEWAY_STATE" "$@"
 }
 
-# prepare_gateway: the gateway root has the suite's certificates, the profiles
-# and authorizations, which hold fake tokens, for shields/dotfiles and
-# shields/other.
 prepare_gateway() {
     mkdir -p "$GATEWAY_ROOT/secrets"
     chmod 700 "$GATEWAY_ROOT/secrets"
     cp -p "$CERTS"/* "$GATEWAY_ROOT/secrets/"
-    cp "$HERE/../profiles.yaml" "$GATEWAY_ROOT/profiles.yaml"
     gateway_state seed-auth shields/dotfiles shields/other
 }
 
@@ -719,7 +715,7 @@ shell test-base sudo chown -R root:root $GUEST_LIB
 shell test-base sudo chmod -R u=rwX,go=rX $GUEST_LIB
 shell --workdir $GUEST_DIR test-base ./provision.sh none
 shell --workdir $GUEST_DIR test-base git reset --mixed --quiet HEAD
-shell test-base sudo $GUEST_LIB/throwaway.sh --claude-settings $GUEST_DIR/.claude/settings.json --no-github-timer
+shell test-base sudo $GUEST_LIB/throwaway.sh --claude-settings $GUEST_DIR/.claude/settings.json
 shell --workdir $GUEST_DIR test-base env PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin uv run --no-dev python tools/configure_codex.py /home/guest/.codex/config.toml
 shell test-base sudo systemctl mask --now tailscaled.service
 shell test-base sudo test ! -e /var/lib/tailscale/tailscaled.state
@@ -1020,7 +1016,7 @@ assert_contains "it names the missing guest directory" "guest/" "$OUT"
 assert_eq "it touches no VM" "" "$(limactl_log)"
 RUN_COG=
 
-for guest_script in github-gateway-credential reset-identity.sh setup-github-gateway setup-secrets throwaway.sh; do
+for guest_script in configure-github-access.sh github-gateway-credential reset-identity.sh setup-github-gateway setup-secrets throwaway.sh; do
     new_case test-base
     run_base_with_guest_fault "missing:$guest_script"
     assert_eq "a staged tree without guest/$guest_script fails base" 1 "$RC"
@@ -1179,10 +1175,8 @@ assert_eq "a symlink in guest/ touches no VM" "" "$(limactl_log)"
 
 assert_eq "nothing refers to the home directory's bin" "" \
     "$(grep -rnIE '\$HOME/bin|~/bin|/home/shields/bin|guest_home/bin' "$HERE/../guest" "$HERE/../cloudflare/guest" "$HERE/../cog/commands" || true)"
-assert_eq "the image's credential helper is the root-owned one" 1 \
-    "$(grep -c '^helper=/usr/local/lib/cog/github-gateway-credential$' "$HERE/../cloudflare/guest/agent.sh" || true)"
-assert_eq "the gateway setup finds its helper beside itself" 2 \
-    "$(grep -c 'lib_dir/github-gateway-credential' "$HERE/../guest/setup-github-gateway" || true)"
+assert_contains "the Lima gateway configures access for its guest user and VM ID" \
+    '"$lib_dir/configure-github-access.sh" "$SUDO_USER" "$1"' "$(<"$HERE/../guest/setup-github-gateway")"
 
 # --- 7. base failures ---
 new_case
@@ -1298,11 +1292,9 @@ assert_contains "new asked gh to read the repository again" "api repos/shields/o
 assert_eq "an expired authorization comes before the clone" 0 "$(count_in_log clone)"
 
 new_gateway_case test-base
-print -rl -- 'read: {read: true, pushCogBranches: true}' 'cog: {read: true, pushCogBranches: true}' > "$STATE/profiles.yaml"
-EXTRA_ENV+=(COG_PROFILES="$STATE/profiles.yaml")
 run_cog new t1 --repo shields/other
 assert_eq "new clones a private repository with a read-only grant" 0 "$RC"
-assert_eq "a custom profile cannot give a new VM push access" \
+assert_eq "new grants only private repository reads" \
     '{"shields/other":{"read":true,"pushCogBranches":false}}' "$(instance_query t1 .grants)"
 assert_contains "new verifies the private repository grant" "https://api.github.com/repos/shields/other" "$(<"$STATE/limactl.log")"
 assert_contains "new opens the private repository shell" "shell --workdir $OTHER_DIR t1" "$(<"$STATE/limactl.log")"
@@ -1456,6 +1448,12 @@ assert_eq "the agents are upgraded before any secret is installed" 1 "$(( upgrad
 new_case test-base t1
 prepare_gateway
 register_vm t1
+EXTRA_ENV+=(COG_PROFILES="$STATE/old-profiles.yaml")
+run_cog grant t1 shields/other
+assert_eq "a retired profile override stops a grant" 1 "$RC"
+assert_contains "grant explains how to select a fixed profile" "unset COG_PROFILES" "$OUT"
+assert_eq "the old override cannot widen access" '{}' "$(instance_query t1 .grants)"
+EXTRA_ENV=()
 run_cog grant t1 shields/other
 assert_eq "github adds an additional repository" 0 "$RC"
 assert_eq "github grants the cog profile" '{"shields/other":{"read":true,"pushCogBranches":true}}' "$(instance_query t1 .grants)"

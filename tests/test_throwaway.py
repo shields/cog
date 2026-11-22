@@ -19,7 +19,6 @@
 import copy
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import tomllib
@@ -55,7 +54,6 @@ def run(
     settings: Path = SETTINGS_FILE,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    user = [] if {"--user", "--no-github-timer"} & set(args) else ["--user", "tester"]
     return subprocess.run(
         [
             BASH,
@@ -64,7 +62,6 @@ def run(
             str(settings),
             "--etc-dir",
             str(etc),
-            *user,
             *args,
         ],
         capture_output=True,
@@ -109,7 +106,7 @@ def etc(tmp_path: Path) -> Path:
     return path
 
 
-def test_writes_the_policy_and_the_timer_readable_by_everyone(etc: Path) -> None:
+def test_writes_the_policy_readable_by_everyone(etc: Path) -> None:
     result = run(etc)
     assert result.returncode == 0, result.stderr
     assert files_under(etc) == [
@@ -117,9 +114,6 @@ def test_writes_the_policy_and_the_timer_readable_by_everyone(etc: Path) -> None
         "codex/config.toml",
         "codex/rules/throwaway.rules",
         "cog-throwaway",
-        "systemd/system/github-app-refresh.service",
-        "systemd/system/github-app-refresh.timer",
-        "systemd/system/timers.target.wants/github-app-refresh.timer",
     ]
     for name in files_under(etc):
         assert (etc / name).stat().st_mode & 0o777 == 0o644, name
@@ -133,7 +127,6 @@ def test_leaves_no_temporary_files(etc: Path) -> None:
         "claude-code",
         "codex",
         "cog-throwaway",
-        "systemd",
     ]
 
 
@@ -320,7 +313,7 @@ def test_a_missing_settings_file_is_refused(tmp_path: Path) -> None:
 
 def test_the_settings_argument_is_required(etc: Path) -> None:
     result = subprocess.run(
-        [BASH, str(SCRIPT), "--etc-dir", str(etc), "--no-github-timer"],
+        [BASH, str(SCRIPT), "--etc-dir", str(etc)],
         capture_output=True,
         text=True,
         check=False,
@@ -360,129 +353,6 @@ def test_a_missing_jq_is_an_error(etc: Path, tmp_path: Path) -> None:
     result = run(etc, env={"PATH": str(empty)})
     assert result.returncode != 0
     assert "jq is not installed" in result.stderr
-    assert files_under(etc) == []
-
-
-def unit(etc: Path, name: str) -> str:
-    return (etc / "systemd/system" / name).read_text()
-
-
-def exec_lines(text: str, key: str) -> list[str]:
-    return [
-        line.removeprefix(f"{key}=")
-        for line in text.splitlines()
-        if line.startswith(f"{key}=")
-    ]
-
-
-def test_the_timer_is_enabled_with_a_relative_link(etc: Path) -> None:
-    assert run(etc).returncode == 0
-    link = etc / "systemd/system/timers.target.wants/github-app-refresh.timer"
-    assert link.is_symlink()
-    assert link.readlink() == Path("../github-app-refresh.timer")
-    assert link.resolve() == (etc / "systemd/system/github-app-refresh.timer").resolve()
-
-
-def test_the_service_runs_refresh_if_needed_as_the_user(etc: Path) -> None:
-    assert run(etc, "--user", "vm.user-1").returncode == 0
-    text = unit(etc, "github-app-refresh.service")
-    assert "User=vm.user-1\n" in text
-    assert "Type=oneshot" in text
-    (start,) = exec_lines(text, "ExecStart")
-    assert "refresh-if-needed" in start
-    assert "NoNewPrivileges=yes" in text
-
-
-def test_the_timer_runs_at_boot_and_every_five_minutes(etc: Path) -> None:
-    assert run(etc).returncode == 0
-    text = unit(etc, "github-app-refresh.timer")
-    assert "OnBootSec=1min" in text
-    assert "OnCalendar=*:0/5" in text
-    assert "Persistent=yes" in text
-    assert "WantedBy=timers.target" in text
-
-
-def systemd_command(line: str) -> list[str]:
-    """What systemd runs for an Exec line: it turns $$ into $, and sh expands $HOME."""
-    argv = shlex.split(line.replace("$$", "$"))
-    assert argv[:2] == ["/bin/sh", "-c"]
-    return argv
-
-
-def test_the_service_does_nothing_until_an_auth_record_exists(
-    etc: Path, tmp_path: Path
-) -> None:
-    assert run(etc).returncode == 0
-    (condition,) = exec_lines(unit(etc, "github-app-refresh.service"), "ExecCondition")
-    home = tmp_path / "home"
-    home.mkdir()
-    env = {"HOME": str(home), "PATH": os.environ["PATH"]}
-    argv = systemd_command(condition)
-    assert subprocess.run(argv, env=env, check=False).returncode == 1
-    (home / ".config/github-app").mkdir(parents=True)
-    _ = (home / ".config/github-app/auth.json").write_text("{}")
-    assert subprocess.run(argv, env=env, check=False).returncode == 0
-
-
-def test_the_service_starts_the_root_owned_token_manager(etc: Path) -> None:
-    assert run(etc).returncode == 0
-    (start,) = exec_lines(unit(etc, "github-app-refresh.service"), "ExecStart")
-    assert start == "/usr/local/lib/cog/github_app_token.py refresh-if-needed"
-
-
-def test_without_a_timer_no_unit_is_written(etc: Path) -> None:
-    assert run(etc, "--no-github-timer").returncode == 0
-    assert not (etc / "systemd").exists()
-
-
-def test_the_timer_user_defaults_to_the_sudo_user(etc: Path) -> None:
-    env = {"PATH": os.environ["PATH"], "SUDO_USER": "lima"}
-    result = subprocess.run(
-        [
-            BASH,
-            str(SCRIPT),
-            "--claude-settings",
-            str(SETTINGS_FILE),
-            "--etc-dir",
-            str(etc),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "User=lima\n" in unit(etc, "github-app-refresh.service")
-
-
-def test_the_timer_needs_a_user(etc: Path) -> None:
-    env = {"PATH": os.environ["PATH"]}
-    result = subprocess.run(
-        [
-            BASH,
-            str(SCRIPT),
-            "--claude-settings",
-            str(SETTINGS_FILE),
-            "--etc-dir",
-            str(etc),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        timeout=60,
-    )
-    assert result.returncode != 0
-    assert "--no-github-timer" in result.stderr
-    assert files_under(etc) == []
-
-
-@pytest.mark.parametrize("user", ["a b", "x;id", "-x", "a\nb", "1abc", "x/y", "x=y"])
-def test_an_unsafe_user_name_is_refused(etc: Path, user: str) -> None:
-    result = run(etc, "--user", user)
-    assert result.returncode != 0
-    assert "invalid user name" in result.stderr
     assert files_under(etc) == []
 
 

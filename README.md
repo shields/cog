@@ -26,8 +26,8 @@ installs the locked Bun dependencies and compiles one executable. It replaces
 `~/.local/share/cog/cog` by rename, links `~/bin/cog` to it and loads the
 `dev.msrl.cog.gateway` LaunchAgent running `cog gateway serve`. Reinstall the
 same way after updating the checkout. Nothing installed points into the
-checkout. The executable embeds the Lima template, guest scripts, stager and
-grant profiles, and does not load `.env` or `bunfig.toml` at runtime.
+checkout. The executable embeds the Lima template, guest scripts and stager.
+It does not load `.env` or `bunfig.toml` at runtime.
 
 The installer waits for `cog gateway health` to report readiness. If it fails,
 check `~/Library/Logs/dev.msrl.cog.gateway.err`; standard output goes to the
@@ -111,7 +111,7 @@ build; with no origin, the guest has none. The build then:
 4. runs `./provision.sh MODULE...` there (with no module, the checkout's own
    default);
 5. runs `/usr/local/lib/cog/throwaway.sh` with `--claude-settings` naming the
-   checkout's `.claude/settings.json` and `--no-github-timer`, then the
+   checkout's `.claude/settings.json`, then the
    checkout's `tools/configure_codex.py` against `~/.codex/config.toml`;
 6. empties `/etc/machine-id`, runs `reset-identity.sh` to forget the
    identifiers the agents stored, stops the VM, sets the shell to zsh and
@@ -246,12 +246,12 @@ repository ID are denied, including GitHub's redirect from a renamed or
 transferred repository's old name, so use its current name. There is no approval
 queue.
 
-`profiles.yaml` defines the two capability templates, `read` (reads only) and
-`cog` (reads and pushes to `cog/VM-ID/*`). `cog grant` reads the file named by `COG_PROFILES`, or uses the embedded file
-when it is unset. `cog cloud grant` always uses the embedded profiles.
-A grant stores a copy of its profile, so editing the profile changes future
-grants only. The profile key that enables pushes is `pushCogBranches`. Use
-these commands on the Mac to change a running VM immediately:
+Lima and Cloudflare share two built-in profiles. `read` grants reads, and `cog`
+also grants pushes to `cog/VM-ID/*`. Grants store these capabilities in the
+policy. If you set `COG_PROFILES` for Lima, unset it before running `cog grant`
+and choose the intended profile on the command line.
+
+Use these commands on the Mac to change a running VM immediately:
 
 ```
 cog show NAME
@@ -377,8 +377,7 @@ Not isolated:
 ## What the agents may do
 
 `guest/throwaway.sh --claude-settings FILE` makes a machine a throwaway
-environment (`--user NAME` and the GitHub token timer are for machines without
-the gateway; `--no-github-timer` leaves the timer out, as `cog base` does). It
+environment. It
 creates `/etc/cog-throwaway`, which dotfiles' `.zshrc` tests (without a fork)
 and only on Linux; the Mac and a persistent Linux box have no such file and keep
 their sandboxed, prompting behavior.
@@ -409,21 +408,20 @@ their sandboxed, prompting behavior.
   GraphQL query is exempt. The deny rules refuse `gh api` write methods as well,
   and Claude Code's matcher also looks inside a quoted `$(...)`, which the hook
   does not. The gateway is the final check for API calls.
-- In a Lima VM, `setup-github-gateway` removes the five `git push` deny rules
-  from the managed settings and fails if it removes none. It tells the agents
-  about `cog/VM-ID/*` in system-wide instructions that re-provisioning leaves in
-  place: Claude Code's `/etc/claude-code/CLAUDE.md` and Codex's
-  `/etc/codex/requirements.toml` (`additional_developer_instructions`). It
-  deletes `~/.codex/rules/no-push.rules`, writes the VM ID to
-  `/etc/cog-github-gateway`, and installs the CA, the `/etc/hosts` mapping of
-  the GitHub hosts to `127.0.0.1` and the relay unit `cog-github-gateway`. It
-  sets github.com's credential helper with `git config --file
-~/.config/git/config --replace-all`, never `--global`, because dotfiles'
-  chezmoi manages `~/.gitconfig` and would stop at it when the guest is
-  re-provisioned. dotfiles' `provision.sh` leaves github.com's helper alone
-  where `/etc/cog-github-gateway` exists and sets only gist.github.com's.
-  `cloudflare/guest/agent.sh` sets the helper the same way. A
-  Cloudflare VM gets neither instruction file, so its agents are not told the
+- Both backends run `configure-github-access.sh`. It removes the five
+  `git push` deny rules from the managed settings and fails if it removes none.
+  It deletes `~/.codex/rules/no-push.rules` and writes the Lima VM's UUID or
+  `cloudflare` to `/etc/cog-github-gateway`. It sets github.com's credential
+  helper with `git config --file ~/.config/git/config --replace-all` because
+  chezmoi manages `~/.gitconfig`. With the marker present, dotfiles'
+  `provision.sh` configures only gist.github.com's helper.
+- On Lima, `setup-github-gateway` also installs the CA, the `/etc/hosts`
+  mapping of the GitHub hosts to `127.0.0.1` and the relay unit
+  `cog-github-gateway`. It tells the agents about `cog/VM-ID/*` in system-wide
+  instructions that survive re-provisioning, in Claude Code's
+  `/etc/claude-code/CLAUDE.md` and Codex's `/etc/codex/requirements.toml`
+  (`additional_developer_instructions`). A Cloudflare VM gets neither
+  instruction file, so its agents are not told the
   namespace, and dotfiles' `wt`, which names a branch from the UUID in
   `/etc/cog-github-gateway`, refuses to create a worktree where it holds
   `cloudflare`.
@@ -487,13 +485,11 @@ scanned copy, a git repository with an index and no commit), `guest/` and
 copies the dotfiles tree to `/home/shields/src/github.com/shields/dotfiles`,
 provisions it (`MODULES`, `dev` by default), copies the guest scripts root-owned
 to `/usr/local/lib/cog`, and runs `throwaway.sh`, `configure_codex.py`,
-`reset-identity.sh` and `cloudflare/guest/agent.sh --user shields` in that
-order. `agent.sh` removes the `git push` deny rules (and fails if it removes
-none) and `no-push.rules`, writes `cloudflare` to `/etc/cog-github-gateway`, and
-installs the same dummy credential helper. The Worker starts
-`/usr/local/lib/cog/cloudflare/entrypoint.sh`, which installs Cloudflare's
-runtime CA. With `--worker-only` no dotfiles tree is staged, the image is
-reused without building or rolling out containers, and `--dotfiles` is an error.
+`reset-identity.sh` and `configure-github-access.sh shields cloudflare` in that
+order. The Worker starts `/usr/local/lib/cog/cloudflare/entrypoint.sh`, which
+installs Cloudflare's runtime CA. With `--worker-only` no dotfiles tree is
+staged, the image is reused without building or rolling out containers, and
+`--dotfiles` is an error.
 
 `cloudflare/wrangler.jsonc` cannot build the image by itself: its `dockerfile`
 and `build_context` name `cloudflare/Dockerfile` and the repository root, which
@@ -521,7 +517,7 @@ cog cloud list
 ```
 
 `authorize` starts a separate GitHub App device flow for the cloud authority; it
-does not save that authorization on the Mac. A grant uses the embedded `read`
+does not save that authorization on the Mac. A grant uses the built-in `read`
 and `cog` profiles and defaults to `cog`. A revision check prevents overwriting
 another policy edit. Grants and revocations take effect for the next GitHub
 request without restarting the VM. `list` shows registered VM IDs, and `rm`

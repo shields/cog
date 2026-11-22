@@ -229,7 +229,9 @@ def test_dockerfile_reconfigures_codex_after_installing_the_throwaway_policy() -
     throwaway = dockerfile.index("throwaway.sh", run)
     configure = dockerfile.index("python tools/configure_codex.py", throwaway)
     reset = dockerfile.index("/usr/local/lib/cog/reset-identity.sh", configure)
-    agent = dockerfile.index("/usr/local/lib/cog/cloudflare/agent.sh --user", reset)
+    agent = dockerfile.index(
+        "/usr/local/lib/cog/configure-github-access.sh shields cloudflare", reset
+    )
     end = dockerfile.index("\n\n", agent)
     assert provision < guard < run < throwaway < configure < reset < agent < end
     assert (
@@ -256,9 +258,11 @@ def test_dockerfile_copies_the_guest_scripts_root_owned() -> None:
 
 
 def test_only_the_dockerfile_names_the_user() -> None:
-    for name in ("agent.sh", "entrypoint.sh"):
-        assert "shields" not in (REPO / "cloudflare/guest" / name).read_text()
-    assert "--user shields" in DOCKERFILE.read_text()
+    for script in (
+        "guest/configure-github-access.sh",
+        "cloudflare/guest/entrypoint.sh",
+    ):
+        assert "shields" not in (REPO / script).read_text()
 
 
 def test_the_worker_starts_the_entrypoint_from_the_guest_scripts() -> None:
@@ -289,14 +293,13 @@ def test_the_context_holds_the_three_trees(world: World) -> None:
     )
     assert log.returncode != 0
     assert sorted(path.name for path in (dest / "cloudflare").iterdir()) == [
-        "agent.sh",
         "entrypoint.sh",
     ]
     assert sorted(path.name for path in (dest / "guest").iterdir()) == sorted(
         path.name for path in (REPO / "guest").iterdir() if path.name != "__pycache__"
     )
     assert os.access(dest / "guest/throwaway.sh", os.X_OK)
-    assert os.access(dest / "cloudflare/agent.sh", os.X_OK)
+    assert os.access(dest / "guest/configure-github-access.sh", os.X_OK)
 
 
 def test_the_default_dotfiles_checkout_is_under_home(world: World) -> None:
@@ -400,7 +403,7 @@ def test_a_secret_in_the_guest_scripts_stops_the_context(world: World) -> None:
         "guest/throwaway.sh",
         "guest/reset-identity.sh",
         "guest/github-gateway-credential",
-        "cloudflare/guest/agent.sh",
+        "guest/configure-github-access.sh",
         "cloudflare/guest/entrypoint.sh",
     ],
 )
@@ -510,7 +513,7 @@ def test_deploy_stages_the_context_and_points_wrangler_at_it(world: World) -> No
     assert jq(config, f"{key}.name") == "owner"
     assert jq(config, f"{key}.public_key") == "ssh-ed25519 AAAAtest owner"
     listing = (world.log / "context-list").read_text().split()
-    assert "./cloudflare/agent.sh" in listing
+    assert "./guest/configure-github-access.sh" in listing
     assert "./guest/throwaway.sh" in listing
     assert "./cloudflare/Dockerfile" not in listing
     args = (world.log / "bunx-args").read_text().split()
