@@ -262,8 +262,10 @@ cog authorize OWNER/REPO
 
 `edit` opens the full YAML policy in `$VISUAL`, `$EDITOR` or `vi`; it rejects a
 stale revision. Adding a repository runs the GitHub authorization on the Mac
-before applying the edit. `grant` also authorizes a repository if needed. The
-gateway reads grants for every request, so changes take effect without a VM
+before applying the edit. When `cog grant` needs GitHub authorization, it
+copies the user code to the Mac clipboard and opens the verification URL in
+your browser. Paste the code there to authorize the repository.
+The gateway reads grants for every request, so changes take effect without a VM
 restart. `cog rm` disables access before deleting the VM. A new VM with the same
 display name receives a new ID and no old grants. `cog logs VM-ID` can
 inspect a deleted VM's retained history. The gateway also has `cog gateway health` and `cog gateway disable NAME`.

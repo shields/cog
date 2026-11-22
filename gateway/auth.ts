@@ -112,6 +112,11 @@ type AuthRequest = (
   init: BunFetchRequestInit,
 ) => Promise<Response>;
 
+export type DeviceCodePrompt = (
+  userCode: string,
+  verificationUri: string,
+) => Promise<void>;
+
 async function postForm(
   url: string,
   form: Record<string, string>,
@@ -303,7 +308,12 @@ export class AppAuth {
     {
       hostname,
       request = fetch,
-    }: { hostname?: string; request?: AuthRequest } = {},
+      prompt,
+    }: {
+      hostname?: string;
+      request?: AuthRequest;
+      prompt?: DeviceCodePrompt | undefined;
+    } = {},
   ): Promise<AuthRecord> {
     const key = normalizeRepository(repository);
     const args = ["api", `repos/${key}`, "--jq", ".id"];
@@ -340,8 +350,10 @@ export class AppAuth {
       !/^[A-Za-z0-9_-]+$/.test(deviceCode) ||
       typeof userCode !== "string" ||
       userCode.length > 32 ||
+      userCode.trim() === "" ||
       typeof verificationUri !== "string" ||
       !verificationUri.startsWith("https://") ||
+      !URL.canParse(verificationUri) ||
       !Number.isSafeInteger(interval) ||
       Number(interval) < 0 ||
       !Number.isSafeInteger(expiresIn) ||
@@ -351,10 +363,14 @@ export class AppAuth {
         "GitHub returned an invalid device authorization response",
       );
     }
-    process.stderr.write(
-      `Open ${verificationUri} and enter code ${userCode} to authorize ${key}\n`,
-    );
     const deadline = Date.now() + Number(expiresIn) * 1000;
+    if (prompt) {
+      await prompt(userCode, verificationUri);
+    } else {
+      process.stderr.write(
+        `Open ${verificationUri} and enter code ${userCode} to authorize ${key}\n`,
+      );
+    }
     while (Date.now() < deadline) {
       await delay(Number(interval) * 1000);
       const now = Math.floor(Date.now() / 1000);
@@ -428,8 +444,11 @@ export class AppAuth {
     throw new Error(`GitHub device code for ${key} expired`);
   }
 
-  async authorize(repository: string): Promise<void> {
-    const record = await this.issue(repository);
+  async authorize(
+    repository: string,
+    prompt?: DeviceCodePrompt,
+  ): Promise<void> {
+    const record = await this.issue(repository, { prompt });
     await this.locked(record.repository, () => {
       this.save(record);
     });

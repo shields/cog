@@ -17,7 +17,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
-import { AppAuth } from "./auth.ts";
+import { AppAuth, type DeviceCodePrompt } from "./auth.ts";
 import { ensureCertificates, type Certificates } from "./cert.ts";
 import {
   compareCodeUnits,
@@ -319,12 +319,13 @@ export class Control {
     name: string,
     repositoryName: string,
     resolveGrant: () => Grant,
+    prompt?: DeviceCodePrompt,
   ): Promise<number> {
     const repository = normalizeRepository(repositoryName);
     const instance = this.active(name);
     const grant = resolveGrant();
     if (!this.auth.has(repository)) {
-      await this.auth.authorize(repository);
+      await this.auth.authorize(repository, prompt);
     }
     await this.auth.token(repository);
     return this.state.update(

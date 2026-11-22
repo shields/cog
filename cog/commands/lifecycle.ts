@@ -22,7 +22,7 @@ import {
   validRepository,
 } from "../names.ts";
 import { note, say } from "../output.ts";
-import { capture } from "../proc.ts";
+import { capture, run } from "../proc.ts";
 import { loadProfiles } from "../profiles.ts";
 import {
   requireRegularOrAbsent,
@@ -183,11 +183,18 @@ export async function grant(
   if (!(await context.lima.exists(name))) {
     throw new CogError(`${name} does not exist`);
   }
-  const revision = await context
-    .gateway()
-    .grant(gatewayName(name), repository, () =>
-      profileNamed(loadProfiles(context.config), profile),
-    );
+  const revision = await context.gateway().grant(
+    gatewayName(name),
+    repository,
+    () => profileNamed(loadProfiles(context.config), profile),
+    async (userCode, verificationUri) => {
+      await run(["pbcopy"], { stdin: Buffer.from(userCode), quiet: true });
+      note(
+        `cog: Paste the copied code ${userCode} at ${verificationUri} to authorize ${repository}.`,
+      );
+      await run(["open", verificationUri]);
+    },
+  );
   say(`policy revision ${String(revision)}`);
   say(
     `cog: ${name} can now ${profile === "cog" ? "read and push cog branches on" : "read"} ${repository}.`,

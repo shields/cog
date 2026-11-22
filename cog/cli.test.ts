@@ -236,6 +236,91 @@ function sandbox(): Sandbox {
   };
 }
 
+test("grant copies the user code before opening the verification URL on first authorization", async () => {
+  const { root } = sandbox();
+  const bin = path.join(root, "bin");
+  for (const [command, script] of Object.entries({
+    limactl: '[ "$*" = "list -q trial" ]',
+    gh: "echo 4242",
+    pbcopy: '[ "$#" -eq 0 ] && /bin/cat >> "$COG_ROOT/prompt"',
+    open: 'printf "\\n%s\\n" "$@" >> "$COG_ROOT/prompt"',
+  })) {
+    writeFileSync(path.join(bin, command), `#!/bin/sh\n${script}\n`, {
+      mode: 0o700,
+    });
+  }
+  const validPrompt = {
+    user_code: "USER-CODE",
+    verification_uri: "https://example.test/login/device",
+  };
+  let prompt = validPrompt;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      switch (new URL(request.url).pathname) {
+        case "/login/device/code":
+          return Response.json({
+            device_code: "device-code",
+            ...prompt,
+            interval: 0,
+            expires_in: 900,
+          });
+        case "/login/oauth/access_token":
+          return Response.json({
+            access_token: "ghu_test",
+            expires_in: 3600,
+            refresh_token: "ghr_test",
+            refresh_token_expires_in: 86_400,
+          });
+        case "/repos/owner/repo":
+          return Response.json({ id: 4242, full_name: "owner/repo" });
+        default:
+          return new Response(null, { status: 404 });
+      }
+    },
+  });
+  onTestFinished(() => server.stop(true));
+  const runGrant = () =>
+    Bun.spawn([process.execPath, main, "grant", "trial", "owner/repo"], {
+      env: {
+        HOME: root,
+        PATH: bin,
+        COG_ROOT: root,
+        COG_GITHUB_WEB_URL: server.url.origin,
+        COG_GITHUB_API_URL: server.url.origin,
+      },
+      stderr: "pipe",
+    });
+  const promptLog = path.join(root, "prompt");
+  for (const invalid of [
+    { ...validPrompt, user_code: "" },
+    { ...validPrompt, verification_uri: "https://" },
+  ]) {
+    prompt = invalid;
+    const child = runGrant();
+    assert.equal(await child.exited, 1);
+    assert.match(
+      await new Response(child.stderr).text(),
+      /invalid device authorization response/,
+    );
+    assert.equal(existsSync(promptLog), false);
+  }
+  prompt = validPrompt;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const child = runGrant();
+    assert.equal(
+      await child.exited,
+      0,
+      await new Response(child.stderr).text(),
+    );
+    assert.equal(
+      readFileSync(promptLog, "utf8"),
+      `USER-CODE\n${validPrompt.verification_uri}\n`,
+    );
+  }
+});
+
 function repositoriesEditor(root: string): string {
   const editor = path.join(root, "editor");
   writeFileSync(
