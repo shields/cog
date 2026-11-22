@@ -463,7 +463,7 @@ cmd_new() {
 
     local guest_dir='' cloned=0
     if [[ -n $repo ]]; then
-        cog-gateway grant "lima:$name" "$repo" --profile task
+        cog-gateway grant "lima:$name" "$repo" --profile cog
         limactl shell "$name" curl --fail --silent --show-error --max-time 20 --noproxy '*' \
             --output /dev/null "https://api.github.com/repos/$repo" </dev/null
         # The base holds that checkout already, with the Mac's local changes.
@@ -487,9 +487,9 @@ cmd_new() {
 
     printf 'cog: %s is ready.\n' "$name"
     if ((cloned)); then
-        printf 'cog: GitHub access: %s, with reads and pushes to task/%s/*; it is cloned at %s.\n' "$repo" "$vm_id" "$guest_dir"
+        printf 'cog: GitHub access: %s, with reads and pushes to cog/%s/*; it is cloned at %s.\n' "$repo" "$vm_id" "$guest_dir"
     elif [[ -n $repo ]]; then
-        printf 'cog: GitHub access: %s, with reads and pushes to task/%s/*; the checkout from %s is at %s.\n' "$repo" "$vm_id" "$base" "$guest_dir"
+        printf 'cog: GitHub access: %s, with reads and pushes to cog/%s/*; the checkout from %s is at %s.\n' "$repo" "$vm_id" "$base" "$guest_dir"
     else
         printf 'cog: %s has no GitHub access; cog github %s OWNER/REPO gives it some.\n' "$name" "$name"
     fi
@@ -529,8 +529,8 @@ cmd_github() {
     need limactl
     need cog-gateway
     instance_exists "$name" || die "$name does not exist"
-    cog-gateway grant "lima:$name" "$repo" --profile task
-    printf 'cog: %s can now read and push task branches on %s.\n' "$name" "$repo"
+    cog-gateway grant "lima:$name" "$repo" --profile cog
+    printf 'cog: %s can now read and push cog branches on %s.\n' "$name" "$repo"
 }
 
 cmd_rm() {

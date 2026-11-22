@@ -27,7 +27,7 @@ import {
   normalizeRepository,
   parseGrant,
   parseGrants,
-  taskPrefix,
+  cogPrefix,
   type Grant,
 } from "./policy.ts";
 import { Gateway } from "./server.ts";
@@ -98,8 +98,8 @@ function parseProfiles(file: string): Record<string, Grant> {
     }
     profiles[name] = grant;
   }
-  if (!profiles.read || !profiles.task) {
-    throw new Error("read and task profiles are required");
+  if (!profiles.read || !profiles.cog) {
+    throw new Error("read and cog profiles are required");
   }
   return profiles;
 }
@@ -109,7 +109,7 @@ function policyDocument(state: State, instance: Instance): string {
     vm: instance.name,
     id: instance.id,
     revision: instance.revision,
-    branchPrefix: taskPrefix(instance.id).replace(/^refs\/heads\//, ""),
+    branchPrefix: cogPrefix(instance.id).replace(/^refs\/heads\//, ""),
     repositories: state.grants(instance.id),
   });
 }
@@ -135,7 +135,7 @@ function parseEdit(
     data.vm !== instance.name ||
     data.id !== instance.id ||
     data.branchPrefix !==
-      taskPrefix(instance.id).replace(/^refs\/heads\//, "") ||
+      cogPrefix(instance.id).replace(/^refs\/heads\//, "") ||
     !Number.isSafeInteger(data.revision)
   ) {
     throw new Error("policy identity, revision, or repositories are invalid");
@@ -307,7 +307,7 @@ async function command(arguments_: string[]): Promise<void> {
       case "grant": {
         if (args.length !== 4 || args[2] !== "--profile") {
           throw new Error(
-            "usage: cog-gateway grant lima:NAME OWNER/REPO --profile read|task",
+            "usage: cog-gateway grant lima:NAME OWNER/REPO --profile read|cog",
           );
         }
         const name = required(args[0], "VM name");

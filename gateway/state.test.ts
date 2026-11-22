@@ -104,14 +104,14 @@ test("a policy that repeats a repository in another case changes nothing", () =>
       "tester",
     );
     const read = { read: true, pushTaskBranches: false };
-    const task = { read: true, pushTaskBranches: true };
+    const cog = { read: true, pushTaskBranches: true };
     state.update("lima:work", 0, { "shields/dotfiles": read }, "tester");
     assert.throws(
       () =>
         state.update(
           "lima:work",
           1,
-          { "Shields/Dotfiles": read, "shields/dotfiles": task },
+          { "Shields/Dotfiles": read, "shields/dotfiles": cog },
           "tester",
         ),
       /duplicate repository shields\/dotfiles/,

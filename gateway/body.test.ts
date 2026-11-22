@@ -36,7 +36,7 @@ function packet(line: string): Buffer {
 function commands(count: number): Buffer[] {
   return Array.from({ length: count }, (_, index) =>
     packet(
-      `${old} ${next} refs/heads/task/${id}/${String(index)}${index === 0 ? "\0report-status" : ""}\n`,
+      `${old} ${next} refs/heads/cog/${id}/${String(index)}${index === 0 ? "\0report-status" : ""}\n`,
     ),
   );
 }

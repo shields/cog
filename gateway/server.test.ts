@@ -66,7 +66,7 @@ afterEach(() => {
 const createHttpsServer = https.createServer;
 const createHttpServer = http.createServer;
 
-const idRef = (id: string): string => `refs/heads/task/${id}/one`;
+const idRef = (id: string): string => `refs/heads/cog/${id}/one`;
 const pages = (repository: string): string =>
   `<https://api.github.com/${repository}/pulls?page=2>; rel="next", <https://api.github.com/${repository}/pulls?page=3>; rel="last"`;
 
@@ -456,7 +456,7 @@ test("the HTTPS socket injects a repo token only after checking the full push an
           `ng ${idRef(instance.id)} another ref update in this push is denied\n`,
         ),
         packet(
-          `ng refs/heads/main push destination is outside this VM's task namespace; allowed namespace: task/${instance.id}/*\n`,
+          `ng refs/heads/main push destination is outside this VM's cog namespace; allowed namespace: cog/${instance.id}/*\n`,
         ),
         Buffer.from("0000"),
       ]).toString(),
@@ -475,7 +475,7 @@ test("the HTTPS socket injects a repo token only after checking the full push an
   assert.equal(unreported.type, "text/plain; charset=utf-8");
   assert.equal(
     unreported.body.split("\n", 1)[0],
-    `push destination is outside this VM's task namespace; allowed namespace: task/${instance.id}/*`,
+    `push destination is outside this VM's cog namespace; allowed namespace: cog/${instance.id}/*`,
   );
   assert.match(unreported.body, /^[^\n]+\nrequest ID: [0-9a-f-]{36}\n$/);
   assert.equal(incoming.length, 4);
@@ -483,7 +483,7 @@ test("the HTTPS socket injects a repo token only after checking the full push an
     assert.equal(log.allowed, false);
     assert.equal(
       log.reason,
-      `push destination is outside this VM's task namespace; allowed namespace: task/${instance.id}/*`,
+      `push destination is outside this VM's cog namespace; allowed namespace: cog/${instance.id}/*`,
     );
     assert.equal(log.outcome, "denied");
   }
@@ -784,7 +784,7 @@ test("a GraphQL body past the inspection limit is denied while it is being read"
   assert.equal(incoming.length, 0);
 });
 
-test("a push to a task branch name that Git would refuse is denied before anything reaches the upstream", async () => {
+test("a push to a cog branch name that Git would refuse is denied before anything reaches the upstream", async () => {
   const { socket, instance, incoming, state } = await startGateway();
   const reply = await send(
     socket,
@@ -792,7 +792,7 @@ test("a push to a task branch name that Git would refuse is denied before anythi
     "/shields/dotfiles.git/git-receive-pack",
     Buffer.concat([
       packet(
-        `${"0".repeat(40)} ${"1".repeat(40)} refs/heads/task/${instance.id}/../../main\0report-status\n`,
+        `${"0".repeat(40)} ${"1".repeat(40)} refs/heads/cog/${instance.id}/../../main\0report-status\n`,
       ),
       Buffer.from("0000PACK"),
     ]),

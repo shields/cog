@@ -88,7 +88,7 @@ function sideband(report: Uint8Array): Buffer {
 
 test("a batch with another destination is denied before any ref can be forwarded", () => {
   const body = push(
-    `${old} ${next} refs/heads/task/${id}/one\0report-status\n`,
+    `${old} ${next} refs/heads/cog/${id}/one\0report-status\n`,
     `${old} ${next} refs/heads/main\n`,
   );
   assert.throws(() => parsePushCommands(body, id), /outside this VM/);
@@ -97,23 +97,23 @@ test("a batch with another destination is denied before any ref can be forwarded
 test("denied ref updates are reported in the status format the client requested", () => {
   const commands = (capabilities: string): Buffer =>
     push(
-      `${old} ${next} refs/heads/task/${id}/one\0${capabilities}`,
+      `${old} ${next} refs/heads/cog/${id}/one\0${capabilities}`,
       `${old} ${next} refs/heads/main`,
       `${old} ${next} refs/tags/v1`,
-      `${old} ${"0".repeat(40)} refs/heads/task/${id}/gone`,
+      `${old} ${"0".repeat(40)} refs/heads/cog/${id}/gone`,
     );
   const report = Buffer.concat([
     packet("unpack ok\n"),
     packet(
-      `ng refs/heads/task/${id}/one another ref update in this push is denied\n`,
+      `ng refs/heads/cog/${id}/one another ref update in this push is denied\n`,
     ),
     packet(
-      `ng refs/heads/main push destination is outside this VM's task namespace; allowed namespace: task/${id}/*\n`,
+      `ng refs/heads/main push destination is outside this VM's cog namespace; allowed namespace: cog/${id}/*\n`,
     ),
     packet(
-      `ng refs/tags/v1 push destination is outside this VM's task namespace; allowed namespace: task/${id}/*\n`,
+      `ng refs/tags/v1 push destination is outside this VM's cog namespace; allowed namespace: cog/${id}/*\n`,
     ),
-    packet(`ng refs/heads/task/${id}/gone branch deletion is denied\n`),
+    packet(`ng refs/heads/cog/${id}/gone branch deletion is denied\n`),
     Buffer.from("0000"),
   ]);
   for (const capabilities of [
@@ -123,7 +123,7 @@ test("denied ref updates are reported in the status format the client requested"
     const denied = pushDenial(commands(capabilities));
     assert.equal(
       denied.message,
-      `push destination is outside this VM's task namespace; allowed namespace: task/${id}/*`,
+      `push destination is outside this VM's cog namespace; allowed namespace: cog/${id}/*`,
     );
     assert.deepEqual(denied.report, new Uint8Array(report));
   }
@@ -161,19 +161,19 @@ test("a sideband report larger than one packet is split across packets", () => {
   assert.ok(plain.startsWith("000eunpack ok\n"));
   assert.ok(
     plain.endsWith(
-      `${refs.at(-1) ?? ""} push destination is outside this VM's task namespace; allowed namespace: task/${id}/*\n0000`,
+      `${refs.at(-1) ?? ""} push destination is outside this VM's cog namespace; allowed namespace: cog/${id}/*\n0000`,
     ),
   );
 });
 
 test("a push naming one destination twice is denied without a report", () => {
-  for (const ref of [`refs/heads/task/${id}/one`, "refs/heads/main"]) {
+  for (const ref of [`refs/heads/cog/${id}/one`, "refs/heads/main"]) {
     assert.throws(
       () =>
         parsePushCommands(
           push(
             `${old} ${next} ${ref}\0report-status`,
-            `${old} ${next} refs/heads/task/${id}/two`,
+            `${old} ${next} refs/heads/cog/${id}/two`,
             `${next} ${old} ${ref}`,
           ),
           id,
@@ -235,27 +235,27 @@ test("denials reach git as text and gh as a JSON message", () => {
   }
 });
 
-test("task branch creation and force updates are both accepted", () => {
+test("cog branch creation and force updates are both accepted", () => {
   const created = push(
-    `${"0".repeat(40)} ${next} refs/heads/task/${id}/new\0report-status\n`,
+    `${"0".repeat(40)} ${next} refs/heads/cog/${id}/new\0report-status\n`,
   );
   const forced = push(
-    `${old} ${next} refs/heads/task/${id}/new\0report-status\n`,
+    `${old} ${next} refs/heads/cog/${id}/new\0report-status\n`,
   );
   assert.deepEqual(parsePushCommands(created, id)?.refs, [
-    `refs/heads/task/${id}/new`,
+    `refs/heads/cog/${id}/new`,
   ]);
   assert.deepEqual(parsePushCommands(new Uint8Array(created), id)?.refs, [
-    `refs/heads/task/${id}/new`,
+    `refs/heads/cog/${id}/new`,
   ]);
   assert.deepEqual(parsePushCommands(forced, id)?.refs, [
-    `refs/heads/task/${id}/new`,
+    `refs/heads/cog/${id}/new`,
   ]);
 });
 
-test("a push destination that Git would refuse as a ref name is denied, and every other task branch name is accepted", () => {
+test("a push destination that Git would refuse as a ref name is denied, and every other cog branch name is accepted", () => {
   const command = (name: string): Buffer =>
-    push(`${old} ${next} refs/heads/task/${id}/${name}\0report-status\n`);
+    push(`${old} ${next} refs/heads/cog/${id}/${name}\0report-status\n`);
   for (const name of [
     "one",
     "fix-123",
@@ -279,7 +279,7 @@ test("a push destination that Git would refuse as a ref name is denied, and ever
   ]) {
     assert.deepEqual(
       parsePushCommands(command(name), id)?.refs,
-      [`refs/heads/task/${id}/${name}`],
+      [`refs/heads/cog/${id}/${name}`],
       JSON.stringify(name),
     );
   }
@@ -345,7 +345,7 @@ test("branch deletion, push options, and incomplete commands are denied", () => 
     () =>
       parsePushCommands(
         push(
-          `${old} ${"0".repeat(40)} refs/heads/task/${id}/new\0report-status\n`,
+          `${old} ${"0".repeat(40)} refs/heads/cog/${id}/new\0report-status\n`,
         ),
         id,
       ),
@@ -355,7 +355,7 @@ test("branch deletion, push options, and incomplete commands are denied", () => 
     assert.throws(
       () =>
         parsePushCommands(
-          push(`${old} ${next} refs/heads/task/${id}/new\0${capabilities}\n`),
+          push(`${old} ${next} refs/heads/cog/${id}/new\0${capabilities}\n`),
           id,
         ),
       /options/,
@@ -365,7 +365,7 @@ test("branch deletion, push options, and incomplete commands are denied", () => 
     () =>
       parsePushCommands(
         push(
-          `${old} ${next} refs/heads/task/${id}/new\0report-status\0 push-options\n`,
+          `${old} ${next} refs/heads/cog/${id}/new\0report-status\0 push-options\n`,
         ),
         id,
       ),
@@ -375,8 +375,8 @@ test("branch deletion, push options, and incomplete commands are denied", () => 
     () =>
       parsePushCommands(
         push(
-          `${old} ${next} refs/heads/task/${id}/one\0report-status\n`,
-          `${old} ${next} refs/heads/task/${id}/two\0push-options\n`,
+          `${old} ${next} refs/heads/cog/${id}/one\0report-status\n`,
+          `${old} ${next} refs/heads/cog/${id}/two\0push-options\n`,
         ),
         id,
       ),
@@ -384,7 +384,7 @@ test("branch deletion, push options, and incomplete commands are denied", () => 
   );
   assert.equal(
     parsePushCommands(
-      packet(`${old} ${next} refs/heads/task/${id}/new\0report-status\n`),
+      packet(`${old} ${next} refs/heads/cog/${id}/new\0report-status\n`),
       id,
     ),
     null,
@@ -421,7 +421,7 @@ test("a lone flush packet is classified as a push probe", () => {
 
 test("a push from a shallow clone lists its shallow commits before the commands", () => {
   const shallow = `shallow ${"3".repeat(40)}\n`;
-  const command = `${old} ${next} refs/heads/task/${id}/new\0report-status\n`;
+  const command = `${old} ${next} refs/heads/cog/${id}/new\0report-status\n`;
   const receivePack = (body: Buffer): Classification =>
     classify(
       {
@@ -435,7 +435,7 @@ test("a push from a shallow clone lists its shallow commits before the commands"
   assert.deepEqual(receivePack(push(shallow, command)), {
     repository: "shields/dotfiles",
     operation: "git.push",
-    refs: [`refs/heads/task/${id}/new`],
+    refs: [`refs/heads/cog/${id}/new`],
   });
   const sha256 = (digit: string): string => digit.repeat(64);
   assert.deepEqual(
@@ -443,12 +443,12 @@ test("a push from a shallow clone lists its shallow commits before the commands"
       push(
         `shallow ${sha256("3")}\n`,
         `shallow ${sha256("4")}`,
-        `${sha256("0")} ${sha256("2")} refs/heads/task/${id}/new\0report-status\n`,
-        `${sha256("1")} ${sha256("2")} refs/heads/task/${id}/other\n`,
+        `${sha256("0")} ${sha256("2")} refs/heads/cog/${id}/new\0report-status\n`,
+        `${sha256("1")} ${sha256("2")} refs/heads/cog/${id}/other\n`,
       ),
       id,
     )?.refs,
-    [`refs/heads/task/${id}/new`, `refs/heads/task/${id}/other`],
+    [`refs/heads/cog/${id}/new`, `refs/heads/cog/${id}/other`],
   );
   assert.equal(parsePushCommands(packet(shallow), id), null);
   assert.throws(() => receivePack(packet(shallow)), /incomplete/);
@@ -462,7 +462,7 @@ test("a push from a shallow clone lists its shallow commits before the commands"
       receivePack(
         push(
           shallow,
-          `${old} ${next} refs/heads/task/${id}/new\0push-options\n`,
+          `${old} ${next} refs/heads/cog/${id}/new\0push-options\n`,
         ),
       ),
     /options/,
@@ -489,7 +489,7 @@ test("a push from a shallow clone lists its shallow commits before the commands"
 
 test("a push parsed in pieces is judged as it would be whole", () => {
   const command = (name: string, capabilities = ""): string =>
-    `${old} ${next} refs/heads/task/${id}/${name}${capabilities}\n`;
+    `${old} ${next} refs/heads/cog/${id}/${name}${capabilities}\n`;
   const outcome = (parse: () => unknown): unknown => {
     try {
       return parse();
@@ -545,7 +545,7 @@ test("a push fed a few bytes at a time has each packet parsed once", () => {
     ...Array.from(
       { length: packets },
       (_, index) =>
-        `${old} ${next} refs/heads/task/${id}/${String(index)}${index === 0 ? "\0report-status" : ""}\n`,
+        `${old} ${next} refs/heads/cog/${id}/${String(index)}${index === 0 ? "\0report-status" : ""}\n`,
     ),
   );
   const decode = spyOn(TextDecoder.prototype, "decode");

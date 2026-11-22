@@ -132,7 +132,7 @@ test("live grants and revocations use immutable VM IDs", async () => {
   const revoked = await state.allow(instance.id, {
     repository: "shields/dotfiles",
     operation: "git.push",
-    refs: [`refs/heads/task/${instance.id}/work`],
+    refs: [`refs/heads/cog/${instance.id}/work`],
   });
   assert.deepEqual(revoked, {
     allowed: false,

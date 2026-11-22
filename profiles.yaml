@@ -15,6 +15,6 @@
 read:
   read: true
   pushTaskBranches: false
-task:
+cog:
   read: true
   pushTaskBranches: true

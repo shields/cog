@@ -792,7 +792,7 @@ assert_contains "new installs reverse socket forwarding" 'guestSocket":"/tmp/cog
 assert_contains "new starts the VM after configuring its socket" "edit --tty=false --set" "$(<"$STATE/limactl.log")"
 assert_contains "new installs guest trust and relay" "setup-github-gateway 01234567-89ab-4cde-8fab-0123456789ab" "$(<"$STATE/limactl.log")"
 assert_contains "new probes the guest relay" "/__cog__/health" "$(<"$STATE/limactl.log")"
-assert_contains "new grants task access" "grant lima:t1 shields/dotfiles --profile task" "$(<"$STATE/cog-gateway.log")"
+assert_contains "new grants cog access" "grant lima:t1 shields/dotfiles --profile cog" "$(<"$STATE/cog-gateway.log")"
 assert_contains "new verifies the granted repository" "https://api.github.com/repos/shields/dotfiles" "$(<"$STATE/limactl.log")"
 assert_eq "new sends no GitHub authorization to the guest" 0 "$(count_in_log GITHUB_APP_AUTH)"
 assert_eq "new reuses the base checkout" 0 "$(count_in_log 'git clone')"
@@ -906,7 +906,7 @@ assert_contains "a failed relay probe disables gateway access" "disable lima:t1"
 new_case test-base t1
 run_cog github t1 shields/other
 assert_eq "github adds an additional repository" 0 "$RC"
-assert_contains "github uses the host policy" "grant lima:t1 shields/other --profile task" "$(<"$STATE/cog-gateway.log")"
+assert_contains "github uses the host policy" "grant lima:t1 shields/other --profile cog" "$(<"$STATE/cog-gateway.log")"
 assert_eq "github does not copy a credential into the guest" 0 "$(count_in_log setup-secrets)"
 assert_eq "github does not start a stopped VM" 0 "$(count_in_log start)"
 

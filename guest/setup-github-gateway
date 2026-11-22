@@ -80,8 +80,8 @@ mv -f "$managed" "$settings"
 # home, so the namespace goes in the system-wide ones.
 instructions=$(
     cat <<'EOF'
-Push to GitHub only branches named `task/VM-ID/NAME`, for example
-`git switch -c task/VM-ID/fix-login` and then `git push -u origin HEAD`. The
+Push to GitHub only branches named `cog/VM-ID/NAME`, for example
+`git switch -c cog/VM-ID/fix-login` and then `git push -u origin HEAD`. The
 GitHub gateway rejects other pushes, branch deletions, and pushes to
 repositories the user has not granted push access to. It also rejects GitHub
 writes such as creating a pull request, so tell the user which branch you

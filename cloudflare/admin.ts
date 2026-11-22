@@ -187,11 +187,11 @@ async function command(args: string[]): Promise<void> {
     case "grant": {
       if (
         args.length !== 4 ||
-        (third !== "read" && third !== "task") ||
+        (third !== "read" && third !== "cog") ||
         !second
       ) {
         throw new Error(
-          `usage: ${commandName} grant VM-ID OWNER/REPO read|task`,
+          `usage: ${commandName} grant VM-ID OWNER/REPO read|cog`,
         );
       }
       const id = instanceId(first);

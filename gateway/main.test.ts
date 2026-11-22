@@ -117,7 +117,7 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
     };
     assert.match(instance.id, /^[0-9a-f-]{36}$/);
     assert.match(
-      call(["grant", "lima:trial", repository, "--profile", "task"]),
+      call(["grant", "lima:trial", repository, "--profile", "cog"]),
       /revision 1/,
     );
     const initial = YAML.parse(call(["show", "lima:trial"])) as {
@@ -235,15 +235,15 @@ function repositoriesEditor(root: string): string {
 test("grant rejects an invalid profile definition before it authorizes anything", () => {
   const { root, ghCalls, run } = sandbox();
   const read = { read: true, pushTaskBranches: false };
-  const task = { read: true, pushTaskBranches: true };
+  const cog = { read: true, pushTaskBranches: true };
   const profiles = path.join(root, "profiles.yaml");
   for (const [name, profile] of [
-    ["task", { ...task, pushTaskBranches: "false" }],
-    ["Task", task],
+    ["cog", { ...cog, pushTaskBranches: "false" }],
+    ["Cog", cog],
   ] as const) {
-    writeFileSync(profiles, YAML.stringify({ read, task, [name]: profile }));
+    writeFileSync(profiles, YAML.stringify({ read, cog, [name]: profile }));
     const result = run(
-      ["grant", "lima:trial", "shields/dotfiles", "--profile", "task"],
+      ["grant", "lima:trial", "shields/dotfiles", "--profile", "cog"],
       { COG_PROFILES: profiles },
     );
     assert.equal(result.status, 1, result.stdout);
@@ -256,7 +256,7 @@ test("grant rejects a profile name inherited from Object.prototype before it aut
   const { root, ghCalls, run } = sandbox();
   const grant = { read: true, pushTaskBranches: false };
   const profiles = path.join(root, "profiles.yaml");
-  writeFileSync(profiles, YAML.stringify({ read: grant, task: grant }));
+  writeFileSync(profiles, YAML.stringify({ read: grant, cog: grant }));
   for (const name of [
     "constructor",
     "toString",

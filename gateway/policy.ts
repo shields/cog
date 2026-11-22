@@ -23,7 +23,7 @@ import {
   type ValueNode,
 } from "graphql";
 
-export type Profile = "read" | "task";
+export type Profile = "read" | "cog";
 export interface Grant {
   read: boolean;
   pushTaskBranches: boolean;
@@ -228,11 +228,11 @@ export function parseGrants(input: unknown): Record<string, Grant> {
   return grants;
 }
 
-export function taskPrefix(instanceId: string): string {
+export function cogPrefix(instanceId: string): string {
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(instanceId)) {
     throw new PolicyError("invalid VM identity");
   }
-  return `refs/heads/task/${instanceId}/`;
+  return `refs/heads/cog/${instanceId}/`;
 }
 
 // Before a push larger than http.postBuffer, git checks its credentials by
@@ -255,8 +255,8 @@ export function requireIdentityEncoding(
 }
 
 // The names that git check-ref-format rejects for a ref that begins with refs/.
-// The task-namespace test is a prefix test, which admits
-// refs/heads/task/ID/../../main.
+// The cog-namespace test is a prefix test, which admits
+// refs/heads/cog/ID/../../main.
 export function isValidRefName(ref: string): boolean {
   return !/[\0-\u{20}\u{7F}~^:?*[\\]|\.\.|@\{|\/\/|\/$|\.$|\/\.|\.lock(?:\/|$)/u.test(
     ref,
@@ -358,11 +358,11 @@ export class PushParser {
       }
       denials.set(
         ref,
-        ref.startsWith(taskPrefix(instanceId))
+        ref.startsWith(cogPrefix(instanceId))
           ? /^0+$/.test(match[2] ?? "")
             ? "branch deletion is denied"
             : null
-          : `push destination is outside this VM's task namespace; allowed namespace: task/${instanceId}/*`,
+          : `push destination is outside this VM's cog namespace; allowed namespace: cog/${instanceId}/*`,
       );
       this.#offset += size;
     }
@@ -724,7 +724,7 @@ export function authorize(grant: Grant | null, operation: Operation): Access {
   }
   if (operation === "git.push" && !grant.pushTaskBranches) {
     throw new PolicyError(
-      "task-branch pushes are not granted for this repository",
+      "cog-branch pushes are not granted for this repository",
     );
   }
   return "authenticated";

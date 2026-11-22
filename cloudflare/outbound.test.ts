@@ -183,10 +183,10 @@ test("a response header that names trailers is not relayed", async () => {
   );
 });
 
-test("task pushes and push probes are forwarded with the repository token", async () => {
+test("cog pushes and push probes are forwarded with the repository token", async () => {
   for (const body of [
-    push(`refs/heads/task/${instanceId}/check`),
-    push(`refs/heads/task/${instanceId}/check`, {
+    push(`refs/heads/cog/${instanceId}/check`),
+    push(`refs/heads/cog/${instanceId}/check`, {
       shallow: ["3".repeat(40), "4".repeat(40)],
     }),
     new TextEncoder().encode("0000"),
@@ -220,8 +220,8 @@ test("task pushes and push probes are forwarded with the repository token", asyn
 
 test("a streamed push beyond the inspection limit is forwarded whole", async () => {
   for (const commands of [
-    push(`refs/heads/task/${instanceId}/check`),
-    push(`refs/heads/task/${instanceId}/check`, { shallow: ["3".repeat(40)] }),
+    push(`refs/heads/cog/${instanceId}/check`),
+    push(`refs/heads/cog/${instanceId}/check`, { shallow: ["3".repeat(40)] }),
   ]) {
     const body = new Uint8Array(commands.length + 2 * 1_048_576);
     body.set(commands);
@@ -245,7 +245,7 @@ test("a push streamed in small writes costs work linear in its length", async ()
   const encoder = new TextEncoder();
   const body = encoder.encode(
     `${Array.from({ length: 1200 }, (_, index) => {
-      const line = `${"1".repeat(40)} ${"2".repeat(40)} refs/heads/task/${instanceId}/${String(index)}${index === 0 ? "\0report-status" : ""}\n`;
+      const line = `${"1".repeat(40)} ${"2".repeat(40)} refs/heads/cog/${instanceId}/${String(index)}${index === 0 ? "\0report-status" : ""}\n`;
       return `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
     }).join("")}0000PACK`,
   );
@@ -276,7 +276,7 @@ test("a push probe followed by more data is denied before forwarding", async () 
   const response = await handleOutbound(
     streamedPush(
       new TextEncoder().encode("0000"),
-      push(`refs/heads/task/${instanceId}/check`),
+      push(`refs/heads/cog/${instanceId}/check`),
     ),
     instanceId,
     authority(events),
@@ -317,7 +317,7 @@ test("gzipped fetch negotiation reaches GitHub with its Content-Encoding", async
 });
 
 test("inspected bodies must be unencoded", async () => {
-  const body = push(`refs/heads/task/${instanceId}/check`);
+  const body = push(`refs/heads/cog/${instanceId}/check`);
   const query = JSON.stringify({
     query: '{ repository(owner: "shields", name: "dotfiles") { name } }',
   });
@@ -416,7 +416,7 @@ test("unsupported writes and foreign refs are denied before forwarding", async (
       } as RequestInit),
       200,
       "application/x-git-receive-pack-result",
-      `000eunpack ok\n008cng refs/heads/main push destination is outside this VM's task namespace; allowed namespace: task/${instanceId}/*\n0000`,
+      `000eunpack ok\n008ang refs/heads/main push destination is outside this VM's cog namespace; allowed namespace: cog/${instanceId}/*\n0000`,
     ],
     [
       new Request("https://github.com/shields/dotfiles.git/git-receive-pack", {
@@ -425,7 +425,7 @@ test("unsupported writes and foreign refs are denied before forwarding", async (
       }),
       403,
       "text/plain; charset=utf-8",
-      `push destination is outside this VM's task namespace; allowed namespace: task/${instanceId}/*\nrequest ID: request-1\n`,
+      `push destination is outside this VM's cog namespace; allowed namespace: cog/${instanceId}/*\nrequest ID: request-1\n`,
     ],
     [
       new Request("https://github.com/shields/dotfiles.git/git-receive-pack", {
@@ -964,7 +964,7 @@ test("anonymous access does not allow push discovery, pushes, or API writes", as
     ),
     new Request("https://github.com/shields/public/git-receive-pack", {
       method: "POST",
-      body: push(`refs/heads/task/${instanceId}/check`),
+      body: push(`refs/heads/cog/${instanceId}/check`),
     }),
     new Request("https://github.com/shields/public/git-receive-pack", {
       method: "POST",
