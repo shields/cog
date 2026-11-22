@@ -13,9 +13,10 @@ network rules. What remains is limited to state outside it: the deny rules, the
 `git_guard.py` hook from dotfiles, the GitHub gateway and the network isolation
 described below.
 
-The VM and gateway files come from shields/dotfiles, where they started. A base VM and the Cloudflare image are built from a dotfiles checkout:
-cog runs that checkout's `provision.sh`, then layers the throwaway policy, the
-GitHub relay and the secrets on top.
+The VM and gateway files come from shields/dotfiles, where they started. A base
+VM and the Cloudflare image are built from a dotfiles checkout: cog runs that
+checkout's `provision.sh`, then applies the throwaway policy, and `cog new` adds
+the GitHub relay and the secrets to each VM.
 
 ## What exists now
 
@@ -40,11 +41,14 @@ from the checkout it lives in, following symlinks, wherever it is run from.
 `install.sh` is not written yet. It will check the tools cog needs, build the
 program, link it from `~/bin` and start the gateway.
 
-The Mac needs `limactl`, `git`, `tar`, `gitleaks`, `jq` and `bun`. The Homebrew
+The Mac needs `limactl`, `git`, `tar`, `gitleaks` 8.19 or newer, `jq`, `bun` and
+`openssl` (macOS ships one), and a `gh` that is logged in to GitHub: the gateway
+runs `gh api repos/OWNER/REPO --jq .id` whenever a repository needs an
+authorization (the first `cog new --repo` or `cog github` for it,
+`cog-gateway authorize`, and `cloudflare/admin.ts authorize`). The Homebrew
 modules in dotfiles (`brew/*.Brewfile` there) install them; cog installs none
 itself, because `brew bundle cleanup` in dotfiles' `provision.sh` would remove
-it again. Run `make setup` for the
-dependencies of the tests.
+it again. Run `make setup` for the dependencies of the tests.
 
 Homebrew has an unrelated formula named `cog`. While `~/bin` comes before
 Homebrew's directory on `PATH`, as dotfiles' `.zshrc` arranges, `~/bin/cog`
@@ -80,20 +84,29 @@ listed under "The contract with dotfiles" does not name the markers that cog
 writes, which is what a checkout from before the split looks like. It prints
 the checkout and commit it uses.
 
-The build copies the checkout with `tools/stage_tree.sh --source DIR`, which
-includes files that are not committed and keeps the local branch, commit
-history and tags, so local changes appear as unstaged or untracked files after
-provisioning. Gitleaks scans the copy, the history (before the origin is
-removed) and the copy of `guest/`, and a finding stops the build. The origin is
-rewritten to HTTPS and refused with credentials, a query, a fragment or control
-characters. The build then:
+The build copies the checkout's files, including those that are not committed,
+with `tools/stage_tree.sh --source DIR`, which makes a new repository with an
+index and no commit. It then replaces that repository's `.git` with the one from
+a `git clone --no-local` of the checkout, so the checked-out branch (or a
+detached HEAD), its commit history and the tags survive, and local changes
+appear as unstaged or untracked files after provisioning. The checkout's other
+local branches survive only as `origin/` branches, and only if it has an
+origin. Gitleaks scans the copied files, the history of every ref (before an
+origin is removed) and the copy of `guest/`, and a finding stops the build. An
+origin of the form `git@github.com:OWNER/REPO` or
+`ssh://git@github.com/OWNER/REPO` is rewritten to HTTPS. Any other origin is
+kept as it is, but a URL with a user or password (`ssh://git@gitlab.com/...`
+too), or any origin with a query, a fragment or control characters, fails the
+build; with no origin, the guest has none. The build then:
 
 1. replaces any existing `cog-base`, and starts one from `lima/dev.yaml` in the
    cog checkout, refusing it if `~/.lima/_config` has added a host mount;
 2. copies the dotfiles tree to `~/src/github.com/shields/dotfiles` in the guest;
 3. installs `guest/` into `/usr/local/lib/cog` with `sudo tar -x` and the
    options `--no-same-owner --no-same-permissions`, then sets root ownership and
-   no group or other write permission;
+   the modes 755 and 644 (`chmod -R u=rwX,go=rX`), whatever the modes of the
+   checkout and the umask of `sudo tar` are. `cog base` fails before it deletes
+   the old base when one of the scripts it runs in the guest is missing;
 4. runs `./provision.sh MODULE...` there (with no module, the checkout's own
    default);
 5. runs `/usr/local/lib/cog/throwaway.sh` with `--claude-settings` naming the
@@ -111,7 +124,8 @@ disk), registers the clone with the gateway, upgrades the Claude Code and Codex
 casks before any secret is present, installs the gateway CA, relay and
 instructions, grants the repository, and only then installs the secrets with
 `/usr/local/lib/cog/setup-secrets`, which reads each value from stdin. A
-failure or signal after the clone disables the registration and deletes the VM.
+failure, or a hangup, interrupt, quit or terminate signal, after the clone
+disables the registration and deletes the VM.
 `COG_CPUS` and `COG_MEMORY` (a whole number of GiB) override the size in
 `lima/dev.yaml` (6 CPUs and 16 GiB), and `COG_BASE` replaces the name
 `cog-base`.
@@ -143,9 +157,16 @@ repository reuses that checkout. With no explicit repository, `cog new` infers
 one from a GitHub `origin` of the current directory; `--no-repo` creates a VM
 with no grants. `cog github NAME [OWNER/REPO]` adds another repository without
 stopping the VM or removing its existing grants, inferring the repository from
-the current directory if the argument is omitted. `COG_GITHUB_WEB_URL`,
-`COG_GITHUB_API_URL` and `COG_GITHUB_CLIENT_ID` replace GitHub's addresses and
-the app's client ID.
+the current directory if the argument is omitted. `COG_GITHUB_CLIENT_ID`,
+`COG_GITHUB_WEB_URL` and `COG_GITHUB_API_URL` change only the GitHub App
+authorization that `cog-gateway` performs (the device flow, and the check that
+the new token can read the repository), and the `cog-gateway` that `cog` runs
+inherits them. `cog` itself also reads `COG_GITHUB_WEB_URL`, to recognize an
+origin and to build the clone URL. The relay is not affected: the gateway always
+sends a VM's requests to `github.com` and `api.github.com`, so a token issued by
+another server would be sent to GitHub. The Cloudflare commands ignore all
+three; `admin.ts authorize` uses the built-in client ID, and the Worker uses
+`GITHUB_CLIENT_ID` from `cloudflare/wrangler.jsonc`.
 
 Public repositories, including those under `github.com/shields`, are readable
 without a grant, even in a VM created with `--no-repo`. Git clone/fetch and
@@ -171,12 +192,14 @@ transferred repository's old name, so use its current name. There is no approval
 queue.
 
 `profiles.yaml` defines the two capability templates, `read` (reads only) and
-`cog` (reads and pushes to `cog/VM-ID/*`). The daemon reads the file named by
-`COG_PROFILES`, or else `~/.config/cog/profiles.yaml`, and fails a grant when
-either profile is missing; nothing copies it there yet. A grant stores a copy of
-its profile, so editing the profile changes future grants only. The profile key
-that enables pushes is still named `pushTaskBranches`, because stored grants
-carry it. Use these commands on the Mac to change a running VM immediately:
+`cog` (reads and pushes to `cog/VM-ID/*`). `cog-gateway grant` reads the file
+named by `COG_PROFILES`, or else `~/.config/cog/profiles.yaml`, and fails when
+either profile is missing; the daemon never reads it, nothing copies it there
+yet, and `cloudflare/admin.ts grant` reads the checkout's own `profiles.yaml`.
+A grant stores a copy of its profile, so editing the profile changes future
+grants only. The profile key that enables pushes is still named
+`pushTaskBranches`, because stored grants carry it. Use these commands on the
+Mac to change a running VM immediately:
 
 ```
 cog-gateway show lima:NAME
@@ -309,11 +332,11 @@ their sandboxed, prompting behavior.
   the sandbox. In that mode ask rules and a hook's ask still prompt, so managed
   settings are the only source of permission rules and hooks, and carry the
   `permissions.deny` rules, the `git_guard.py` hook and the status line from the
-  settings file given. The ask rules (package installs) and `dependency_guard.py`
-  therefore do not apply, and neither do hooks from a project's own
-  `.claude/settings.json`. In dotfiles' `c`, the usual `--permission-mode=auto`
-  and sandbox settings are left out, because they would override managed
-  settings.
+  settings file given. The ask rules (package installs) and
+  `dependency_guard.py` therefore do not apply, and neither do hooks from a
+  project's own `.claude/settings.json`. In dotfiles' `c`, the usual
+  `--permission-mode=auto` and sandbox settings are left out, because they would
+  override managed settings.
 - Codex gets `/etc/codex/config.toml` with `approval_policy = "never"` and
   `default_permissions = ":danger-full-access"`, and a rules file that forbids
   `gh api` write methods. `~/.codex/config.toml` overrides any key it sets, so
@@ -339,7 +362,9 @@ their sandboxed, prompting behavior.
   `/etc/cog-github-gateway`, and installs the CA, the `/etc/hosts` mapping of
   the GitHub hosts to `127.0.0.1` and the relay unit `cog-github-gateway`. A
   Cloudflare VM gets neither instruction file, so its agents are not told the
-  namespace.
+  namespace, and dotfiles' `wt`, which names a branch from the UUID in
+  `/etc/cog-github-gateway`, refuses to create a worktree where it holds
+  `cloudflare`.
 
 ## Checks to run once with real credentials
 
@@ -383,22 +408,31 @@ way `cog base` chooses it, deploys the Worker `cog-agent`, and installs a
 randomly generated admin secret kept in
 `~/.config/secrets/cog/cloudflare-admin-token`. It adds this Mac's
 `~/.ssh/id_ed25519.pub` to the staged Wrangler configuration for SSH access,
-and needs `bun`, `jq`, `openssl` and `gitleaks`.
+and needs `git`, `tar`, `bun`, `jq`, `openssl` and `gitleaks` 8.19 or newer.
+Unless it is given `--worker-only`, Wrangler also builds the image, so Docker
+must be installed and running.
 
 The image context is assembled by `cloudflare/context.sh DEST [--dotfiles DIR]`
 in a temporary directory outside both checkouts: `dotfiles/` (a staged and
 scanned copy, a git repository with an index and no commit), `guest/` and
-`cloudflare/` (from `cloudflare/guest/`). `cloudflare/Dockerfile` copies the
-dotfiles tree to `/home/shields/src/github.com/shields/dotfiles`, provisions it
-(`MODULES`, `dev` by default), copies the guest scripts root-owned to
-`/usr/local/lib/cog`, and runs `throwaway.sh`, `configure_codex.py`,
+`cloudflare/` (from `cloudflare/guest/`), the last two with their modes set to
+755 or 644 and the scripts the image runs checked. `cloudflare/Dockerfile`
+copies the dotfiles tree to `/home/shields/src/github.com/shields/dotfiles`,
+provisions it (`MODULES`, `dev` by default), copies the guest scripts root-owned
+to `/usr/local/lib/cog`, and runs `throwaway.sh`, `configure_codex.py`,
 `reset-identity.sh` and `cloudflare/guest/agent.sh --user shields` in that
-order. `agent.sh` removes the `git push` deny rules and `no-push.rules`, writes
-`cloudflare` to `/etc/cog-github-gateway`, and installs the same dummy
-credential helper. The Worker starts `/usr/local/lib/cog/cloudflare/entrypoint.sh`,
-which installs Cloudflare's runtime CA. With `--worker-only` no dotfiles tree is
-staged, the image is reused without building or rolling out containers, and
-`--dotfiles` is an error.
+order. `agent.sh` removes the `git push` deny rules (and fails if it removes
+none) and `no-push.rules`, writes `cloudflare` to `/etc/cog-github-gateway`, and
+installs the same dummy credential helper. The Worker starts
+`/usr/local/lib/cog/cloudflare/entrypoint.sh`, which installs Cloudflare's
+runtime CA. With `--worker-only` no dotfiles tree is staged, the image is
+reused without building or rolling out containers, and `--dotfiles` is an error.
+
+`cloudflare/wrangler.jsonc` cannot build the image by itself: its `dockerfile`
+and `build_context` name `cloudflare/Dockerfile` and the repository root, which
+has no `dotfiles/`, so `wrangler deploy` run on it directly fails at the
+Dockerfile's `COPY dotfiles/`. `deploy.sh` replaces both in a staged copy with
+the context that `context.sh` assembles.
 
 The Worker URL appears in Wrangler's deployment output. Save it once with
 `bun run cloudflare/admin.ts config https://NAME.SUBDOMAIN.workers.dev`, which
@@ -498,10 +532,21 @@ does not rename them. On a Mac that ran the old tools, in this order:
          ~/Library/Logs/com.msrl.dotfiles.vm-access.err
    rm ~/bin/limavm ~/bin/vm-access
    rm -r ~/.local/share/vm-access ~/.config/vm-access
-   mv ~/.local/state/vm-access ~/.local/state/cog
-   mv ~/.config/secrets/vm-access ~/.config/secrets/cog
+   for dir in ~/.local/state ~/.config/secrets; do
+       if [ -e "$dir/cog" ]; then
+           echo "$dir/cog exists; move it aside first" >&2
+       else
+           mv "$dir/vm-access" "$dir/cog"
+       fi
+   done
    rm -f ~/.config/secrets/cog/{ca.pem,ca-key.pem,github.pem,github-key.pem,ca.srl}
    ```
+
+   Running `cog-gateway` or `cloudflare/deploy.sh` before this step creates the
+   `cog` directories, and `mv` would then put the old directory inside the new
+   one without an error, where the gateway does not look. If the loop reports
+   that one exists, move it aside, run the loop again, and copy back from the
+   moved one only what you need (`cloudflare-admin-token`, for instance).
 
    The CA is regenerated, so every VM needs the new one: rebuild them.
 

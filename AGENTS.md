@@ -31,12 +31,18 @@
   guest (Debian 13) and are installed root-owned in `/usr/local/lib/cog` by
   `cog base` (`sudo tar -x --no-same-owner --no-same-permissions` after
   `gitleaks dir`) or by the image's `COPY`. Nothing of cog goes in the guest's
-  `~/bin`. A guest script finds its siblings through its own directory.
+  `~/bin`. `setup-github-gateway` and `setup-secrets` find their siblings
+  through their own directory, but `throwaway.sh`'s timer unit and
+  `cloudflare/guest/agent.sh`'s credential helper name `/usr/local/lib/cog`
+  itself, so `guest/` cannot move.
+- The committed `cloudflare/wrangler.jsonc` is a template: `deploy.sh` rewrites
+  its `dockerfile` and `build_context` in a staged copy to the context that
+  `context.sh` assembles, and `jq` reads it, so it takes no comments.
 - `bin/cog` finds `lima/dev.yaml`, `guest/` and `tools/stage_tree.sh` from its
   own checkout, following symlinks, and reads the dotfiles checkout from
   `--dotfiles DIR` or `~/src/github.com/shields/dotfiles`, never from the
-  current directory. `cloudflare/context.sh` repeats those checks, and a test
-  compares the two copies, so change both.
+  current directory. `cloudflare/context.sh` repeats the dotfiles checkout
+  checks and the marker list, and a test compares those copies, so change both.
 - `gateway/` holds the policy, state (SQLite), authorization, certificates and
   the HTTPS-over-Unix-socket server. `cloudflare/` holds the Worker
   (`worker.ts`), the authority Durable Object, the outbound interceptor, which
@@ -59,11 +65,15 @@
 No secret may reach an argument list, an environment, a log or a message. The
 Claude token, Codex login and Fireworks key go to `guest/setup-secrets NAME` on
 stdin, and the CA to `setup-github-gateway`'s stdin. `cog new` upgrades the
-agents before it installs any secret, and any failure or signal after the clone
-disables the registration and deletes the VM. The staged dotfiles tree, its
-history and `guest/` are scanned with gitleaks before anything enters a guest.
-Children get no stdin unless a file is meant for them; only the final shell
-inherits the terminal.
+agents before it installs any secret, and any failure, or hangup, interrupt,
+quit or terminate signal, after the clone disables the registration and deletes
+the VM. The staged dotfiles tree, its history and `guest/` are scanned with
+gitleaks before anything enters a guest. A `limactl shell`, `start`, `clone`,
+`edit --set` or `list -q` that precedes the final shell reads `/dev/null` unless
+a pipe or file is meant for it, so that none swallows what was typed for the
+shell. Every other child (`git`, `gitleaks`, `tools/stage_tree.sh`,
+`cog-gateway` and the remaining `limactl` subcommands) inherits the terminal and
+has no use for it, and no test checks this.
 
 ## Contract with dotfiles
 
@@ -72,12 +82,13 @@ and cog reads dotfiles' `provision.sh`, `.claude/settings.json`,
 `tools/configure_codex.py` and `~/.codex/rules/no-push.rules`. The README's "The
 contract with dotfiles" lists them, and dotfiles' README states the same.
 Renaming a marker, changing what a marker holds (`cog-github-gateway` is a VM
-UUID or `cloudflare`), or changing what `throwaway.sh` requires of the settings
-file (a non-empty `permissions.deny`, a `PreToolUse` hook containing
-`git_guard.py`, the five `git push` deny rules) needs the same change in
-dotfiles. `marker_readers` in `bin/cog` and `cloudflare/context.sh` must list
-every dotfiles file that reads a marker. The `cog/UUID/*` branch names come from
-dotfiles' `wt`.
+UUID or `cloudflare`), or changing what `throwaway.sh` and the removal of the
+push deny rules (`setup-github-gateway`, `cloudflare/guest/agent.sh`) require of
+the settings file (a non-empty `permissions.deny`, a `PreToolUse` hook
+containing `git_guard.py`, the five `git push` deny rules, at least one of which
+must be present) needs the same change in dotfiles. `marker_readers` in
+`bin/cog` and `cloudflare/context.sh` must list every dotfiles file that reads a
+marker. The `cog/UUID/*` branch names come from dotfiles' `wt`.
 
 ## Tests
 
