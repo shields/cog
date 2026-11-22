@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The build context is a staged tree (tools/stage_tree.sh DEST), so this builds
-# from any directory with: docker build -f DEST/cloudflare/Dockerfile DEST
+# The build context is assembled by cloudflare/context.sh DEST, so this builds
+# from any directory with: docker build -f cloudflare/Dockerfile DEST
 
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 # provision.sh installs everything else, through provision/linux-system.sh.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git sudo ca-certificates \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git sudo ca-certificates jq \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 -U shields \
     && echo 'shields ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/shields \
@@ -30,11 +30,10 @@ USER shields
 # A cache mount creates its missing parent directories as root.
 RUN mkdir -p /home/shields/.cache
 
-COPY --chown=1000:1000 . /home/shields/src/github.com/shields/dotfiles
+COPY --chown=1000:1000 dotfiles/ /home/shields/src/github.com/shields/dotfiles
 WORKDIR /home/shields/src/github.com/shields/dotfiles
 
 ARG MODULES=dev
-ARG CLOUDFLARE_AGENT=0
 ARG TARGETARCH
 # Homebrew's cleanup deletes downloads that another build is still using, so
 # each architecture has its own cache and a build holds it exclusively. The
@@ -50,11 +49,12 @@ RUN --mount=type=cache,target=/home/shields/.cache/Homebrew,id=homebrew-${TARGET
 # (brew --prefix awscli) makes the first interactive shell fetch.
 RUN /home/linuxbrew/.linuxbrew/bin/brew --prefix awscli >/dev/null
 
-RUN if [ "$CLOUDFLARE_AGENT" = 1 ]; then \
-        sudo guest/throwaway.sh --claude-settings .claude/settings.json --user shields --no-github-timer \
-        && PATH="/home/linuxbrew/.linuxbrew/bin:$PATH" /home/linuxbrew/.linuxbrew/bin/uv run --no-dev python tools/configure_codex.py "$HOME/.codex/config.toml" \
-        && guest/reset-identity.sh \
-        && sudo cloudflare/guest/agent.sh; \
-    fi
+COPY guest/ /usr/local/lib/cog/
+COPY cloudflare/ /usr/local/lib/cog/cloudflare/
+
+RUN sudo /usr/local/lib/cog/throwaway.sh --claude-settings .claude/settings.json --user shields --no-github-timer \
+    && PATH="/home/linuxbrew/.linuxbrew/bin:$PATH" /home/linuxbrew/.linuxbrew/bin/uv run --no-dev python tools/configure_codex.py "$HOME/.codex/config.toml" \
+    && /usr/local/lib/cog/reset-identity.sh \
+    && sudo /usr/local/lib/cog/cloudflare/agent.sh --user shields
 
 CMD ["sleep", "infinity"]

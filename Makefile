@@ -21,6 +21,7 @@ PRETTIER_SOURCES = .
 SHELL_SOURCES = \
 	bin/cog \
 	bin/cog-gateway \
+	cloudflare/context.sh \
 	cloudflare/deploy.sh \
 	cloudflare/guest/agent.sh \
 	cloudflare/guest/entrypoint.sh \

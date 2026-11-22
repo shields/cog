@@ -16,11 +16,37 @@
 
 set -euo pipefail
 
+usage="usage: cloudflare/deploy.sh [--worker-only] [--dotfiles DIR]"
 worker_only=0
-if [[ $# -eq 1 && $1 == --worker-only ]]; then
-    worker_only=1
-elif [[ $# -ne 0 ]]; then
-    printf '%s\n' 'Usage: cloudflare/deploy.sh [--worker-only]' >&2
+dotfiles_args=()
+have_dotfiles=0
+while (($#)); do
+    case $1 in
+    --worker-only)
+        worker_only=1
+        shift
+        ;;
+    --dotfiles)
+        [[ $# -ge 2 && -n $2 ]] || {
+            printf '%s\n' "$usage" >&2
+            exit 2
+        }
+        ((! have_dotfiles)) || {
+            printf '%s\n' '--dotfiles was given twice' >&2
+            exit 2
+        }
+        dotfiles_args=(--dotfiles "$2")
+        have_dotfiles=1
+        shift 2
+        ;;
+    *)
+        printf '%s\n' "$usage" >&2
+        exit 2
+        ;;
+    esac
+done
+if ((worker_only && have_dotfiles)); then
+    printf '%s\n' '--dotfiles has no use with --worker-only' >&2
     exit 2
 fi
 
@@ -44,14 +70,22 @@ fi
 stage=$(mktemp -d "${TMPDIR:-/tmp}/cog-cloudflare.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 "$root/tools/stage_tree.sh" "$stage/tree"
+if ((worker_only)); then
+    context=$stage/tree
+else
+    context=$stage/context
+    "$root/cloudflare/context.sh" "$context" ${dotfiles_args[@]+"${dotfiles_args[@]}"}
+fi
 cd "$stage/tree"
 public_key=$(cat "$HOME/.ssh/id_ed25519.pub")
 [[ $public_key == ssh-ed25519\ * ]] || {
     printf '%s\n' 'Cloudflare SSH requires ~/.ssh/id_ed25519.pub' >&2
     exit 1
 }
-jq --arg key "$public_key" \
-    '.containers[0].authorized_keys = [{name: "owner", public_key: $key}]' \
+jq --arg key "$public_key" --arg dockerfile "$stage/tree/cloudflare/Dockerfile" --arg context "$context" \
+    '.containers[0].authorized_keys = [{name: "owner", public_key: $key}]
+    | .containers[0].images.base.dockerfile = $dockerfile
+    | .containers[0].images.base.build_context = $context' \
     cloudflare/wrangler.jsonc >"$stage/wrangler.jsonc"
 mv "$stage/wrangler.jsonc" cloudflare/wrangler.jsonc
 bun install --frozen-lockfile

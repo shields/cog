@@ -33,7 +33,7 @@
         "base": {
           "dockerfile": "./Dockerfile",
           "build_context": "..",
-          "build_vars": { "CLOUDFLARE_AGENT": "1", "MODULES": "dev" }
+          "build_vars": { "MODULES": "dev" }
         }
       }
     }

@@ -16,16 +16,21 @@
 
 set -euo pipefail
 
-[[ $(id -u) -eq 0 ]] || {
-    printf '%s\n' 'agent.sh: run as root' >&2
+usage='usage: sudo agent.sh --user NAME'
+
+die() {
+    printf 'agent.sh: %s\n' "$*" >&2
     exit 1
 }
 
+[[ $# -eq 2 && $1 == --user && -n $2 && $2 != -* ]] || die "$usage"
+user=$2
+[[ $(id -u) -eq 0 ]] || die 'run as root'
+home=$(getent passwd "$user" | cut -d: -f6)
+[[ -n $home && -d $home ]] || die "cannot find the home directory of $user"
+
 settings=/etc/claude-code/managed-settings.json
-[[ -f $settings ]] || {
-    printf '%s\n' 'agent.sh: managed settings are missing' >&2
-    exit 1
-}
+[[ -f $settings ]] || die 'managed settings are missing'
 managed=$(mktemp /etc/claude-code/.managed-settings.XXXXXX)
 trap 'rm -f "$managed"' EXIT
 jq '.permissions.deny |= map(select(. as $entry | [
@@ -38,7 +43,7 @@ jq '.permissions.deny |= map(select(. as $entry | [
 chmod 644 "$managed"
 mv -f "$managed" "$settings"
 
-rm -f /home/shields/.codex/rules/no-push.rules
-sudo -H -u shields git config --global credential.https://github.com.helper '!/usr/local/lib/cog/github-gateway-credential'
+rm -f "$home/.codex/rules/no-push.rules"
+sudo -H -u "$user" git config --global credential.https://github.com.helper '!/usr/local/lib/cog/github-gateway-credential'
 printf '%s\n' cloudflare >/etc/cog-github-gateway
 chmod 644 /etc/cog-github-gateway
