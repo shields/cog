@@ -17,7 +17,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
-import { AppAuth, type DeviceCodePrompt } from "./auth.ts";
+import { AppAuth, defaultApiUrl, type DeviceCodePrompt } from "./auth.ts";
 import { ensureCertificates, type Certificates } from "./cert.ts";
 import {
   compareCodeUnits,
@@ -25,6 +25,7 @@ import {
   normalizeRepository,
   parseGrant,
   parseGrants,
+  type Access,
   type Grant,
 } from "./policy.ts";
 import {
@@ -301,8 +302,21 @@ export class Control {
     await this.auth.authorize(repository);
   }
 
-  async ensureAuth(repository: string): Promise<void> {
+  async prepareRepository(repository: string): Promise<Access> {
     const normalized = normalizeRepository(repository);
+    const apiUrl = this.#options.apiUrl ?? defaultApiUrl;
+    const response = await fetch(`${apiUrl}/repos/${normalized}`, {
+      method: "HEAD",
+      headers: { "User-Agent": "cog" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (response.status === 200) return "anonymous";
+    if (response.status !== 404) {
+      throw new Error(
+        `cannot check anonymous access to ${normalized} (HTTP ${String(response.status)})`,
+      );
+    }
     if (
       !this.auth.has(normalized) ||
       this.auth.load(normalized).refresh_expires_at <=
@@ -311,6 +325,7 @@ export class Control {
       await this.auth.authorize(normalized);
     }
     await this.auth.token(normalized);
+    return "authenticated";
   }
 
   // resolveGrant runs after the repository and the VM are checked and before

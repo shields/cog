@@ -68,6 +68,8 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   on the checkout. `profiles.yaml` holds the `read` and `cog` templates; the
   persisted grant field that enables pushes is `pushCogBranches`. `cog cloud`
   uses the embedded profiles; `COG_PROFILES` only overrides the Lima profiles.
+  `cog new` reads public repositories anonymously. A private checkout gets a
+  fixed read-only grant, even when a custom profile enables pushes.
 - Names: the push namespace is `cog/VM-ID/*`; the markers are
   `/etc/cog-throwaway` and `/etc/cog-github-gateway`; the base is `cog-base`
   (`COG_BASE`); the guest socket is `/tmp/cog-github.sock`; the health path is

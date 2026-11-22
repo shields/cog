@@ -128,9 +128,9 @@ function fixture() {
         mark("health");
         return Promise.resolve();
       },
-      ensureAuth: (repository) => {
-        mark("ensureAuth", repository);
-        return Promise.resolve();
+      prepareRepository: (repository) => {
+        mark("prepareRepository", repository);
+        return Promise.resolve("authenticated");
       },
       register: (name, instanceDirectory) => {
         mark(
@@ -246,7 +246,7 @@ test("grant validates the VM and applies the selected profile", async () => {
   ]);
 });
 
-test("new checks and authorizes before the clone and writes all inputs only after upgrade", async () => {
+test("new authorizes a private repository before cloning and grants only reads", async () => {
   const { calls, context, directory, ca, id } = fixture();
   const { codexAuthFile, fireworksKeyFile } = context.config;
   mkdirSync(path.dirname(codexAuthFile), { recursive: true });
@@ -264,7 +264,7 @@ test("new checks and authorizes before the clone and writes all inputs only afte
     ["exists", "base"],
     ["exists", "vm"],
     ["prompt", "", ", run cog claude-token once, or pass --no-claude-token"],
-    ["ensureAuth", "owner/repo"],
+    ["prepareRepository", "owner/repo"],
     ["clone", "base", "vm", ["--cpus", "2"]],
     ["directory", "vm"],
     ["register", "lima:vm", directory, 0o700],
@@ -300,7 +300,7 @@ test("new checks and authorizes before the clone and writes all inputs only afte
       [...curl, "10", ...output, "https://api.github.com/__cog__/health"],
       null,
     ],
-    ["grant", "lima:vm", "owner/repo", true],
+    ["grant", "lima:vm", "owner/repo", false],
     [
       "shell",
       "vm",

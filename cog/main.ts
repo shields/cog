@@ -69,18 +69,19 @@ hooks must read the markers that cog writes. MODULE is a Brewfile module for
 provision.sh (dev by default).
 COG_CPUS and COG_MEMORY (in GiB) override the size in lima/dev.yaml, and
 COG_BASE replaces the name ${base}. For Lima, COG_GITHUB_CLIENT_ID,
-COG_GITHUB_WEB_URL and COG_GITHUB_API_URL change the GitHub App authorization.
-COG_GITHUB_WEB_URL also determines which origins cog recognizes and which host
-it uses to clone; the gateway still relays a VM's requests to github.com.
-COG_PROFILES overrides the built-in read and cog grant profiles for Lima only.
+COG_GITHUB_WEB_URL and COG_GITHUB_API_URL configure GitHub App authorization.
+new checks anonymous access at the configured API URL. COG_GITHUB_WEB_URL
+determines which origins cog recognizes and which host it uses to clone.
+The gateway relays a VM's requests to github.com. COG_PROFILES overrides the
+built-in read and cog profiles for the cog grant command.
 
 The repository is --repo's, or else the one that the git origin of the current
-directory names, if the origin uses the configured GitHub host. The Mac gateway
-performs the GitHub App device flow when that repository lacks authorization.
+directory names, if the origin uses the configured GitHub host. new reads public
+repositories anonymously and grants read-only access to a private repository.
 Credentials stay on the Mac. new clones the repository in the VM at
 ~/src/github.com/OWNER/REPO (${dotfilesRepo} is already in ${base}), and opens
-the shell there. With no repository, or with --no-repo, the VM has no GitHub
-grant. Use cog show or cog edit to inspect or change grants while a VM runs.
+the shell there. --no-repo skips repository selection. To enable pushes to
+cog/VM-ID/*, run cog grant NAME OWNER/REPO --profile cog on the Mac.
 
 new installs the Claude token from ${claudeTokenFile}
 when that file exists, and otherwise asks for it without echo: run claude

@@ -14,7 +14,6 @@
 
 import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { profileNamed } from "../../gateway/control.ts";
 import type { Instance } from "../../gateway/state.ts";
 import { dotfilesRepo, guestLib, guestRepo } from "../config.ts";
 import { CogError, Interrupted } from "../errors.ts";
@@ -26,7 +25,6 @@ import {
   tailscaleCredential,
 } from "../tailscale.ts";
 import { signals } from "../proc.ts";
-import { loadProfiles } from "../profiles.ts";
 import {
   fireworksKeyPresent,
   readClaudeTokenFile,
@@ -52,9 +50,9 @@ type NewContext = LifecycleContext<
   | "certificates"
   | "close"
   | "disable"
-  | "ensureAuth"
   | "grant"
   | "health"
+  | "prepareRepository"
   | "state"
   | "register"
 >;
@@ -175,7 +173,7 @@ export async function newVM(
       : validRepository(explicitRepo);
   if (explicitRepo === undefined && repository !== null) {
     note(
-      `cog: GitHub access for ${repository}, from the origin of this checkout (--no-repo gives none)`,
+      `cog: using ${repository} from the origin of this checkout (--no-repo skips it)`,
     );
   }
   const lima = context.lima;
@@ -218,9 +216,10 @@ export async function newVM(
       note("cog: cog claude-token keeps the token for next time");
     }
   }
-  if (repository !== null) {
-    await gateway.ensureAuth(repository);
-  }
+  const access =
+    repository === null
+      ? "anonymous"
+      : await gateway.prepareRepository(repository);
 
   let ownsClone = false;
   let registeredId: string | undefined;
@@ -296,15 +295,18 @@ export async function newVM(
 
     let cloned = false;
     if (repository !== null) {
-      const revision = await gateway.grant(gatewayVM, repository, () =>
-        profileNamed(loadProfiles(context.config), "cog"),
-      );
-      signals.check();
-      say(`policy revision ${String(revision)}`);
-      await lima.shell(
-        name,
-        probe("20", `https://api.github.com/repos/${repository}`),
-      );
+      if (access === "authenticated") {
+        const revision = await gateway.grant(gatewayVM, repository, () => ({
+          read: true,
+          pushCogBranches: false,
+        }));
+        signals.check();
+        say(`policy revision ${String(revision)}`);
+        await lima.shell(
+          name,
+          probe("20", `https://api.github.com/repos/${repository}`),
+        );
+      }
       if (repository.toLowerCase() === dotfilesRepo) {
         guestDir = `${guestHome}/${guestRepo}`;
       } else {
@@ -353,16 +355,10 @@ export async function newVM(
     }
     say(`cog: ${name} is ready.`);
     if (repository === null || guestDir === undefined) {
-      say(
-        `cog: ${name} has no GitHub access; cog grant ${name} OWNER/REPO gives it some.`,
-      );
+      say(`cog: ${name} can read public GitHub repositories anonymously.`);
     } else {
-      const where = cloned
-        ? `it is cloned at ${guestDir}`
-        : `the checkout from ${base} is at ${guestDir}`;
-      say(
-        `cog: GitHub access: ${repository}, with reads and pushes to cog/${id}/*; ${where}.`,
-      );
+      const checkout = cloned ? "cloned" : `from ${base}`;
+      say(`cog: ${repository} at ${guestDir} (${checkout}, ${access} reads).`);
     }
     if (noClaude) {
       say(

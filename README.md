@@ -36,10 +36,11 @@ its plist, binary and link. It keeps logs, `~/.local/state/cog`,
 `~/.config/secrets/cog`, `~/.config/cog` and the VMs.
 
 The Mac needs `limactl`, `git`, `tar`, `gitleaks` 8.19 or newer, `jq`, `socat`,
-`bun` and `openssl` (macOS ships one). It also needs `gh` logged in to GitHub:
-the gateway runs `gh api repos/OWNER/REPO --jq .id` whenever a repository needs an
-authorization (the first `cog new --repo` or `cog grant` for it,
-`cog authorize`, and `cog cloud authorize`). The Homebrew
+`gh`, `bun` and `openssl` (macOS ships one). Public checkouts work without a
+`gh` login. For GitHub App authorization, log in to `gh` on the Mac.
+The gateway uses `gh api repos/OWNER/REPO --jq .id` when
+`cog new` needs authorization for a private repository, when `cog grant` needs
+authorization, and for `cog authorize` and `cog cloud authorize`. The Homebrew
 modules in dotfiles (`brew/*.Brewfile` there) install them; cog installs none
 itself, because `brew bundle cleanup` in dotfiles' `provision.sh` would remove
 it again. Run `make setup` for the dependencies of the tests.
@@ -122,7 +123,7 @@ If a build fails, the half-built VM stays for inspection with
 `cog new` clones the base (an APFS copy-on-write clone, so it needs little
 disk), registers the clone with the gateway, upgrades the Claude Code and Codex
 casks before any secret is present, installs the gateway CA, relay and
-instructions, grants the repository, and only then installs the secrets with
+instructions, and prepares the selected checkout. It then installs secrets with
 `/usr/local/lib/cog/setup-secrets`, which reads each value from stdin. If
 setup fails or is interrupted after a successful clone, `cog` disables its
 registration and deletes the VM. If opening the shell fails after setup, the
@@ -202,24 +203,25 @@ denies the request. The guest's git credential helper
 (`/usr/local/lib/cog/github-gateway-credential`) and `GH_TOKEN` use a fixed
 dummy value, `cog`, that the gateway discards.
 
-`cog new NAME --repo OWNER/REPO` grants repository reads, including pull request
-reads, and pushes to `cog/VM-ID/*`. It then clones the repository over HTTPS
-into `~/src/github.com/OWNER/REPO` and opens a shell there. The base already
-holds `shields/dotfiles` with the checkout's local changes, so a VM for that
-repository reuses that checkout. With no explicit repository, `cog new` infers
-one from a GitHub `origin` of the current directory; `--no-repo` creates a VM
-with no grants. `cog grant NAME [OWNER/REPO] [--profile read|cog]` adds another repository without
-stopping the VM or removing its existing grants, inferring the repository from
-the current directory if the argument is omitted. The default profile is `cog`;
-use `--profile read` for read-only access. `COG_GITHUB_CLIENT_ID`,
-`COG_GITHUB_WEB_URL` and `COG_GITHUB_API_URL` change only the GitHub App
-authorization that cog performs (the device flow, and the check that
-the new token can read the repository). Cog also reads `COG_GITHUB_WEB_URL`, to recognize an
-origin and to build the clone URL. The relay is not affected: the gateway always
-sends a VM's requests to `github.com` and `api.github.com`, so a token issued by
-another server would be sent to GitHub. The Cloudflare commands ignore all
-three; `cog cloud authorize` uses the built-in client ID, and the Worker uses
-`GITHUB_CLIENT_ID` from `cloudflare/wrangler.jsonc`.
+`cog new NAME --repo OWNER/REPO` starts the VM with read-only GitHub access.
+For a public repository, including `shields/cog` and `shields/dotfiles`, it
+uses anonymous reads and creates no grant. For a private repository, it
+authorizes on the Mac if necessary and grants the VM read-only access. It
+clones the repository over HTTPS into `~/src/github.com/OWNER/REPO` and opens
+a shell there. For `shields/dotfiles`, it reuses the base checkout, including
+local changes. By default, `cog new` infers the repository from the current
+checkout's GitHub `origin`. Use `--no-repo` to skip repository selection.
+
+To enable pushes to `cog/VM-ID/*`, run `cog grant NAME OWNER/REPO` on the
+Mac. The default profile is `cog`. Use `--profile read` for a read-only grant.
+Omit `OWNER/REPO` to use the current checkout's GitHub origin.
+`COG_GITHUB_CLIENT_ID`, `COG_GITHUB_WEB_URL` and `COG_GITHUB_API_URL`
+configure GitHub App authorization. Cog also uses the API URL to check anonymous
+access and the web URL to recognize an origin and build the clone URL. The
+gateway always sends a VM's requests to `github.com` and `api.github.com`, so a
+token issued by another server would be sent to GitHub. The Cloudflare commands
+ignore all three variables. `cog cloud authorize` uses the built-in client ID,
+and the Worker uses `GITHUB_CLIENT_ID` from `cloudflare/wrangler.jsonc`.
 
 Public repositories, including those under `github.com/shields`, are readable
 without a grant, even in a VM created with `--no-repo`. Git clone/fetch and
@@ -432,8 +434,7 @@ Automated tests use stubs for launchd and Lima and do not deploy to Cloudflare.
 They do not verify real launchd startup, VM network isolation, the guest relay,
 agent behavior with managed settings, live GitHub authorizations, a Wrangler
 deploy or an agent image build. After installing, run `cog base` and
-`cog new t1 --repo OWNER/REPO`, which shows a device code and authorization URL
-on the Mac. Then check:
+`cog new t1 --repo OWNER/REPO` for a public repository. Then check:
 
 - `zsh -ic exit` prints nothing, `git --version` is 2.54 or later, and
   `git hook list pre-commit` lists gitleaks.
@@ -441,9 +442,12 @@ on the Mac. Then check:
   other.
 - In a fresh repository under `~/src`, `c` opens with no dialogs and shows
   bypass-permissions mode, and `/sandbox` shows that the sandbox is off.
-- In the VM, `gh api repos/OWNER/REPO`, `gh run list`, `gh run view --log` and
-  `git pull` work, and `codex debug prompt-input hi` shows the `cog/VM-ID/`
-  instructions. A push to `cog/VM-ID/check` succeeds, including a forced update,
+- In the VM, `gh api repos/OWNER/REPO` and `git pull` work, and
+  `codex debug prompt-input hi` shows the `cog/VM-ID/`
+  instructions. A push to `cog/VM-ID/check` fails. On the Mac, run
+  `cog grant t1 OWNER/REPO` and complete authorization if prompted.
+  Check that `gh run list` and `gh run view --log` work.
+  A push to `cog/VM-ID/check` now succeeds, including a forced update,
   a push of more than 1 MiB and a push from a `--depth 1` clone. A push to
   `main`, a branch deletion, a PR write, and a read of an ungranted private
   repository fail. `cog logs t1` on the Mac records each decision.

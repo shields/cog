@@ -29,6 +29,8 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { normalizeRepository } from "./policy.ts";
 
+export const defaultApiUrl = "https://api.github.com";
+
 export interface AuthRecord {
   client_id: string;
   repository: string;
@@ -165,7 +167,7 @@ export class AppAuth {
     this.directory = directory;
     this.clientId = options.clientId ?? "Iv23lim5x4MdkNNgv28z";
     this.webUrl = options.webUrl ?? "https://github.com";
-    this.apiUrl = options.apiUrl ?? "https://api.github.com";
+    this.apiUrl = options.apiUrl ?? defaultApiUrl;
     if (!clientIdPattern.test(this.clientId)) {
       throw new Error("invalid GitHub App client ID");
     }

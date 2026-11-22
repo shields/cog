@@ -46,7 +46,24 @@ stop_gateway() {
         GATEWAY_PID=
     fi
 }
-trap 'stop_gateway; rm -rf "$TMPBASE"' EXIT
+coproc bun --no-env-file -e '
+    const publicPaths = new Set(["/repos/shields/cog", "/repos/shields/dotfiles"]);
+    const server = Bun.serve({
+        hostname: "127.0.0.1", port: 0,
+        fetch(request) {
+            const path = new URL(request.url).pathname;
+            if (request.method !== "HEAD" || request.headers.has("authorization"))
+                return new Response(null, {status: 400});
+            if (path === "/repos/shields/unavailable")
+                return new Response(null, {status: 503});
+            return new Response(null, {status: publicPaths.has(path) ? 200 : 404});
+        }
+    });
+    console.log(server.url.origin);
+'
+GITHUB_PID=$!
+trap 'kill -TERM "$GITHUB_PID" 2>/dev/null || true; stop_gateway; rm -rf "$TMPBASE"' EXIT
+read -rp GITHUB_API_URL
 export TMPDIR="$TMPBASE/tmp"
 mkdir -p "$TMPDIR"
 export GIT_AUTHOR_DATE=2026-01-01T00:00:00Z GIT_COMMITTER_DATE=2026-01-01T00:00:00Z
@@ -512,6 +529,7 @@ run_environment() {
         COG_ROOT="$GATEWAY_ROOT" GATEWAY_STATE="$GATEWAY_STATE"
         REAL_CURL="$REAL_CURL" REAL_GIT="$REAL_GIT" REAL_GITLEAKS="$REAL_GITLEAKS"
         NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 COG_GITHUB_WEB_URL="$UNREACHABLE_GITHUB"
+        COG_GITHUB_API_URL="$GITHUB_API_URL"
         "${EXTRA_ENV[@]}")
     [[ -z ${RUN_WITHOUT_HOME:-} ]] || RUN_ENV=("${(@)RUN_ENV:#HOME=*}")
 }
@@ -1220,7 +1238,7 @@ assert_eq "the gateway registered the VM under an ID of its own" 1 \
 assert_eq "new registers the VM as active, with a socket in its Lima directory" 1 \
     "$([[ "$(instance_query t1 .socket | tr -d '"')" == "$HOME_DIR/.lima/t1/sock/github-"*.sock ]] && echo 1 || echo 0)"
 assert_eq "new registers exactly one VM" 1 "$(gateway_dump | jq '.instances | length')"
-assert_eq "new leaves the VM active at revision 1: registered, then granted" '{"disabled":false,"revision":1}' \
+assert_eq "new leaves the VM active at its registration revision" '{"disabled":false,"revision":0}' \
     "$(instance_query t1 '{disabled, revision}')"
 assert_contains "new installs reverse socket forwarding to the registered socket" \
     "guestSocket\":\"/tmp/cog-github.sock\",\"hostSocket\":\"{{.Dir}}/sock/$(instance_query t1 .socket | tr -d '"' | xargs basename)\",\"reverse\":true" \
@@ -1237,12 +1255,10 @@ assert_contains "new installs the Codex login with the root-owned setup-secrets"
     "shell t1 $GUEST_LIB/setup-secrets CODEX_AUTH" "$(<"$STATE/limactl.log")"
 assert_eq "new refers to nothing in the home directory's bin" 0 "$(grep -cE '/bin/setup-|HOME/bin|/home/guest/bin' "$STATE/limactl.log" || true)"
 assert_contains "new probes the guest relay" "/__cog__/health" "$(<"$STATE/limactl.log")"
-assert_eq "new grants the cog profile: reads, and pushes to cog branches" \
-    '{"shields/dotfiles":{"read":true,"pushCogBranches":true}}' "$(instance_query t1 .grants)"
-assert_eq "new records one grant event with the profile's capabilities" \
-    '[{"oldRevision":0,"newRevision":0,"changes":{"registered":true}},{"oldRevision":0,"newRevision":1,"changes":{"added":{"shields/dotfiles":{"read":true,"pushCogBranches":true}},"removed":{}}}]' \
+assert_eq "a cached authorization gives the new VM no grant for a public repo" '{}' "$(instance_query t1 .grants)"
+assert_eq "new records only the registration event" \
+    '[{"oldRevision":0,"newRevision":0,"changes":{"registered":true}}]' \
     "$(instance_query t1 .events)"
-assert_contains "new verifies the granted repository" "https://api.github.com/repos/shields/dotfiles" "$(<"$STATE/limactl.log")"
 assert_eq "new sends no GitHub authorization to the guest" 0 "$(count_in_log GITHUB_APP_AUTH)"
 assert_eq "new reuses the base checkout" 0 "$(count_in_log 'git clone')"
 assert_contains "new opens the repository shell" "shell --workdir $GUEST_DIR t1" "$(<"$STATE/limactl.log")"
@@ -1261,12 +1277,12 @@ assert_only_the_shell_reads_stdin "new with a repository"
 # The Mac holds no authorization for the repository, and the gh stub cannot read
 # it: new stops at the authorization, before it creates anything.
 new_gateway_case test-base
-unseed_auth shields/dotfiles
+unseed_auth shields/other
 : > "$STATE/gh-fail"
-run_cog new t1 --repo shields/dotfiles
+run_cog new t1 --repo shields/other
 assert_eq "a repository without an authorization stops new" 1 "$RC"
-assert_contains "new asked gh to read the repository" "api repos/shields/dotfiles --jq .id" "$(<"$STATE/gh.log")"
-assert_contains "new says gh could not read it" "gh cannot read shields/dotfiles" "$OUT"
+assert_contains "new asked gh to read the repository" "api repos/shields/other --jq .id" "$(<"$STATE/gh.log")"
+assert_contains "new says gh could not read it" "gh cannot read shields/other" "$OUT"
 assert_eq "authorization comes before the clone" 0 "$(count_in_log clone)"
 assert_eq "an unauthorized repository registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
 assert_eq "an unauthorized repository deletes no VM" 0 "$(count_in_log delete)"
@@ -1274,12 +1290,22 @@ assert_no_secret_leak "new with an unauthorized repository"
 
 # An authorization whose refresh token has expired counts as none.
 new_gateway_case test-base
-gateway_state seed-expired shields/dotfiles
+gateway_state seed-expired shields/other
 : > "$STATE/gh-fail"
-run_cog new t1 --repo shields/dotfiles
+run_cog new t1 --repo shields/other
 assert_eq "an expired authorization stops new" 1 "$RC"
-assert_contains "new asked gh to read the repository again" "api repos/shields/dotfiles --jq .id" "$(<"$STATE/gh.log")"
+assert_contains "new asked gh to read the repository again" "api repos/shields/other --jq .id" "$(<"$STATE/gh.log")"
 assert_eq "an expired authorization comes before the clone" 0 "$(count_in_log clone)"
+
+new_gateway_case test-base
+print -rl -- 'read: {read: true, pushCogBranches: true}' 'cog: {read: true, pushCogBranches: true}' > "$STATE/profiles.yaml"
+EXTRA_ENV+=(COG_PROFILES="$STATE/profiles.yaml")
+run_cog new t1 --repo shields/other
+assert_eq "new clones a private repository with a read-only grant" 0 "$RC"
+assert_eq "a custom profile cannot give a new VM push access" \
+    '{"shields/other":{"read":true,"pushCogBranches":false}}' "$(instance_query t1 .grants)"
+assert_contains "new verifies the private repository grant" "https://api.github.com/repos/shields/other" "$(<"$STATE/limactl.log")"
+assert_contains "new opens the private repository shell" "shell --workdir $OTHER_DIR t1" "$(<"$STATE/limactl.log")"
 
 new_gateway_case test-base
 stdin_marker
@@ -1352,19 +1378,28 @@ assert_eq "invalid Codex login creates no VM" 0 "$(count_in_log clone)"
 
 new_gateway_case test-base
 EXTRA_ENV+=(COG_GITHUB_WEB_URL=https://github.com)
-run_cog new t1 --no-claude-token --no-codex-auth
-assert_eq "new infers the GitHub origin" 0 "$RC"
-assert_contains "new says where the repository comes from" "GitHub access for shields/dotfiles, from the origin of this checkout" "$OUT"
-assert_eq "the inferred repository is granted" '{"shields/dotfiles":{"read":true,"pushCogBranches":true}}' "$(instance_query t1 .grants)"
-
-new_gateway_case test-base
-EXTRA_ENV+=(COG_GITHUB_WEB_URL=https://github.com)
 unseed_auth shields/dotfiles
 : > "$STATE/gh-fail"
 run_cog new t1 --no-claude-token --no-codex-auth
-assert_eq "an inferred repository without an authorization stops new" 1 "$RC"
-assert_contains "the inferred repository is authorized" "api repos/shields/dotfiles --jq .id" "$(<"$STATE/gh.log")"
-assert_eq "the inferred repository is authorized before the clone" 0 "$(count_in_log clone)"
+assert_eq "new infers the GitHub origin" 0 "$RC"
+assert_contains "new says where the repository comes from" "using shields/dotfiles from the origin of this checkout" "$OUT"
+assert_eq "the inferred public repository needs no grant" '{}' "$(instance_query t1 .grants)"
+assert_eq "new skips gh for the inferred public repository" no "$([[ -e $STATE/gh.log ]] && echo yes || echo no)"
+
+new_gateway_case test-base
+EXTRA_ENV+=(COG_GITHUB_WEB_URL=https://github.com)
+: > "$STATE/gh-fail"
+run_cog new t1 --repo shields/cog
+assert_eq "new can clone cog without authorization" 0 "$RC"
+assert_eq "cog gets no repository grant" '{}' "$(instance_query t1 .grants)"
+assert_contains "new clones cog anonymously" "git clone --quiet https://github.com/shields/cog.git" "$(<"$STATE/limactl.log")"
+
+new_gateway_case test-base
+run_cog new t1 --repo shields/unavailable
+assert_eq "an upstream error stops new" 1 "$RC"
+assert_contains "new reports the anonymous lookup error" "HTTP 503" "$OUT"
+assert_eq "an upstream error does not start authorization" no "$([[ -e $STATE/gh.log ]] && echo yes || echo no)"
+assert_eq "an upstream error creates no VM" 0 "$(count_in_log clone)"
 
 new_case test-base
 run_cog new t1 --repo shields/dotfiles
@@ -1562,8 +1597,8 @@ for entry in HUP:129 INT:130 TERM:143; do
     expected=${entry#*:}
     new_signal_stage "$signal" "$expected" "after the clone" "{{.Dir}} t1" 0 --repo shields/dotfiles
     new_signal_stage "$signal" "$expected" "after the registration" "start --tty=false t1" 1 --repo shields/dotfiles
-    new_signal_stage "$signal" "$expected" "during the Claude token install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" 1 --repo shields/dotfiles
-    new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" 1 --repo shields/dotfiles
+    new_signal_stage "$signal" "$expected" "during the Claude token install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" 1 --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" 1 --repo shields/other
 done
 
 new_gateway_case test-base
