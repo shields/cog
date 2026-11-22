@@ -115,6 +115,24 @@ test("device flow requests one repository and checks the resulting token", async
   }
 });
 
+test("device flow names gh when it cannot be run", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-no-gh-"));
+  const originalPath = process.env.PATH;
+  process.env.PATH = directory;
+  const fetched = spyOn(globalThis, "fetch");
+  try {
+    const auth = new AppAuth(path.join(directory, "secrets"));
+    await assert.rejects(
+      auth.issue("shields/dotfiles"),
+      /cannot run gh to read shields\/dotfiles/,
+    );
+    assert.equal(fetched.mock.calls.length, 0);
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("concurrent callers spend one refresh token and persist its replacement", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "cog-auth-"));
   let refreshes = 0;

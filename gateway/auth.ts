@@ -264,7 +264,7 @@ export class AppAuth {
       }
       if (current.refresh_expires_at <= now) {
         throw new Error(
-          `GitHub authorization for ${key} expired; run cog-gateway grant again`,
+          `GitHub authorization for ${key} expired; run cog-gateway authorize ${key}`,
         );
       }
       const reply = await postForm(
@@ -277,7 +277,7 @@ export class AppAuth {
       );
       if (reply.error !== undefined) {
         throw new Error(
-          `GitHub refused refresh for ${key}; reauthorize with cog-gateway grant`,
+          `GitHub refused refresh for ${key}; reauthorize with cog-gateway authorize ${key}`,
         );
       }
       const renewed = tokenReply(reply);
@@ -298,6 +298,11 @@ export class AppAuth {
       encoding: "utf8",
       timeout: 30_000,
     });
+    if (gh.error) {
+      throw new Error(`cannot run gh to read ${key}: ${gh.error.message}`, {
+        cause: gh.error,
+      });
+    }
     const repositoryId = gh.stdout.trim();
     if (gh.status !== 0 || !/^[1-9][0-9]*$/.test(repositoryId)) {
       throw new Error(
