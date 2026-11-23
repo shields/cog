@@ -181,7 +181,7 @@ export class AgentContainer extends DurableObject<Env> {
       instance: { vcpu: 1, memoryMib: 4096, diskMb: 20_000 },
       enableInternet: false,
       labels: { vm_id: instanceId },
-      entrypoint: ["/usr/local/lib/cog/cloudflare/entrypoint.sh"],
+      entrypoint: ["/usr/local/lib/cog/cloudflare/entrypoint.sh", instanceId],
     });
     await container.setInactivityTimeout(21_600_000);
   }

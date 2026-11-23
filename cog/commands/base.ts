@@ -210,6 +210,7 @@ function checkGuestScripts(guest: string): void {
   for (const name of [
     "configure-github-access.sh",
     "github-gateway-credential",
+    "install-push-instructions.sh",
     "reset-identity.sh",
     "setup-github-gateway",
     "setup-secrets",

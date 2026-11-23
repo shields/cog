@@ -1016,7 +1016,7 @@ assert_contains "it names the missing guest directory" "guest/" "$OUT"
 assert_eq "it touches no VM" "" "$(limactl_log)"
 RUN_COG=
 
-for guest_script in configure-github-access.sh github-gateway-credential reset-identity.sh setup-github-gateway setup-secrets throwaway.sh; do
+for guest_script in configure-github-access.sh github-gateway-credential install-push-instructions.sh reset-identity.sh setup-github-gateway setup-secrets throwaway.sh; do
     new_case test-base
     run_base_with_guest_fault "missing:$guest_script"
     assert_eq "a staged tree without guest/$guest_script fails base" 1 "$RC"
@@ -1177,6 +1177,8 @@ assert_eq "nothing refers to the home directory's bin" "" \
     "$(grep -rnIE '\$HOME/bin|~/bin|/home/shields/bin|guest_home/bin' "$HERE/../guest" "$HERE/../cloudflare/guest" "$HERE/../cog/commands" || true)"
 assert_contains "the Lima gateway configures access for its guest user and VM ID" \
     '"$lib_dir/configure-github-access.sh" "$SUDO_USER" "$1"' "$(<"$HERE/../guest/setup-github-gateway")"
+assert_contains "the Lima gateway installs push instructions for its VM ID" \
+    '"$lib_dir/install-push-instructions.sh" "$1"' "$(<"$HERE/../guest/setup-github-gateway")"
 
 # --- 7. base failures ---
 new_case

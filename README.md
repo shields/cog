@@ -417,14 +417,15 @@ their sandboxed, prompting behavior.
   `provision.sh` configures only gist.github.com's helper.
 - On Lima, `setup-github-gateway` also installs the CA, the `/etc/hosts`
   mapping of the GitHub hosts to `127.0.0.1` and the relay unit
-  `cog-github-gateway`. It tells the agents about `cog/VM-ID/*` in system-wide
-  instructions that survive re-provisioning, in Claude Code's
+  `cog-github-gateway`.
+- Both backends tell agents their exact `cog/VM-ID/*` namespace and instruct
+  them to fetch and rebase onto the updated base branch before every push.
+  Lima installs these instructions during gateway setup. The Cloudflare Worker
+  passes the VM's UUID to the container entrypoint, which installs them at
+  startup. The instructions survive re-provisioning in Claude Code's
   `/etc/claude-code/CLAUDE.md` and Codex's `/etc/codex/requirements.toml`
-  (`additional_developer_instructions`). A Cloudflare VM gets neither
-  instruction file, so its agents are not told the
-  namespace, and dotfiles' `wt`, which names a branch from the UUID in
-  `/etc/cog-github-gateway`, refuses to create a worktree where it holds
-  `cloudflare`.
+  (`additional_developer_instructions`). On Cloudflare, dotfiles' `wt`
+  refuses to create a worktree because the gateway marker holds `cloudflare`.
 
 ## Checks to run once with real credentials
 
@@ -486,10 +487,10 @@ copies the dotfiles tree to `/home/shields/src/github.com/shields/dotfiles`,
 provisions it (`MODULES`, `dev` by default), copies the guest scripts root-owned
 to `/usr/local/lib/cog`, and runs `throwaway.sh`, `configure_codex.py`,
 `reset-identity.sh` and `configure-github-access.sh shields cloudflare` in that
-order. The Worker starts `/usr/local/lib/cog/cloudflare/entrypoint.sh`, which
-installs Cloudflare's runtime CA. With `--worker-only` no dotfiles tree is
-staged, the image is reused without building or rolling out containers, and
-`--dotfiles` is an error.
+order. The Worker starts `/usr/local/lib/cog/cloudflare/entrypoint.sh` with the
+VM's UUID. The entrypoint installs Cloudflare's runtime CA and the agent push
+instructions. With `--worker-only` no dotfiles tree is staged, the image is
+reused without building or rolling out containers, and `--dotfiles` is an error.
 
 `cloudflare/wrangler.jsonc` cannot build the image by itself: its `dockerfile`
 and `build_context` name `cloudflare/Dockerfile` and the repository root, which

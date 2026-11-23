@@ -265,9 +265,14 @@ def test_only_the_dockerfile_names_the_user() -> None:
         assert "shields" not in (REPO / script).read_text()
 
 
-def test_the_worker_starts_the_entrypoint_from_the_guest_scripts() -> None:
+def test_the_worker_passes_the_instance_id_to_the_guest_instructions() -> None:
     worker = (REPO / "cloudflare/worker.ts").read_text()
-    assert '"/usr/local/lib/cog/cloudflare/entrypoint.sh"' in worker
+    assert (
+        'entrypoint: ["/usr/local/lib/cog/cloudflare/entrypoint.sh", instanceId]'
+        in worker
+    )
+    entrypoint = (REPO / "cloudflare/guest/entrypoint.sh").read_text()
+    assert 'sudo /usr/local/lib/cog/install-push-instructions.sh "$1"' in entrypoint
     assert "CLOUDFLARE_AGENT" not in (REPO / "cloudflare/wrangler.jsonc").read_text()
 
 
@@ -404,6 +409,7 @@ def test_a_secret_in_the_guest_scripts_stops_the_context(world: World) -> None:
         "guest/reset-identity.sh",
         "guest/github-gateway-credential",
         "guest/configure-github-access.sh",
+        "guest/install-push-instructions.sh",
         "cloudflare/guest/entrypoint.sh",
     ],
 )

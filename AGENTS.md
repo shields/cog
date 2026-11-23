@@ -43,7 +43,9 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   `cog base` (`sudo tar -x --no-same-owner --no-same-permissions` after
   `gitleaks dir`) or by the image's `COPY`. Nothing of cog goes in the guest's
   `~/bin`. Both backends run `guest/configure-github-access.sh` for the push
-  rules, dummy credential helper and gateway marker.
+  rules, dummy credential helper and gateway marker. Both run
+  `guest/install-push-instructions.sh` with the instance UUID to tell Claude
+  Code and Codex which branches they can push and to rebase before every push.
 - The committed `cloudflare/wrangler.jsonc` is a template: `deploy.sh` rewrites
   its `dockerfile` and `build_context` in a staged copy to the context that
   `context.sh` assembles, and `jq` reads it, so it takes no comments.

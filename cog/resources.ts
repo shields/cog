@@ -16,6 +16,7 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import configureGithubAccess from "../guest/configure-github-access.sh" with { type: "text" };
 import githubGatewayCredential from "../guest/github-gateway-credential" with { type: "text" };
+import installPushInstructions from "../guest/install-push-instructions.sh" with { type: "text" };
 import resetIdentity from "../guest/reset-identity.sh" with { type: "text" };
 import setupGithubGateway from "../guest/setup-github-gateway" with { type: "text" };
 import setupSecrets from "../guest/setup-secrets" with { type: "text" };
@@ -34,6 +35,7 @@ export interface ResourceFile {
 export const guestFiles: readonly ResourceFile[] = [
   { name: "configure-github-access.sh", text: configureGithubAccess },
   { name: "github-gateway-credential", text: githubGatewayCredential },
+  { name: "install-push-instructions.sh", text: installPushInstructions },
   { name: "reset-identity.sh", text: resetIdentity },
   { name: "setup-github-gateway", text: setupGithubGateway },
   { name: "setup-secrets", text: setupSecrets },

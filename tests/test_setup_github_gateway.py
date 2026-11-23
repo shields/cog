@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,41 @@ def configure(
 ) -> subprocess.CompletedProcess[str]:
     _ = (guest / SETTINGS).write_text(json.dumps(settings))
     return run(guest, "bash", "lib/configure-github-access.sh", "tester", marker)
+
+
+def test_managed_push_instructions(guest: Path) -> None:
+    (guest / "etc/codex").mkdir()
+    script = GUEST / "install-push-instructions.sh"
+    installer = guest / "lib" / script.name
+    _ = installer.write_text(script.read_text().replace("/etc/", "etc/"))
+    claude = guest / "etc/claude-code/CLAUDE.md"
+    codex = guest / "etc/codex/requirements.toml"
+    vm_id = "46548c62-8ea4-4c8a-b09d-070a70d5844c"
+    result = run(guest, "bash", str(installer), vm_id)
+    assert result.returncode == 0, result.stderr
+    instructions = claude.read_text()
+    assert (
+        tomllib.loads(codex.read_text())["additional_developer_instructions"]
+        == instructions
+    )
+    assert f"`cog/{vm_id}/NAME`" in instructions
+    assert "VM-ID" not in instructions
+    before_push = instructions.index("Before every push")
+    assert (
+        before_push
+        < instructions.index("rebase", before_push)
+        < instructions.index("git push")
+    )
+    assert claude.stat().st_mode & 0o777 == codex.stat().st_mode & 0o777 == 0o644
+
+    invalid = run(guest, "bash", str(installer), "cloudflare")
+    assert invalid.returncode != 0
+    assert "expected the VM instance ID" in invalid.stderr
+    assert claude.read_text() == instructions
+    assert (
+        tomllib.loads(codex.read_text())["additional_developer_instructions"]
+        == instructions
+    )
 
 
 @pytest.mark.parametrize(

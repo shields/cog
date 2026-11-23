@@ -23,4 +23,5 @@ ca=/etc/cloudflare/certs/cloudflare-containers-ca.crt
 }
 sudo install -m 0644 "$ca" /usr/local/share/ca-certificates/cloudflare-containers-ca.crt
 sudo update-ca-certificates >/dev/null
+sudo /usr/local/lib/cog/install-push-instructions.sh "$1"
 exec sleep infinity

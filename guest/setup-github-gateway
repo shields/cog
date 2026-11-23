@@ -29,11 +29,8 @@ command -v socat >/dev/null || die "socat is not installed"
 command -v jq >/dev/null || die "jq is not installed"
 
 lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-ca='' claude_md='' requirements=''
-trap 'rm -f "$ca" "$claude_md" "$requirements"' EXIT
 ca=$(mktemp /usr/local/share/ca-certificates/.cog-github-gateway.XXXXXX)
-claude_md=$(mktemp /etc/claude-code/.CLAUDE.md.XXXXXX)
-requirements=$(mktemp /etc/codex/.requirements.toml.XXXXXX)
+trap 'rm -f "$ca"' EXIT
 cat >"$ca"
 openssl x509 -noout -in "$ca" >/dev/null || die "invalid gateway CA certificate"
 chmod 644 "$ca"
@@ -61,30 +58,7 @@ ProtectSystem=full
 WantedBy=multi-user.target
 EOF
 
-# Provisioning regenerates the agents' instruction files in the guest user's
-# home, so the namespace goes in the system-wide ones.
-instructions=$(
-    cat <<'EOF'
-Push to GitHub only branches named `cog/VM-ID/NAME`, for example
-`git switch -c cog/VM-ID/fix-login` and then `git push -u origin HEAD`. The
-GitHub gateway rejects other pushes, branch deletions, and pushes to
-repositories the user has not granted push access to. It also rejects GitHub
-writes such as creating a pull request, so tell the user which branch you
-pushed.
-EOF
-)
-instructions=${instructions//VM-ID/$1}
-printf '%s\n' "$instructions" >"$claude_md"
-cat >"$requirements" <<EOF
-# Written by setup-github-gateway.
-additional_developer_instructions = '''
-$instructions
-'''
-EOF
-chmod 644 "$claude_md" "$requirements"
-mv -f "$claude_md" /etc/claude-code/CLAUDE.md
-mv -f "$requirements" /etc/codex/requirements.toml
-
+"$lib_dir/install-push-instructions.sh" "$1"
 "$lib_dir/configure-github-access.sh" "$SUDO_USER" "$1"
 
 systemctl daemon-reload
