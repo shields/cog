@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, type Stats } from "node:fs";
 import path from "node:path";
 import { compareCodeUnits } from "./policy.ts";
 
@@ -34,7 +34,7 @@ export interface AccountSnapshot {
 
 export const unconfiguredReason = "the Claude pool is not configured";
 
-const accountName = /^[a-z0-9][a-z0-9-]{0,31}$/u;
+export const accountName = /^[a-z0-9][a-z0-9-]{0,31}$/u;
 const tokenPrefix = "sk-ant-oat";
 const tokenLimit = 4096;
 const visibleAscii = /^[!-~]+$/u;
@@ -54,7 +54,7 @@ function failure(about: string, error: unknown): string {
   return `${about} cannot be read${code === null ? "" : ` (${code})`}`;
 }
 
-function checkToken(token: string): string | null {
+export function checkToken(token: string): string | null {
   if (token.length === 0 || token.length > tokenLimit) {
     return "must hold one token of at most 4096 characters";
   }
@@ -101,18 +101,26 @@ function loadAccount(
     : { reason: `${about} ${violation}` };
 }
 
+export function directoryProblem(
+  status: Pick<Stats, "isDirectory" | "mode">,
+): string | null {
+  if (!status.isDirectory()) {
+    return "the Claude pool location is not a real directory";
+  }
+  if ((status.mode & groupOrOther) !== 0) {
+    return "the Claude pool directory is accessible to group or other";
+  }
+  return null;
+}
+
 export function loadPool(directory: string): PoolLoad {
   const unusable = (reason: string): PoolLoad => ({ usable: false, reason });
   let names: string[];
   try {
     const status = lstatSync(directory);
-    if (!status.isDirectory()) {
-      return unusable("the Claude pool location is not a real directory");
-    }
-    if ((status.mode & groupOrOther) !== 0) {
-      return unusable(
-        "the Claude pool directory is accessible to group or other",
-      );
+    const problem = directoryProblem(status);
+    if (problem !== null) {
+      return unusable(problem);
     }
     names = readdirSync(directory);
   } catch (error) {
@@ -134,7 +142,7 @@ export function loadPool(directory: string): PoolLoad {
     accounts.push(loaded);
   }
   return accounts.length === 0
-    ? unusable("the Claude pool directory holds no account")
+    ? unusable(unconfiguredReason)
     : { usable: true, accounts };
 }
 
@@ -285,7 +293,7 @@ export class AccountPool {
         resetTime(
           headerValue(headers, "anthropic-ratelimit-unified-reset"),
           now,
-        ) ?? now + 300_000;
+        ) ?? Math.max(state.heldUntil, now + 300_000);
     } else if (status === 401) {
       // The request's path and headers are the guest's, so a 401 may not cut
       // a longer hold short or write a line for each one of a run.

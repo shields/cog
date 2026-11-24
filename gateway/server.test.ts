@@ -4215,11 +4215,7 @@ const unusablePools: [string, PoolSpec | "empty" | "invalid", string | null][] =
   [
     ["no pool setting", "unset", null],
     ["a pool directory that does not exist", "missing", null],
-    [
-      "a pool directory with no account",
-      "empty",
-      "the Claude pool directory holds no account",
-    ],
+    ["a pool directory with no account", "empty", null],
     [
       "an account file that is not a token",
       "invalid",
@@ -4253,7 +4249,7 @@ for (const [name, mode, reason] of unusablePools) {
     assert.deepEqual(claudeError(refused), {
       type: "api_error",
       message:
-        mode === "unset" || mode === "missing"
+        mode === "unset" || mode === "missing" || mode === "empty"
           ? "cog gateway: the Claude pool is not configured"
           : "cog gateway: the Claude pool is not usable",
     });
@@ -4300,26 +4296,27 @@ test("the pool directory is read again when /sync is requested and not for each 
   assert.equal((await post()).status, 200);
   assert.equal(tokenSeen(lastRequest(stub)), "bravo");
   assert.deepEqual(stderr, []);
-  rmSync(path.join(poolDirectory, "bravo"));
+  chmodSync(path.join(poolDirectory, "bravo"), 0o640);
   assert.equal(await requestSync(adminSocket), 200);
   assert.equal((await post()).status, 503);
   assert.equal(await requestSync(adminSocket), 200);
-  const empty =
-    "cog: Claude pool unavailable: the Claude pool directory holds no account\n";
-  assert.deepEqual(stderr, [empty]);
-  writeFileSync(path.join(poolDirectory, "alpha"), tokens.alpha, {
-    mode: 0o600,
-  });
+  const open =
+    "cog: Claude pool unavailable: account bravo is accessible to group or other\n";
+  assert.deepEqual(stderr, [open]);
+  chmodSync(path.join(poolDirectory, "bravo"), 0o600);
   assert.equal(await requestSync(adminSocket), 200);
   assert.equal((await post()).status, 200);
-  assert.deepEqual(stderr, [empty]);
+  assert.deepEqual(stderr, [open]);
+  rmSync(path.join(poolDirectory, "bravo"));
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 503);
   rmSync(poolDirectory, { recursive: true });
   assert.equal(await requestSync(adminSocket), 200);
+  assert.deepEqual(stderr, [open]);
+  writePool(poolDirectory, { bravo: tokens.bravo });
+  chmodSync(path.join(poolDirectory, "bravo"), 0o640);
   assert.equal(await requestSync(adminSocket), 200);
-  assert.deepEqual(stderr, [empty]);
-  writePool(poolDirectory, {});
-  assert.equal(await requestSync(adminSocket), 200);
-  assert.deepEqual(stderr, [empty, empty]);
+  assert.deepEqual(stderr, [open, open]);
   noSecrets(stderr, state.logs(instance.id));
 });
 
@@ -4788,6 +4785,50 @@ test("a hold survives a reload that finds the pool unusable in between", async (
   assert.equal(tokenSeen(lastRequest(stub)), second);
 });
 
+test("a hold is forgotten once every account is removed, with the tokens it belonged to", async () => {
+  let rejectNext = true;
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
+  const stub = await startModelStub((request, response, entry) => {
+    if (rejectNext) {
+      rejectNext = false;
+      void entry.ended.then(() => {
+        response
+          .writeHead(429, [
+            "content-type",
+            "application/json",
+            "anthropic-ratelimit-unified-status",
+            "rejected",
+            "anthropic-ratelimit-unified-reset",
+            reset,
+          ])
+          .end("{}");
+      });
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  captureStderr();
+  const pool = { alpha: tokens.alpha, bravo: tokens.bravo };
+  const { root, poolDirectory, socket } = await startGateway({
+    models: { anthropic: stub.origin, pool },
+  });
+  const adminSocket = path.join(root, "admin.sock");
+  const post = async (): Promise<ModelReply> =>
+    claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal((await post()).status, 429);
+  const first = tokenSeen(lastRequest(stub));
+  assert.equal((await post()).status, 200);
+  assert.notEqual(tokenSeen(lastRequest(stub)), first);
+  rmSync(path.join(poolDirectory, "alpha"));
+  rmSync(path.join(poolDirectory, "bravo"));
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 503);
+  writePool(poolDirectory, pool);
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 200);
+  assert.equal(tokenSeen(lastRequest(stub)), first);
+});
+
 test("response headers reach the client before the first body byte", async () => {
   const release = signal();
   const stub = await startModelStub((_request, response, entry) => {
@@ -4865,4 +4906,243 @@ test("a VM disabled while a request with no body is in flight does not have it s
   await within("the answer", pending);
   assert.equal(stub.requests.length, 2);
   assert.equal(stub.connections.length, 1);
+});
+
+test("uploads whose upstream request cannot be created, in sequence on one connection, leave no listeners behind on its socket", async () => {
+  const stub = await startModelStub();
+  const { socket, listener } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  captureStderr();
+  spyOn(http, "request").mockImplementation(() => {
+    throw new Error("the upstream request cannot be created");
+  });
+  const watched = watchCloseListeners(listener);
+  const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+  defer(() => {
+    agent.destroy();
+  });
+  for (let round = 0; round < 8; round += 1) {
+    const request = https.request({
+      socketPath: socket,
+      servername: claudeName,
+      rejectUnauthorized: false,
+      agent,
+      method: "POST",
+      path: "/v1/messages",
+      headers: { host: claudeName, ...poolHeaders },
+    });
+    const failed = signal();
+    const answered = new Promise<number>((resolve, reject) => {
+      request.once("error", reject);
+      request.once("response", (incoming) => {
+        failed.resolve();
+        incoming.resume();
+        incoming.once("end", () => {
+          resolve(incoming.statusCode ?? 0);
+        });
+      });
+    });
+    request.write("{");
+    await within("the gateway to answer the failed upload", failed.promise);
+    request.end("}");
+    assert.equal(await within("the response to end", answered), 503);
+  }
+  assert.equal(stub.requests.length, 0);
+  assert.equal(watched.connections.size, 1);
+  assert.equal(new Set(watched.counts).size, 1, watched.counts.join(","));
+});
+
+interface PoolAnswer {
+  status: number;
+  type: string | undefined;
+  text: string;
+  json: {
+    state: string;
+    reason: string | null;
+    accounts: {
+      name: string;
+      held: boolean;
+      heldUntil: number | null;
+      buckets: { bucket: string; utilization: number; expires: number }[];
+    }[];
+  };
+}
+
+function requestPool(adminSocket: string, method = "GET"): Promise<PoolAnswer> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      { socketPath: adminSocket, path: "/pool", method, agent: false },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.once("end", () => {
+          const text = Buffer.concat(chunks).toString();
+          resolve({
+            status: response.statusCode ?? 0,
+            type: response.headers["content-type"],
+            text,
+            json: (text === "" ? null : JSON.parse(text)) as PoolAnswer["json"],
+          });
+        });
+      },
+    );
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+const poolStates: [string, PoolSpec, string, string | null][] = [
+  ["unset", "unset", "unconfigured", null],
+  ["missing", "missing", "unconfigured", null],
+  [
+    "invalid",
+    { alpha: "sk-wrong-made-up-alpha-token" },
+    "unusable",
+    "account alpha must hold a token that starts with sk-ant-oat",
+  ],
+  ["empty", {}, "unconfigured", null],
+  ["valid", bothAccounts, "usable", null],
+];
+
+for (const [name, pool, state, reason] of poolStates) {
+  test(`GET /pool answers ${state} with ${name} accounts, and no token`, async () => {
+    const stub = await startModelStub();
+    captureStderr();
+    const { root } = await startGateway({
+      models: { anthropic: stub.origin, pool },
+    });
+    const answer = await requestPool(path.join(root, "admin.sock"));
+    assert.equal(answer.status, 200);
+    assert.equal(answer.type, "application/json");
+    assert.equal(answer.json.state, state);
+    assert.equal(answer.json.reason, reason);
+    assert.deepEqual(
+      answer.json.accounts,
+      state === "usable"
+        ? [
+            { name: "alpha", held: false, heldUntil: null, buckets: [] },
+            { name: "bravo", held: false, heldUntil: null, buckets: [] },
+          ]
+        : [],
+    );
+    noSecrets(answer.text);
+  });
+}
+
+test("the admin socket answers 404 to /pool with another method, and /sync is as before", async () => {
+  const stub = await startModelStub();
+  const { root } = await startGateway({ models: { anthropic: stub.origin } });
+  const adminSocket = path.join(root, "admin.sock");
+  assert.equal((await requestPool(adminSocket, "POST")).status, 404);
+  assert.equal((await requestPool(adminSocket, "DELETE")).status, 404);
+  assert.equal(await requestSync(adminSocket), 200);
+});
+
+test("GET /pool shows a utilization reading and a hold that a pooled response caused, and no token", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  let rejecting = false;
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(() => {
+      response
+        .writeHead(
+          rejecting ? 429 : 200,
+          rejecting
+            ? [
+                "content-type",
+                "application/json",
+                "anthropic-ratelimit-unified-status",
+                "rejected",
+                "anthropic-ratelimit-unified-reset",
+                String(reset),
+              ]
+            : [
+                "content-type",
+                "application/json",
+                "anthropic-ratelimit-unified-5h-utilization",
+                "0.25",
+                "anthropic-ratelimit-unified-5h-reset",
+                String(reset),
+              ],
+        )
+        .end("{}");
+    });
+  });
+  captureStderr();
+  const { root, socket } = await startGateway({
+    models: { anthropic: stub.origin, pool: { alpha: tokens.alpha } },
+  });
+  const adminSocket = path.join(root, "admin.sock");
+  const post = async (): Promise<ModelReply> =>
+    claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal((await post()).status, 200);
+  const reading = await requestPool(adminSocket);
+  assert.deepEqual(reading.json.accounts, [
+    {
+      name: "alpha",
+      held: false,
+      heldUntil: null,
+      buckets: [{ bucket: "5h", utilization: 0.25, expires: reset * 1000 }],
+    },
+  ]);
+  rejecting = true;
+  assert.equal((await post()).status, 429);
+  const held = await requestPool(adminSocket);
+  const [account] = held.json.accounts;
+  assert.ok(account);
+  assert.equal(account.held, true);
+  assert.equal(account.heldUntil, reset * 1000);
+  noSecrets(reading.text, held.text);
+});
+
+test("GET /pool changes only after /sync, keeping the readings of an account that is unchanged", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(() => {
+      response
+        .writeHead(200, [
+          "content-type",
+          "application/json",
+          "anthropic-ratelimit-unified-5h-utilization",
+          "0.5",
+          "anthropic-ratelimit-unified-5h-reset",
+          String(reset),
+        ])
+        .end("{}");
+    });
+  });
+  captureStderr();
+  const { root, poolDirectory, socket } = await startGateway({
+    models: { anthropic: stub.origin, pool: { alpha: tokens.alpha } },
+  });
+  const adminSocket = path.join(root, "admin.sock");
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  writeFileSync(path.join(poolDirectory, "bravo"), tokens.bravo, {
+    mode: 0o600,
+  });
+  const before = await requestPool(adminSocket);
+  assert.deepEqual(
+    before.json.accounts.map(({ name }) => name),
+    ["alpha"],
+  );
+  assert.equal(await requestSync(adminSocket), 200);
+  const added = await requestPool(adminSocket);
+  assert.deepEqual(
+    added.json.accounts.map(({ name, buckets }) => [name, buckets.length]),
+    [
+      ["alpha", 1],
+      ["bravo", 0],
+    ],
+  );
+  rmSync(path.join(poolDirectory, "alpha"));
+  rmSync(path.join(poolDirectory, "bravo"));
+  assert.equal(await requestSync(adminSocket), 200);
+  const emptied = await requestPool(adminSocket);
+  assert.equal(emptied.json.state, "unconfigured");
+  assert.equal(emptied.json.reason, null);
+  assert.deepEqual(emptied.json.accounts, []);
+  noSecrets(before.text, added.text, emptied.text);
 });

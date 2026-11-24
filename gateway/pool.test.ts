@@ -165,14 +165,11 @@ test("a missing directory is a pool that is not configured, and a file, a symbol
   }
 });
 
-test("a directory with no account is refused, and so is one that holds only ignored entries", () => {
-  assert.equal(
-    reason(loadPool(makePool({}))),
-    "the Claude pool directory holds no account",
-  );
+test("a directory with no account is a pool that is not configured, and so is one that holds only ignored entries", () => {
+  assert.equal(reason(loadPool(makePool({}))), unconfiguredReason);
   assert.equal(
     reason(loadPool(makePool({ ".tmp": goodToken }))),
-    "the Claude pool directory holds no account",
+    unconfiguredReason,
   );
 });
 
@@ -737,6 +734,34 @@ test("a rejected 429 whose reset is unusable holds for five minutes", () => {
       String(reset),
     );
   }
+});
+
+test("a rejected 429 without a usable reset does not shorten a longer hold", () => {
+  const pool = trioPool();
+  const [first, next] = order("vm-7", trio);
+  assert.ok(first && next);
+  pool.observe(
+    first,
+    429,
+    [
+      "anthropic-ratelimit-unified-status",
+      "rejected",
+      "anthropic-ratelimit-unified-reset",
+      epoch(start + 3 * day),
+    ],
+    start,
+  );
+  pool.observe(
+    first,
+    429,
+    ["anthropic-ratelimit-unified-status", "rejected"],
+    start + second,
+  );
+  assert.equal(
+    pool.snapshot(start + second).find(({ name }) => name === first)?.heldUntil,
+    start + 3 * day,
+  );
+  assert.equal(pool.choose("vm-7", start + hour).name, next);
 });
 
 test("a 429 that is not a rejection holds nothing", () => {

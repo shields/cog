@@ -51,6 +51,7 @@ import {
   loadPool,
   unconfiguredReason,
   type Account,
+  type AccountSnapshot,
 } from "./pool.ts";
 import { State } from "./state.ts";
 
@@ -293,10 +294,11 @@ export class Gateway {
     this.pool = loaded.usable
       ? new AccountPool(loaded.accounts, this.lastPool)
       : null;
-    if (this.pool !== null) {
+    const reason = loaded.usable ? null : loaded.reason;
+    // An operator who removed every account expects its tokens to be gone.
+    if (this.pool !== null || reason === unconfiguredReason) {
       this.lastPool = this.pool;
     }
-    const reason = loaded.usable ? null : loaded.reason;
     if (
       reason !== null &&
       reason !== unconfiguredReason &&
@@ -412,6 +414,10 @@ export class Gateway {
         response
           .writeHead(200, { "content-type": "application/json" })
           .end('{"ok":true}');
+      } else if (request.method === "GET" && request.url === "/pool") {
+        response
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify(this.poolStatus()));
       } else {
         response.writeHead(404).end();
       }
@@ -426,6 +432,23 @@ export class Gateway {
         resolve();
       });
     });
+  }
+
+  private poolStatus(): {
+    state: "unconfigured" | "unusable" | "usable";
+    reason: string | null;
+    accounts: AccountSnapshot[];
+  } {
+    if (this.pool !== null) {
+      return {
+        state: "usable",
+        reason: null,
+        accounts: this.pool.snapshot(Date.now()),
+      };
+    }
+    return this.poolReason === unconfiguredReason
+      ? { state: "unconfigured", reason: null, accounts: [] }
+      : { state: "unusable", reason: this.poolReason, accounts: [] };
   }
 
   private async sync(response: ServerResponse): Promise<void> {
@@ -1036,7 +1059,16 @@ export class Gateway {
           });
         }
       };
-      begin(false);
+      // open() can throw before an upstream request exists to take the
+      // listener off when it closes.
+      try {
+        begin(false);
+      } catch (error) {
+        if (watching) {
+          incoming.socket.off("close", abandon);
+        }
+        throw error;
+      }
     });
     return result;
   }

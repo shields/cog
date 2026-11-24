@@ -682,6 +682,7 @@ assert_contains "help names --no-claude-token" "--no-claude-token" "$OUT"
 assert_contains "help names --no-codex-auth" "--no-codex-auth" "$OUT"
 assert_contains "help says where Codex keeps its login" 'cli_auth_credentials_store = "file"' "$OUT"
 assert_contains "help lists claude-token" "cog claude-token" "$OUT"
+assert_contains "help lists pool" "cog pool add NAME | rm NAME | list | status" "$OUT"
 assert_contains "help names the Fireworks key file" ".config/secrets/FIREWORKS_API_KEY" "$OUT"
 assert_contains "help describes the Mac gateway" "Credentials" "$OUT"
 run_cog

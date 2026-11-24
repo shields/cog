@@ -20,6 +20,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { onTestFinished, test } from "bun:test";
 import YAML from "yaml";
@@ -317,4 +319,211 @@ test("logs find a VM by name, then by ID, even when it is disabled", () => {
     () => result.findInstance("nothing"),
     /nothing is not a known VM/,
   );
+});
+
+async function answering(
+  directory: string,
+  reply: { status?: number; body: string },
+): Promise<void> {
+  const result = control(directory);
+  mkdirSync(path.dirname(result.location.admin), { recursive: true });
+  const server = http.createServer((request, response) => {
+    response
+      .writeHead(request.url === "/pool" ? (reply.status ?? 200) : 404)
+      .end(reply.body);
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(result.location.admin, resolve);
+  });
+  onTestFinished(async () => {
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+  });
+}
+
+const usableAnswer = {
+  state: "usable",
+  reason: null,
+  accounts: [
+    {
+      name: "alpha",
+      held: true,
+      heldUntil: 1_800_000_000_000,
+      buckets: [{ bucket: "5h", utilization: 0.5, expires: 1_800_000_001_000 }],
+    },
+  ],
+};
+
+test("pool returns the answer of the daemon", async () => {
+  const directory = root();
+  await answering(directory, { body: JSON.stringify(usableAnswer) });
+  assert.deepEqual(await control(directory).pool(), usableAnswer);
+  const other = root();
+  await answering(other, {
+    body: JSON.stringify({ state: "unconfigured", reason: null, accounts: [] }),
+  });
+  assert.deepEqual(await control(other).pool(), {
+    state: "unconfigured",
+    reason: null,
+    accounts: [],
+  });
+  const third = root();
+  await answering(third, {
+    body: JSON.stringify({
+      state: "unusable",
+      reason: "account alpha is not a regular file",
+      accounts: [],
+    }),
+  });
+  assert.equal(
+    (await control(third).pool()).reason,
+    "account alpha is not a regular file",
+  );
+});
+
+test("pool fails without a daemon and when the daemon refuses", async () => {
+  await assert.rejects(control(root()).pool());
+  const directory = root();
+  await answering(directory, { status: 503, body: "" });
+  await assert.rejects(
+    control(directory).pool(),
+    /gateway administration failed/,
+  );
+});
+
+test("pool fails when the daemon closes the connection before its answer is complete", async () => {
+  const directory = root();
+  const result = control(directory);
+  mkdirSync(path.dirname(result.location.admin), { recursive: true });
+  const server = net.createServer((socket) => {
+    socket.once("data", () => {
+      socket.end('HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{"state":');
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(result.location.admin, resolve);
+  });
+  onTestFinished(async () => {
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+  });
+  await assert.rejects(result.pool(), /answer was cut off/);
+});
+
+test("pool says that a daemon which does not know the route is older than this cog", async () => {
+  const directory = root();
+  await answering(directory, { status: 404, body: "" });
+  await assert.rejects(
+    control(directory).pool(),
+    /the running gateway is older than this cog; run \.\/install\.sh/,
+  );
+});
+
+const malformed: [string, string, RegExp][] = [
+  ["text", "not json", /invalid JSON/],
+  ["an array", "[]", /invalid pool state/],
+  ["null", "null", /invalid pool state/],
+  [
+    "an unknown state",
+    JSON.stringify({ ...usableAnswer, state: "broken" }),
+    /invalid pool state/,
+  ],
+  [
+    "no accounts list",
+    JSON.stringify({ state: "usable", reason: null }),
+    /invalid pool state/,
+  ],
+  [
+    "a reason with a usable pool",
+    JSON.stringify({ ...usableAnswer, reason: "why" }),
+    /invalid pool reason/,
+  ],
+  [
+    "an unusable pool without a reason",
+    JSON.stringify({ state: "unusable", reason: null, accounts: [] }),
+    /invalid pool reason/,
+  ],
+  [
+    "accounts of an unusable pool",
+    JSON.stringify({ ...usableAnswer, state: "unusable", reason: "why" }),
+    /cannot use/,
+  ],
+  [
+    "an account with a name that is not allowed",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], name: "../x" }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "an account that is held in a string",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], held: "yes" }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "a hold until a string",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], heldUntil: "soon" }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "buckets that are not a list",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], buckets: {} }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "a bucket with a utilization that is a string",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [
+        {
+          ...usableAnswer.accounts[0],
+          buckets: [{ bucket: "5h", utilization: "0.5", expires: 1 }],
+        },
+      ],
+    }),
+    /invalid pool bucket/,
+  ],
+];
+
+for (const [name, body, message] of malformed) {
+  test(`pool rejects an answer with ${name}`, async () => {
+    const directory = root();
+    await answering(directory, { body });
+    await assert.rejects(control(directory).pool(), message);
+  });
+}
+
+test("pool rejects an answer that is larger than a megabyte", async () => {
+  const directory = root();
+  await answering(directory, { body: " ".repeat(1_048_577) });
+  await assert.rejects(control(directory).pool(), /too big/);
+});
+
+test("pool shows no field that the daemon added", async () => {
+  const directory = root();
+  await answering(directory, {
+    body: JSON.stringify({
+      ...usableAnswer,
+      token: "extra",
+      accounts: [{ ...usableAnswer.accounts[0], token: "extra" }],
+    }),
+  });
+  const answer = await control(directory).pool();
+  assert.ok(!JSON.stringify(answer).includes("extra"));
 });

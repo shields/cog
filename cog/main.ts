@@ -19,6 +19,7 @@ import { gatewayCommand } from "./commands/gateway.ts";
 import type { Context } from "./commands/context.ts";
 import { claudeToken, grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
+import { poolCommand } from "./commands/pool.ts";
 import { authorize, edit, logs, revoke, show } from "./commands/policy.ts";
 import { dotfilesRepo, loadConfig, type Config, type Env } from "./config.ts";
 import { CogError, exitStatus } from "./errors.ts";
@@ -58,6 +59,8 @@ function usage(config: Config): string {
                               the removal of a VM's registration
        cog cloud config|authorize|new|list|show|start|logs|events|grant|revoke|rm
                               administer Cloudflare containers
+       cog pool add NAME | rm NAME | list | status
+                              keep Claude pool tokens in the gateway, one per account
        cog claude-token       keep the token that claude setup-token prints, for every later new
        cog rm NAME            delete a VM (${base} is refused)
        cog list               list the VMs
@@ -152,6 +155,9 @@ async function dispatch(
       return 0;
     case "gateway":
       await gatewayCommand(args, context);
+      return 0;
+    case "pool":
+      await poolCommand(args, context);
       return 0;
     case "cloud":
       say(JSON.stringify(await cloudCommand(args, context.config), null, 2));

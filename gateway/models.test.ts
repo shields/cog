@@ -197,6 +197,27 @@ test("a request that the two sides could frame differently is refused", () => {
       [...placeholder, "Content-Length", "2", "Transfer-Encoding", "chunked"],
       "refused",
     ],
+    ["chunked in another case", ["Transfer-Encoding", "Chunked"], "direct"],
+    [
+      "two Transfer-Encoding lines",
+      ["Transfer-Encoding", "chunked", "transfer-encoding", "chunked"],
+      "refused",
+    ],
+    [
+      "a coding besides chunked",
+      ["Transfer-Encoding", "gzip, chunked"],
+      "refused",
+    ],
+    [
+      "a coding that is not chunked",
+      ["Transfer-Encoding", "identity"],
+      "refused",
+    ],
+    [
+      "a pooled request with a coding besides chunked",
+      [...placeholder, "Transfer-Encoding", "gzip, chunked"],
+      "refused",
+    ],
   ];
   for (const [name, headers, expected] of cases) {
     assert.equal(classify("/x", [...host, ...headers]), expected, name);

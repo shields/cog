@@ -90,8 +90,15 @@ function checkRequest(target: string, pairs: [string, string][]): void {
     deny("request must have exactly one Host header");
   }
   const lengths = valuesOf(pairs, "content-length").length;
-  const codings = valuesOf(pairs, "transfer-encoding").length;
-  if (lengths > 1 || (lengths === 1 && codings > 0)) {
+  const codings = valuesOf(pairs, "transfer-encoding");
+  // The runtime frames a body as chunked by itself, so any coding that the
+  // client lists besides a single chunked would be dropped on the way.
+  if (
+    lengths > 1 ||
+    (lengths === 1 && codings.length > 0) ||
+    codings.length > 1 ||
+    codings.some((coding) => coding.toLowerCase() !== "chunked")
+  ) {
     deny("request framing is ambiguous");
   }
   // A header that Connection names is removed by a proxy, which would let a

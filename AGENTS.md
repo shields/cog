@@ -75,11 +75,16 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   a body-less request that would otherwise go out chunked. The target is sent
   as written and bodies are streamed unparsed. `gateway/pool.ts` reads
   `claude-pool/` in the secrets directory, one file per account, at start and
-  on `/sync`, which `register` and `disable` request; a missing directory means
-  no pool, one bad entry disables the pool, and either way the pool route
-  answers 503. Each VM gets a stable account order and stays on an account
-  until the rate-limit headers show it near its limit or rejected. Each VM has
-  its own upstream keep-alive agent.
+  on `/sync`, which `register` and `disable` request; a missing or empty
+  directory means no pool, one bad entry disables the pool, and either way the
+  pool route answers 503. Each VM gets a stable account order and stays on an
+  account until the rate-limit headers show it near its limit or rejected. Each
+  VM has its own upstream keep-alive agent. `cog/commands/pool.ts` holds
+  `cog pool`, whose `add` and `rm` change that directory and ask the daemon to
+  reload;
+  `GET /pool` on the admin socket (`Control.pool`) reports the state and each
+  account's hold and readings, never a token, and `list` reads the directory
+  with the loader.
   Bun's HTTP server groups response header lines of one name next to the first
   and respells later ones, so duplicates keep their values and count but not
   their exact order.
@@ -107,11 +112,14 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
 
 No secret may reach an argument list, an environment, a log or a message. The
 Claude token, Codex login and Fireworks key go to `guest/setup-secrets NAME` on
-stdin, and the CA to `setup-github-gateway`'s stdin. `cog new` upgrades the
-agents before it installs any secret. Rollback starts after a successful clone
-and ends before opening the interactive shell. A setup failure or signal in
-that interval disables the registration and deletes the VM. The staged dotfiles tree, its history and `guest/` are scanned with
-gitleaks before anything enters a guest. Every `limactl` call
+stdin, and the CA to `setup-github-gateway`'s stdin. `cog pool add` reads a
+pool token like `claude-token` and creates the file exclusively with mode 600
+by a dot-named temporary and a link, so the loader never sees a partial entry.
+`cog new` upgrades the agents before it installs any secret. Rollback starts
+after a successful clone and ends before opening the interactive shell. A setup
+failure or signal in that interval disables the registration and deletes the VM.
+The staged dotfiles tree, its history and `guest/` are scanned with gitleaks
+before anything enters a guest. Every `limactl` call
 reads `/dev/null` unless a pipe or file is meant for it, or it is the final
 shell, so that none swallows what was typed for the shell; `tests/test_cog.zsh`
 holds a line in cog's stdin and checks that only the final shell reads it.

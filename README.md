@@ -297,8 +297,9 @@ the retained history.
 
 ## Other secrets
 
-Every secret travels over stdin to `/usr/local/lib/cog/setup-secrets NAME`, in
-the guest, and never in an argument list, an environment or a message.
+Every secret that goes to a guest travels over stdin to
+`/usr/local/lib/cog/setup-secrets NAME`, in the guest, and never in an argument
+list, an environment or a message.
 
 ### Claude Code
 
@@ -314,6 +315,30 @@ Claude's sandbox on the Mac denies reads under `~/.config/secrets`. It is never
 taken from the command line or the environment. An empty answer is an error;
 `--no-claude-token` skips the token, file or prompt, for a VM where you will run
 `claude auth login`.
+
+### The Claude pool
+
+The gateway can hold several Claude accounts, and their tokens stay on the Mac.
+Make one token for each account with `claude setup-token`, then add it with
+`cog pool add NAME` (NAME is 1 to 32 lowercase letters, digits and hyphens,
+starting with a letter or digit). It asks for the token the way
+`cog claude-token` does, stores it in `~/.config/secrets/cog/claude-pool/NAME`
+(directory 0700, file 0600), and tells the running gateway to reload the
+directory. `cog pool rm NAME` removes an account and reloads. `cog pool list`
+prints the names, and works without the gateway. `cog pool status` asks the
+gateway for each account's hold and its rate-limit utilization and reset times
+(UTC), and fails with the reason when the pool is configured but unusable.
+
+`add` refuses a name that exists, so run `rm` first to replace a token. When the
+gateway cannot be reached, `add` and `rm` exit non-zero and say that the change
+is on disk; start the gateway and run `cog pool status`. A gateway from an
+older install does not know the pool: run `./install.sh` again. One bad entry
+makes the whole pool unusable, so use these commands rather than editing the
+directory.
+
+Guests do not use the pool yet; that comes later. Use only the inference-only
+token that `claude setup-token` makes, because the gateway forwards any path
+with it.
 
 ### The rest
 

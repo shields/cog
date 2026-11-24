@@ -119,6 +119,48 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
       statSync(path.join(root, "state", "admin.sock")).mode & 0o077,
       0,
     );
+    const attempt = (
+      args: string[],
+      extra: NodeJS.ProcessEnv = {},
+    ): SpawnSyncReturns<string> =>
+      spawnSync(process.execPath, [bundle, ...args], {
+        env: { ...environment, ...extra },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+    const unusable = attempt(["pool", "status"]);
+    assert.equal(unusable.status, 1);
+    assert.equal(unusable.stdout, "");
+    assert.equal(
+      unusable.stderr,
+      "cog: the Claude pool is not usable: account work is accessible to group or other\n",
+    );
+    assert.equal(attempt(["pool", "list"]).status, 1);
+    chmodSync(accountFile, 0o600);
+    assert.equal(call(["pool", "list"]), "work\n");
+    const typed = path.join(root, "typed");
+    writeFileSync(typed, "sk-ant-oat01-cli-test-added\n");
+    const added = attempt(["pool", "add", "bravo"], {
+      COG_PROMPT_INPUT: typed,
+    });
+    assert.equal(added.status, 0, added.stderr);
+    assert.match(added.stdout, /the token for bravo is saved in .*2 account/);
+    assert.ok(!added.stdout.includes("cli-test"));
+    assert.equal(call(["pool", "list"]), "bravo\nwork\n");
+    const lines = call(["pool", "status"]).trim().split("\n");
+    assert.deepEqual(
+      lines,
+      ["bravo", "work"].map(
+        (name) => `${name}; not held; no rate-limit reading`,
+      ),
+    );
+    const again = attempt(["pool", "add", "bravo"], {
+      COG_PROMPT_INPUT: typed,
+    });
+    assert.equal(again.status, 1);
+    assert.match(again.stderr, /run cog pool rm bravo first/);
+    assert.match(call(["pool", "rm", "bravo"]), /account bravo is removed/);
+    assert.equal(call(["pool", "list"]), "work\n");
     const instance = await control.register("lima:trial", lima);
     assert.match(instance.id, /^[0-9a-f-]{36}$/);
     assert.match(instance.socket, /\/sock\/github-[0-9a-f-]{36}\.sock$/);
@@ -561,6 +603,10 @@ test("help prints the usage to stdout and exits 0", () => {
     assert.equal(result.stderr, "");
     assert.match(result.stdout, /^usage: cog base /);
     assert.match(result.stdout, /cog gateway serve\|health\|disable NAME/);
+    assert.match(
+      result.stdout,
+      /cog pool add NAME \| rm NAME \| list \| status/,
+    );
     assert.match(result.stdout, /cog-base/);
   }
   const renamed = run(["help"], { COG_BASE: "other-base" });
@@ -598,12 +644,18 @@ test("lifecycle verbs reject invalid arguments before using a VM", () => {
     [["new", "invalid name"], "invalid VM name: invalid name"],
     [["grant"], "usage: cog grant NAME [OWNER/REPO] [--profile read|cog]"],
     [["claude-token", "x"], "usage: cog claude-token"],
+    [["pool"], "usage: cog pool add NAME | rm NAME | list | status"],
+    [["pool", "add", "Bad"], /^cog: the account name must be/],
     [["rm"], "usage: cog rm NAME"],
     [["list", "x"], "usage: cog list"],
   ] as const) {
     const result = run([...args]);
     assert.equal(result.status, 1, args.join(" "));
-    assert.equal(result.stderr, `cog: ${message}\n`);
+    if (typeof message === "string") {
+      assert.equal(result.stderr, `cog: ${message}\n`);
+    } else {
+      assert.match(result.stderr, message);
+    }
   }
 });
 
