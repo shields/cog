@@ -12,12 +12,47 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { PolicyError } from "./policy.ts";
+import { PolicyError, type Operation } from "./policy.ts";
 
 export const claudeHost = "api.anthropic.com";
+export const fireworksHost = "api.fireworks.ai";
 export const placeholderCredential = "cog";
 
-export type ModelRoute = "pool" | "direct";
+// "placeholder" is a request that carries the placeholder credential, which
+// the gateway replaces with the host's own.
+export type ModelRoute = "placeholder" | "direct";
+
+export interface ModelHost {
+  readonly host: string;
+  readonly upstream: string;
+  readonly upstreamOption: "anthropicUpstream" | "fireworksUpstream";
+  readonly operation: Extract<Operation, `model.${string}`>;
+  // Where the credential for a placeholder request comes from.
+  readonly credential: "pool" | "key file";
+}
+
+// Dispatch is on the Host header, and each host's credential is resolved from
+// its own entry, so one host's credential cannot reach another's upstream.
+export const modelHosts: readonly ModelHost[] = [
+  {
+    host: claudeHost,
+    upstream: `https://${claudeHost}`,
+    upstreamOption: "anthropicUpstream",
+    operation: "model.claude",
+    credential: "pool",
+  },
+  {
+    host: fireworksHost,
+    upstream: `https://${fireworksHost}`,
+    upstreamOption: "fireworksUpstream",
+    operation: "model.fireworks",
+    credential: "key file",
+  },
+];
+
+export function modelHostFor(host: string | undefined): ModelHost | undefined {
+  return modelHosts.find((candidate) => candidate.host === host);
+}
 
 // Header names and values in the order and spelling of IncomingMessage's
 // rawHeaders, which keeps duplicates that the collapsed headers object merges
@@ -123,11 +158,9 @@ function route(pairs: [string, string][]): ModelRoute {
     bearers.length !== 1 ||
     bearers[0] !== `Bearer ${placeholderCredential}`
   ) {
-    deny(
-      "this VM reaches the Claude pool only with the placeholder credential",
-    );
+    deny("this VM may send only the placeholder credential");
   }
-  return "pool";
+  return "placeholder";
 }
 
 export function classifyModel(

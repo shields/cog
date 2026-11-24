@@ -48,9 +48,10 @@ export type PoolContext = Pick<Context, "config" | "prompt"> & {
 export interface PoolIo {
   readonly say: (text: string) => void;
   readonly link: (existing: string, created: string) => void;
+  readonly close: (descriptor: number) => void;
 }
 
-const realIo: PoolIo = { say, link: linkSync };
+const realIo: PoolIo = { say, link: linkSync, close: closeSync };
 
 const usage = "usage: cog pool add NAME | rm NAME | list | status";
 
@@ -70,6 +71,25 @@ function validAccount(name: string | undefined, rest: string[]): string {
   if (!accountName.test(name)) {
     throw new CogError(
       `the account name must be 1 to 32 lowercase letters, digits and hyphens, starting with a letter or digit (${accountName.source})`,
+    );
+  }
+  return name;
+}
+
+// A stray entry that the loader refuses has a name that no account may have, so
+// removal takes any plain file name in the pool directory.
+function existingEntry(name: string | undefined, rest: string[]): string {
+  if (name === undefined || rest.length > 0) {
+    throw new CogError(usage);
+  }
+  if (
+    name === "" ||
+    name === "." ||
+    name === ".." ||
+    path.basename(name) !== name
+  ) {
+    throw new CogError(
+      "NAME must be an account name or the plain file name of an entry in the pool directory",
     );
   }
   return name;
@@ -121,6 +141,14 @@ function createDirectory(directory: string): void {
   }
 }
 
+function attempt(cleanup: () => void): void {
+  try {
+    cleanup();
+  } catch {
+    // The write failed first, and its error is the one that is reported.
+  }
+}
+
 // The entry appears complete and with mode 600, or not at all. The temporary
 // name starts with a dot, which the loader skips, so a crash cannot leave an
 // entry that disables the pool. The link fails rather than replace an entry.
@@ -141,19 +169,21 @@ function writeAccount(
     fchmodSync(descriptor, 0o600);
     writeAll(descriptor, toBytes(`${token}\n`));
     fsyncSync(descriptor);
-    closeSync(descriptor);
+    const written = descriptor;
     descriptor = undefined;
+    io.close(written);
     io.link(temporary, entry);
     unlinkSync(temporary);
   } catch (error) {
-    try {
-      if (descriptor !== undefined) {
-        closeSync(descriptor);
-      }
-      unlinkSync(temporary);
-    } catch {
-      // The write failed first, and its error is the one that is reported.
+    const unclosed = descriptor;
+    if (unclosed !== undefined) {
+      attempt(() => {
+        io.close(unclosed);
+      });
     }
+    attempt(() => {
+      unlinkSync(temporary);
+    });
     if (code(error) === "EEXIST") {
       throw exists(name);
     }
@@ -234,7 +264,7 @@ async function remove(
   io: PoolIo,
 ): Promise<void> {
   const [first, ...rest] = args;
-  const name = validAccount(first, rest);
+  const name = existingEntry(first, rest);
   const directory = context.gateway().location.pool;
   const entry = path.join(directory, name);
   const status = lstatOrNull(entry);

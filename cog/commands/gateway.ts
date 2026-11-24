@@ -30,6 +30,7 @@ async function serve(args: string[], context: Context): Promise<void> {
     ...control.certificates(),
     adminSocket: control.location.admin,
     pool: control.location.pool,
+    fireworksKeyFile: context.config.fireworksKeyFile,
   });
   await gateway.start();
   await new Promise<void>((resolve) => {

@@ -20,6 +20,8 @@ import {
   isReplayable,
   ModelDenied,
   modelRefusal,
+  modelHostFor,
+  modelHosts,
   modelRequestHeaders,
   modelResponseHeaders,
   needsExplicitLength,
@@ -89,10 +91,10 @@ test("the exact health target is answered locally, and nothing else is", () => {
 test("credentials are classified on the raw header lines", () => {
   const cases: [string, string[], string][] = [
     ["no credential", [], "direct"],
-    ["the placeholder", placeholder, "pool"],
-    ["lower-case name", ["authorization", "Bearer cog"], "pool"],
-    ["upper-case name", ["AUTHORIZATION", "Bearer cog"], "pool"],
-    ["mixed-case name", ["AuThOrIzAtIoN", "Bearer cog"], "pool"],
+    ["the placeholder", placeholder, "placeholder"],
+    ["lower-case name", ["authorization", "Bearer cog"], "placeholder"],
+    ["upper-case name", ["AUTHORIZATION", "Bearer cog"], "placeholder"],
+    ["mixed-case name", ["AuThOrIzAtIoN", "Bearer cog"], "placeholder"],
     ["lower-case scheme", ["Authorization", "bearer cog"], "refused"],
     ["upper-case scheme", ["Authorization", "BEARER cog"], "refused"],
     ["trailing space", ["Authorization", "Bearer cog "], "refused"],
@@ -236,9 +238,9 @@ test("TRACE and a chunked body on a method that the client sends unframed are re
     ["DELETE", [...placeholder, ...chunked], "refused"],
     ["DELETE", ["Content-Length", "2"], "direct"],
     ["DELETE", [], "direct"],
-    ["OPTIONS", [...placeholder, "Content-Length", "2"], "pool"],
+    ["OPTIONS", [...placeholder, "Content-Length", "2"], "placeholder"],
     ["POST", chunked, "direct"],
-    ["PUT", [...placeholder, ...chunked], "pool"],
+    ["PUT", [...placeholder, ...chunked], "placeholder"],
     ["PATCH", chunked, "direct"],
     ["TRACE", [], "refused"],
     ["trace", ["Content-Length", "2"], "refused"],
@@ -255,11 +257,11 @@ test("TRACE and a chunked body on a method that the client sends unframed are re
 
 test("a Connection header may name only hop-by-hop headers, so it cannot have a checked header withheld", () => {
   const cases: [string, string][] = [
-    ["close", "pool"],
-    ["keep-alive", "pool"],
-    ["Keep-Alive, TE", "pool"],
-    ["Upgrade", "pool"],
-    ["close,, ", "pool"],
+    ["close", "placeholder"],
+    ["keep-alive", "placeholder"],
+    ["Keep-Alive, TE", "placeholder"],
+    ["Upgrade", "placeholder"],
+    ["close,, ", "placeholder"],
     ["authorization", "refused"],
     ["close, Authorization", "refused"],
     ["host", "refused"],
@@ -565,4 +567,115 @@ test("a refusal is the provider's error shape with the right type for its status
       request_id: "req-1",
     });
   }
+});
+
+test("the model hosts are an explicit table that is matched on the exact Host value", () => {
+  assert.deepEqual(
+    modelHosts.map(({ host, upstream, operation, credential }) => [
+      host,
+      upstream,
+      operation,
+      credential,
+    ]),
+    [
+      [
+        "api.anthropic.com",
+        "https://api.anthropic.com",
+        "model.claude",
+        "pool",
+      ],
+      [
+        "api.fireworks.ai",
+        "https://api.fireworks.ai",
+        "model.fireworks",
+        "key file",
+      ],
+    ],
+  );
+  assert.equal(modelHostFor("api.fireworks.ai")?.operation, "model.fireworks");
+  assert.equal(modelHostFor("api.anthropic.com")?.operation, "model.claude");
+  for (const other of [
+    undefined,
+    "",
+    "github.com",
+    "api.fireworks.ai:443",
+    "API.FIREWORKS.AI",
+    "api.fireworks.ai.",
+    "fireworks.ai",
+    "x.api.fireworks.ai",
+  ]) {
+    assert.equal(modelHostFor(other), undefined, String(other));
+  }
+});
+
+test("the Fireworks host is held to the same request rules", () => {
+  const fireworksHost = ["Host", "api.fireworks.ai"];
+  const cases: [string, string[], string, string][] = [
+    ["/inference/v1/messages?beta=true", [], "POST", "direct"],
+    ["/inference/api/hello", [], "HEAD", "direct"],
+    ["/inference/v1/messages", placeholder, "POST", "placeholder"],
+    [
+      "/inference/v1/messages",
+      ["Authorization", "Bearer x"],
+      "POST",
+      "refused",
+    ],
+    ["/inference/v1/messages", ["x-api-key", "k"], "POST", "refused"],
+    [
+      "/inference/v1/messages",
+      [...placeholder, "x-api-key", "k"],
+      "POST",
+      "refused",
+    ],
+    [
+      "/inference/v1/messages",
+      [...placeholder, "Connection", "authorization"],
+      "POST",
+      "refused",
+    ],
+    ["/inference/v1/messages", placeholder, "TRACE", "refused"],
+    [
+      "/inference/v1/messages",
+      [...placeholder, "Transfer-Encoding", "chunked"],
+      "GET",
+      "refused",
+    ],
+    ["inference/v1/messages", [], "POST", "refused"],
+    ["/__cog__/health", [], "GET", "health"],
+  ];
+  for (const [target, headers, method, expected] of cases) {
+    assert.equal(
+      classify(target, [...fireworksHost, ...headers], method),
+      expected,
+      `${method} ${target} ${headers.join(" ")}`,
+    );
+  }
+  assert.equal(
+    classify("/x", [...fireworksHost, "Host", "api.fireworks.ai"]),
+    "refused",
+  );
+});
+
+test("a key replaces the placeholder in place, and everything else in the list stays", () => {
+  const key = "fw-made-up-one";
+  const incoming = [
+    "Host",
+    "api.fireworks.ai",
+    "X-A",
+    "1",
+    "aUtHoRiZaTiOn",
+    "Bearer cog",
+    "x-a",
+    "2",
+  ];
+  assert.deepEqual(modelRequestHeaders(incoming, key), [
+    "Host",
+    "api.fireworks.ai",
+    "X-A",
+    "1",
+    "aUtHoRiZaTiOn",
+    `Bearer ${key}`,
+    "x-a",
+    "2",
+  ]);
 });

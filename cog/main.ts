@@ -90,8 +90,9 @@ cli_auth_credentials_store = "file" in ~/.codex/config.toml, since with keyring
 or auto the login is in the OS credential store and no file exists.
 --no-codex-auth skips it, for a VM that will use codex login --device-auth.
 
-new also installs the Fireworks API key that cg uses from
-${fireworksKeyFile} when that file exists, and never asks for it.
+When ${fireworksKeyFile} exists, new checks it, wires api.fireworks.ai to the
+gateway and gives the VM only the placeholder cog: the key stays on this Mac,
+where the gateway reads the file for each request. new never asks for it.
 `;
 }
 

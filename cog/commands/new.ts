@@ -14,6 +14,7 @@
 
 import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { readKeyFile } from "../../gateway/key-file.ts";
 import { placeholderCredential } from "../../gateway/models.ts";
 import { grantProfiles } from "../../gateway/policy.ts";
 import type { Control, PoolStatus } from "../../gateway/control.ts";
@@ -28,12 +29,7 @@ import {
   tailscaleCredential,
 } from "../tailscale.ts";
 import { signals } from "../proc.ts";
-import {
-  fireworksKeyPresent,
-  readCodexAuth,
-  readFireworksKey,
-  toBytes,
-} from "../secrets.ts";
+import { fireworksKeyPresent, readCodexAuth, toBytes } from "../secrets.ts";
 import type { LifecycleContext } from "./context.ts";
 import { inferRepository } from "./lifecycle.ts";
 
@@ -146,6 +142,20 @@ async function requireUsablePool(
   }
 }
 
+// The key stays on the Mac: the gateway reads the file for each request, and
+// the guest gets only the placeholder. The messages never quote the file.
+function requireUsableFireworksKey(file: string): void {
+  const result = readKeyFile(file);
+  if (result.kind === "key") {
+    return;
+  }
+  throw new CogError(
+    result.kind === "missing"
+      ? `${file} is not a regular file; remove it`
+      : `${file} ${result.reason}; fix it or remove it`,
+  );
+}
+
 function cleanupNote(text: string): void {
   try {
     note(text);
@@ -224,9 +234,10 @@ export async function newVM(
   }
   const credential = tailscaleCredential(context.config.tailscaleFile);
   const codex = noCodex ? undefined : readCodexAuth(codexAuthFile);
-  const fireworks = fireworksKeyPresent(fireworksKeyFile)
-    ? readFireworksKey(fireworksKeyFile)
-    : undefined;
+  const fireworks = fireworksKeyPresent(fireworksKeyFile);
+  if (fireworks) {
+    requireUsableFireworksKey(fireworksKeyFile);
+  }
   if (!noClaude) {
     await requireUsablePool(gateway);
   }
@@ -306,23 +317,38 @@ export async function newVM(
       name,
       probe("10", "https://api.github.com/__cog__/health"),
     );
-    if (!noClaude) {
+    const models = [
+      ...(noClaude ? [] : ["claude"]),
+      ...(fireworks ? ["fireworks"] : []),
+    ];
+    if (models.length > 0) {
       try {
         await lima.shell(name, [
           "sudo",
           `${guestLib}/setup-model-gateway`,
-          "claude",
+          ...models,
         ]);
-        await lima.shell(
-          name,
-          probe("10", "https://api.anthropic.com/__cog__/health"),
-        );
+        if (!noClaude) {
+          await lima.shell(
+            name,
+            probe("10", "https://api.anthropic.com/__cog__/health"),
+          );
+        }
+        if (fireworks) {
+          await lima.shell(
+            name,
+            probe("10", "https://api.fireworks.ai/__cog__/health"),
+          );
+        }
       } catch (error) {
         if (!(error instanceof CommandFailed)) {
           throw error;
         }
+        const gatewayAge = fireworks
+          ? ", or the running gateway is older than this cog, so run ./install.sh"
+          : "";
         throw new CogError(
-          `${name} cannot reach Claude through the gateway; a base built by an older cog lacks this wiring, so run cog base again`,
+          `${name} cannot reach ${models.length > 1 ? "Claude and Fireworks" : noClaude ? "Fireworks" : "Claude"} through the gateway; a base built by an older cog lacks this wiring, so run cog base again${gatewayAge}`,
         );
       }
     }
@@ -366,7 +392,7 @@ export async function newVM(
       ["CODEX_AUTH", codex],
       [
         "FIREWORKS_API_KEY",
-        fireworks === undefined ? undefined : toBytes(`${fireworks}\n`),
+        fireworks ? toBytes(`${placeholderCredential}\n`) : undefined,
       ],
     ];
     for (const [key, bytes] of secrets) {

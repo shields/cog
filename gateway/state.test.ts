@@ -313,6 +313,33 @@ test("model requests are audited with no repository, and rows from before the mo
   });
 });
 
+test("a Fireworks model request is audited with its own operation", () => {
+  withState((state) => {
+    const instance = state.register(
+      "lima:work",
+      path.join(tmpdir(), "work.sock"),
+      "tester",
+    );
+    state.logDecision({
+      id: "model.fireworks",
+      instanceId: instance.id,
+      repository: null,
+      operation: "model.fireworks",
+      refs: [],
+      allowed: true,
+      reason: "fireworks key",
+      revision: 0,
+    });
+    state.finish("model.fireworks", 200, 3, "completed");
+    const [row, ...others] = state.logs(instance.id);
+    assert.deepEqual(others, []);
+    assert.equal(row?.operation, "model.fireworks");
+    assert.equal(row.reason, "fireworks key");
+    assert.equal(row.repository, null);
+    assert.equal(row.upstreamStatus, 200);
+  });
+});
+
 function insertEvent(state: State, id: string, createdAt: number): void {
   state.db
     .prepare(

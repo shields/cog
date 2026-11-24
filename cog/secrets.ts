@@ -105,20 +105,6 @@ export function fireworksKeyPresent(file: string): boolean {
   }
 }
 
-export function readFireworksKey(file: string): string {
-  if (!regularFile(file)) {
-    throw new CogError(`${file} is not a regular file; remove it`);
-  }
-  if (!readable(file)) {
-    throw new CogError(`cannot read ${file}`);
-  }
-  return setOneWord(
-    latin1(readFileSync(file)),
-    `${file} is empty; put the key in it, or remove it`,
-    `${file} holds more than one word; put only the key in it`,
-  );
-}
-
 // The bytes that are validated are the bytes that are sent. A parse error is
 // never reported, since it can quote the file.
 export function readCodexAuth(file: string): Uint8Array {

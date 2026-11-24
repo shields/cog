@@ -23,14 +23,17 @@ import https from "node:https";
 import { once } from "node:events";
 import { AppAuth } from "./auth.ts";
 import {
-  claudeHost,
   classifyModel,
+  hasNoBody,
   isReplayable,
+  modelHostFor,
   modelRefusal,
   modelRequestHeaders,
   modelResponseHeaders,
   needsExplicitLength,
+  type ModelHost,
 } from "./models.ts";
+import { readKeyFile } from "./key-file.ts";
 import {
   authorize,
   classify,
@@ -73,7 +76,17 @@ export interface GatewayOptions {
   apiUpstream?: string;
   pool?: string;
   anthropicUpstream?: string;
+  fireworksUpstream?: string;
+  fireworksKeyFile?: string;
 }
+
+interface ModelCredential {
+  token: string;
+  reason: string;
+  account: Account | null;
+}
+
+const fireworksUnusable = "the Fireworks key is not usable on the Mac";
 
 const forwardedHeaders = [
   "accept",
@@ -88,10 +101,10 @@ const forwardedHeaders = [
 
 const reasonPhrase = /^[\t\u{20}-\u{7E}]*$/u;
 
-class PoolUnavailable extends Error {
+class ModelUnavailable extends Error {
   constructor(reason: string) {
     super(reason);
-    this.name = "PoolUnavailable";
+    this.name = "ModelUnavailable";
   }
 }
 
@@ -251,6 +264,7 @@ export class Gateway {
   private pool: AccountPool | null = null;
   private lastPool: AccountPool | null = null;
   private poolReason: string | null = null;
+  private fireworksReason: string | null = null;
   private stopped = false;
   private starting: Promise<void> | null = null;
   private stopping: Promise<void> | null = null;
@@ -507,26 +521,33 @@ export class Gateway {
     this.listeners.clear();
     this.admin = null;
     await this.awaitHandlers();
-    for (const id of this.agents.keys()) {
-      this.destroyAgent(id);
+    for (const agent of this.agents.values()) {
+      agent.destroy();
     }
+    this.agents.clear();
   }
 
   private destroyAgent(instanceId: string): void {
-    this.agents.get(instanceId)?.destroy();
-    this.agents.delete(instanceId);
+    for (const scheme of ["http", "https"]) {
+      const key = `${instanceId} ${scheme}`;
+      this.agents.get(key)?.destroy();
+      this.agents.delete(key);
+    }
   }
 
   private agentFor(instanceId: string, secure: boolean): http.Agent {
     if (this.stopped || !this.listeners.has(instanceId)) {
       throw new Error("the VM's listener is closed");
     }
-    let agent = this.agents.get(instanceId);
+    // An agent has one scheme, so a VM has one for each scheme that its
+    // upstreams use.
+    const key = `${instanceId} ${secure ? "https" : "http"}`;
+    let agent = this.agents.get(key);
     if (agent === undefined) {
       agent = secure
         ? new https.Agent({ keepAlive: true })
         : new http.Agent({ keepAlive: true });
-      this.agents.set(instanceId, agent);
+      this.agents.set(key, agent);
     }
     return agent;
   }
@@ -555,11 +576,12 @@ export class Gateway {
       const host = request.headers.host?.toLowerCase();
       const target = request.url ?? "";
       const method = request.method ?? "";
-      if (host === claudeHost) {
+      const model = modelHostFor(host);
+      if (model !== undefined) {
         modelHost = true;
         classification = {
           repository: null,
-          operation: "model.claude",
+          operation: model.operation,
           refs: [],
         };
         const route = classifyModel(method, target, request.rawHeaders);
@@ -573,18 +595,10 @@ export class Gateway {
           throw new PolicyError("VM access has been revoked");
         }
         revision = current.revision;
-        let account: Account | null = null;
-        if (route.kind === "forward" && route.route === "pool") {
-          if (this.pool === null) {
-            // A load failure can name an account, which a guest is not told.
-            throw new PoolUnavailable(
-              this.poolReason === unconfiguredReason
-                ? unconfiguredReason
-                : "the Claude pool is not usable",
-            );
-          }
-          account = this.pool.choose(instanceId, Date.now());
-        }
+        const credential =
+          route.kind === "forward" && route.route === "placeholder"
+            ? this.credentialFor(model, instanceId)
+            : null;
         if (route.kind === "health") {
           classification.operation = "public.read";
         }
@@ -598,9 +612,7 @@ export class Gateway {
           reason:
             route.kind === "health"
               ? "anonymous read"
-              : account === null
-                ? "no credential"
-                : `pool account ${account.name}`,
+              : (credential?.reason ?? "no credential"),
           revision,
         });
         logged = true;
@@ -611,7 +623,8 @@ export class Gateway {
           settlement = await this.forwardModel(
             request,
             response,
-            account,
+            model,
+            credential,
             instanceId,
             target,
             remaining,
@@ -718,7 +731,7 @@ export class Gateway {
       // connection closes before the body ends.
       const aborted = error === request.errored;
       const refusal =
-        error instanceof PolicyError || error instanceof PoolUnavailable
+        error instanceof PolicyError || error instanceof ModelUnavailable
           ? error
           : null;
       if (!aborted && refusal === null) {
@@ -863,19 +876,52 @@ export class Gateway {
     );
   }
 
+  // Each host's credential comes only from its own source, and a fault in one
+  // source stops only that host's credentialed requests.
+  private credentialFor(model: ModelHost, instanceId: string): ModelCredential {
+    if (model.credential === "pool") {
+      if (this.pool === null) {
+        // A load failure can name an account, which a guest is not told.
+        throw new ModelUnavailable(
+          this.poolReason === unconfiguredReason
+            ? unconfiguredReason
+            : "the Claude pool is not usable",
+        );
+      }
+      const account = this.pool.choose(instanceId, Date.now());
+      return {
+        token: account.token,
+        reason: `pool account ${account.name}`,
+        account,
+      };
+    }
+    const file = this.options.fireworksKeyFile;
+    const result =
+      file === undefined ? ({ kind: "missing" } as const) : readKeyFile(file);
+    if (result.kind === "key") {
+      this.fireworksReason = null;
+      return { token: result.key, reason: "fireworks key", account: null };
+    }
+    const reason = result.kind === "missing" ? null : result.reason;
+    if (reason !== null && reason !== this.fireworksReason) {
+      process.stderr.write(`cog: Fireworks key file ${file ?? ""} ${reason}\n`);
+    }
+    this.fireworksReason = reason;
+    throw new ModelUnavailable(fireworksUnusable);
+  }
+
   // The target goes out as the request's path: a URL built from it would be
   // normalised, and the provider is to get the client's bytes.
   private forwardModel(
     incoming: IncomingMessage,
     response: ServerResponse,
-    account: Account | null,
+    model: ModelHost,
+    credential: ModelCredential | null,
     instanceId: string,
     target: string,
     remaining: AsyncIterator<Buffer>,
   ): Promise<Settlement> {
-    const base = new URL(
-      this.options.anthropicUpstream ?? `https://${claudeHost}`,
-    );
+    const base = new URL(this.options[model.upstreamOption] ?? model.upstream);
     if (
       (base.protocol !== "https:" && base.protocol !== "http:") ||
       base.username ||
@@ -888,7 +934,7 @@ export class Gateway {
     }
     const headers = modelRequestHeaders(
       incoming.rawHeaders,
-      account?.token ?? null,
+      credential?.token ?? null,
     );
     const method = incoming.method ?? "";
     if (needsExplicitLength(method, incoming.rawHeaders)) {
@@ -910,9 +956,9 @@ export class Gateway {
           agent: this.agentFor(instanceId, secure),
         }),
       (upstreamResponse) => {
-        if (account !== null) {
+        if (credential?.account) {
           pool?.observe(
-            account.name,
+            credential.account.name,
             upstreamResponse.statusCode ?? 0,
             upstreamResponse.rawHeaders,
             Date.now(),
@@ -949,7 +995,7 @@ export class Gateway {
     const abandon = (): void => {
       upstream?.destroy();
     };
-    const watching = !incoming.complete;
+    const watching = !incoming.complete && !hasNoBody(incoming.rawHeaders);
     if (watching) {
       incoming.socket.once("close", abandon);
     }
@@ -987,6 +1033,11 @@ export class Gateway {
           reject(error);
           current.destroy();
         };
+        // Bun's client emits neither "response" nor "error" for a 101 answer.
+        current.once("upgrade", (_response, upgraded) => {
+          upgraded.destroy();
+          fail(new Error("upstream tried to switch protocols"));
+        });
         current.once("response", (upstreamResponse) => {
           answered = true;
           upstreamStatus = upstreamResponse.statusCode ?? 502;

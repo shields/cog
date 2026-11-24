@@ -39,6 +39,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -248,7 +249,12 @@ async function startGateway(
     tls?: boolean;
     connection?: (socket: Socket) => void;
     githubOrigins?: boolean;
-    models?: { pool?: PoolSpec; anthropic?: string };
+    models?: {
+      pool?: PoolSpec;
+      anthropic?: string;
+      fireworks?: string;
+      fireworksKeyFile?: string;
+    };
   } | null = null,
 ): Promise<{
   root: string;
@@ -372,6 +378,12 @@ async function startGateway(
     ...(models?.anthropic === undefined
       ? {}
       : { anthropicUpstream: models.anthropic }),
+    ...(models?.fireworks === undefined
+      ? {}
+      : { fireworksUpstream: models.fireworks }),
+    ...(models?.fireworksKeyFile === undefined
+      ? {}
+      : { fireworksKeyFile: models.fireworksKeyFile }),
   });
   const created = spyOn(https, "createServer");
   const earlier = created.mock.results.length;
@@ -3903,6 +3915,64 @@ test("a reason phrase that cannot be relayed is dropped, and the client still ge
   assert.equal(github.body, "ok");
 });
 
+test("an upstream that answers 101 Switching Protocols gets a 503 and a gateway-error row, on both routes", async () => {
+  const provider = rawUpstream((socket) => {
+    socket.once("data", () => {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n",
+      );
+    });
+  });
+  defer(() => {
+    provider.closeAllConnections();
+    provider.close();
+  });
+  await new Promise<void>((resolve) => {
+    provider.listen(0, "127.0.0.1", resolve);
+  });
+  const address = provider.address();
+  assert.ok(address && typeof address !== "string");
+  captureStderr();
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: `http://127.0.0.1:${String(address.port)}` },
+  });
+  for (const headers of [poolHeaders, {}]) {
+    const reply = await within(
+      "the answer",
+      claude(socket, "GET", "/v1/models", headers),
+    );
+    assert.equal(reply.status, 503);
+    assert.equal(reply.headers["x-should-retry"], undefined);
+  }
+  assert.deepEqual(
+    state.logs(instance.id).map(({ outcome }) => outcome),
+    ["gateway-error", "gateway-error"],
+  );
+});
+
+test("a client that pipelines body-less requests draws no EventEmitter warning from the relay", async () => {
+  const stub = await startModelStub();
+  const warnings: string[] = [];
+  const onWarning = (warning: Error): void => {
+    warnings.push(warning.message);
+  };
+  process.on("warning", onWarning);
+  defer(() => {
+    process.off("warning", onWarning);
+  });
+  captureStderr();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const request = (close: boolean): string =>
+    `GET /v1/models HTTP/1.1\r\nHost: api.anthropic.com\r\nAuthorization: Bearer cog\r\n${close ? "Connection: close\r\n" : ""}\r\n`;
+  const reply = await exchange(
+    socket,
+    "api.anthropic.com",
+    request(false).repeat(30) + request(true),
+  );
+  assert.equal(reply.match(/^HTTP\/1\.1 200/gm)?.length, 31);
+  assert.deepEqual(warnings, []);
+});
+
 test("a compressed answer reaches the client as the provider's bytes with its content-encoding, on both routes", async () => {
   const plain = Buffer.from('{"hello":"world"}'.repeat(200));
   const compressed = gzipSync(plain);
@@ -4286,6 +4356,16 @@ test("the pool directory is read again when /sync is requested and not for each 
     claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
   assert.equal((await post()).status, 200);
   assert.equal(tokenSeen(lastRequest(stub)), "alpha");
+  const rank = (name: string): string =>
+    createHash("sha256").update(`${instance.id}\0${name}`).digest("hex");
+  let ahead = "ahead";
+  for (let n = 0; compareCodeUnits(rank(ahead), rank("alpha")) > 0; n += 1) {
+    ahead = `ahead-${String(n)}`;
+  }
+  writeFileSync(path.join(poolDirectory, ahead), tokens.bravo, { mode: 0o600 });
+  assert.equal((await post()).status, 200);
+  assert.equal(tokenSeen(lastRequest(stub)), "alpha");
+  rmSync(path.join(poolDirectory, ahead));
   writeFileSync(path.join(poolDirectory, "bravo"), tokens.bravo, {
     mode: 0o600,
   });
@@ -4561,7 +4641,7 @@ test("a body-less request that is not safe is not sent again after a reset on a 
   }
 });
 
-test("a request with no body is retried only once", async () => {
+test("a request with no body is sent again once after a reset on a reused connection, and not after a reset on the fresh one", async () => {
   const stub = await startModelStub((request, response, entry) => {
     if (stub.requests.length === 1) {
       replyOk(request, response, entry);
@@ -5145,4 +5225,837 @@ test("GET /pool changes only after /sync, keeping the readings of an account tha
   assert.equal(emptied.json.reason, null);
   assert.deepEqual(emptied.json.accounts, []);
   noSecrets(before.text, added.text, emptied.text);
+});
+
+const fireworksName = "api.fireworks.ai";
+const keys = {
+  one: "fw-made-up-one",
+  two: "fw-made-up-two",
+} as const;
+
+function fireworks(
+  socket: string,
+  method: string,
+  target: string,
+  headers: Record<string, string | string[]> = {},
+  body?: Buffer | string,
+): Promise<ModelReply> {
+  return modelClient(
+    socket,
+    method,
+    target,
+    { host: fireworksName, ...headers },
+    body,
+  ).response;
+}
+
+function keyFile(content: string | Buffer | null): string {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-key-"));
+  defer(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const file = path.join(directory, "FIREWORKS_API_KEY");
+  if (content !== null) {
+    writeFileSync(file, content);
+  }
+  return file;
+}
+
+async function startFireworks(
+  content: string | Buffer | null,
+  respond?: Parameters<typeof startModelStub>[0],
+  pool?: PoolSpec,
+): Promise<
+  Awaited<ReturnType<typeof startGateway>> & {
+    file: string;
+    provider: ModelStub;
+    anthropic: ModelStub;
+  }
+> {
+  const provider = await startModelStub(respond);
+  const anthropic = await startModelStub();
+  const file = keyFile(content);
+  const started = await startGateway({
+    models: {
+      anthropic: anthropic.origin,
+      fireworks: provider.origin,
+      fireworksKeyFile: file,
+      pool: pool ?? { alpha: tokens.alpha },
+    },
+  });
+  return { ...started, file, provider, anthropic };
+}
+
+function noKeys(...shown: unknown[]): void {
+  noSecrets(...shown);
+  const text = JSON.stringify(shown);
+  for (const key of Object.values(keys)) {
+    assert.ok(!text.includes(key), "a key is shown");
+  }
+}
+
+const unavailable = "the Fireworks key is not usable on the Mac";
+
+test("a Fireworks request with the placeholder reaches Fireworks with the key in the Authorization line's place and spelling, and the rest of the list as sent", async () => {
+  const { socket, instance, state, provider, anthropic } = await startFireworks(
+    ` ${keys.one}\r\n`,
+  );
+  const stderr = captureStderr();
+  const audit = recordFinishes(state);
+  const reply = await exchange(
+    socket,
+    fireworksName,
+    "POST /inference/v1/messages?beta=true HTTP/1.1\r\n" +
+      "Host: api.fireworks.ai\r\n" +
+      "X-Dup: one\r\n" +
+      "aUtHoRiZaTiOn: Bearer cog\r\n" +
+      "x-dup: two\r\n" +
+      "Cookie: session=guest\r\n" +
+      "User-Agent: claude-cli/2.1 (external, cli)\r\n" +
+      "Connection: close, TE\r\n" +
+      "TE: trailers\r\n" +
+      "Content-Length: 2\r\n" +
+      "X-Same: 1\r\n" +
+      "X-Same: 2\r\n\r\n{}",
+  );
+  assert.equal(statusOf(reply), 200);
+  assert.equal(anthropic.requests.length, 0);
+  const [seen] = provider.requests;
+  assert.ok(seen);
+  assert.equal(seen.method, "POST");
+  assert.equal(seen.url, "/inference/v1/messages?beta=true");
+  assert.deepEqual(pairsOf(seen.rawHeaders), [
+    "Host: api.fireworks.ai",
+    "X-Dup: one",
+    `aUtHoRiZaTiOn: Bearer ${keys.one}`,
+    "x-dup: two",
+    "Cookie: session=guest",
+    "User-Agent: claude-cli/2.1 (external, cli)",
+    "Content-Length: 2",
+    "X-Same: 1",
+    "X-Same: 2",
+    "Connection: keep-alive",
+  ]);
+  assert.equal(seen.body.toString(), "{}");
+  await within("the audit row", audit.first);
+  const [row, ...others] = state.logs(instance.id);
+  assert.deepEqual(others, []);
+  assert.equal(row?.operation, "model.fireworks");
+  assert.equal(row.repository, null);
+  assert.equal(row.allowed, true);
+  assert.equal(row.reason, "fireworks key");
+  assert.equal(row.outcome, "completed");
+  assert.equal(row.upstreamStatus, 200);
+  noKeys(state.logs(instance.id), stderr, reply);
+  assert.deepEqual(stderr, []);
+});
+
+test("a Fireworks request with no Authorization is forwarded as sent, whether or not the key file exists", async () => {
+  for (const content of [keys.one, null]) {
+    const { socket, instance, state, provider } = await startFireworks(content);
+    const audit = recordFinishes(state);
+    const reply = await fireworks(socket, "HEAD", "/inference/api/hello", {
+      "X-Dup": ["one", "two"],
+      Cookie: "session=guest",
+    });
+    assert.equal(reply.status, 200);
+    const [seen] = provider.requests;
+    assert.ok(seen);
+    assert.equal(seen.url, "/inference/api/hello");
+    assert.deepEqual(headerValues(seen.rawHeaders, "authorization"), []);
+    assert.deepEqual(headerValues(seen.rawHeaders, "x-dup"), ["one", "two"]);
+    await within("the audit row", audit.first);
+    const [row, ...others] = state.logs(instance.id);
+    assert.deepEqual(others, []);
+    assert.equal(row?.operation, "model.fireworks");
+    assert.equal(row.allowed, true);
+    assert.equal(row.reason, "no credential");
+  }
+});
+
+test("Fireworks targets reach the provider as written", async () => {
+  const { socket, provider } = await startFireworks(keys.one);
+  const targets = [
+    "/inference/v1/messages?beta=true",
+    "/inference/api/hello",
+    "//x",
+    "/inference/p%2fq/%7e?a={b}&c=%zz",
+  ];
+  for (const target of targets) {
+    for (const headers of [poolHeaders, {}]) {
+      assert.equal(
+        (await fireworks(socket, "POST", target, headers, "{}")).status,
+        200,
+        target,
+      );
+    }
+  }
+  assert.deepEqual(
+    provider.requests.map(({ url }) => url),
+    targets.flatMap((target) => [target, target]),
+  );
+});
+
+test("a Fireworks event stream, its status and its reason phrase reach the client as they come", async () => {
+  const release = signal();
+  const { socket, provider } = await startFireworks(
+    keys.one,
+    (_request, response, entry) => {
+      void entry.ended.then(async () => {
+        response.writeHead(207, "Partly Fine", {
+          "content-type": "text/event-stream",
+          "x-fireworks-note": "kept",
+        });
+        response.write("data: 1\n\n");
+        await release.promise;
+        response.end("data: 2\n\n");
+      });
+    },
+  );
+  const client = modelClient(
+    socket,
+    "POST",
+    "/inference/v1/messages",
+    { host: fireworksName, ...poolHeaders },
+    "{}",
+  );
+  await within("the first event", client.firstData);
+  release.resolve();
+  const reply = await client.response;
+  assert.equal(reply.status, 207);
+  assert.equal(reply.statusMessage, "Partly Fine");
+  assert.equal(reply.headers["x-fireworks-note"], "kept");
+  assert.equal(reply.body.toString(), "data: 1\n\ndata: 2\n\n");
+  assert.equal(provider.requests.length, 1);
+});
+
+test("Fireworks requests that break the rules are refused before anything is forwarded", async () => {
+  const stderr = captureStderr();
+  const { socket, instance, state, provider, anthropic } = await startFireworks(
+    keys.one,
+  );
+  const target = "/inference/v1/messages";
+  const requests: [string, Record<string, string | string[]>][] = [
+    ["POST", { ...poolHeaders, "x-api-key": "k" }],
+    ["POST", { "x-api-key": "k" }],
+    ["POST", { authorization: "Bearer guest" }],
+    ["POST", { authorization: `Bearer ${keys.one}` }],
+    ["POST", { authorization: "bearer cog" }],
+    ["POST", { authorization: ["Bearer cog", "Bearer cog"] }],
+    ["POST", { ...poolHeaders, connection: "host" }],
+    ["POST", { ...poolHeaders, connection: "authorization" }],
+    ["TRACE", poolHeaders],
+  ];
+  for (const [method, headers] of requests) {
+    const reply = await fireworks(socket, method, target, headers, "{}");
+    assert.equal(reply.status, 403, JSON.stringify(headers));
+    assert.equal(reply.headers["x-should-retry"], "false");
+    assert.equal(claudeError(reply).type, "permission_error");
+    noKeys(reply.body.toString());
+  }
+  const raw = [
+    rawRequest(
+      "POST",
+      "http://api.fireworks.ai/x",
+      fireworksName,
+      "content-length: 0",
+    ),
+    rawRequest("POST", "*", fireworksName, "content-length: 0"),
+    rawRequest(
+      "GET",
+      "/x",
+      fireworksName,
+      "transfer-encoding: chunked",
+      "0\r\n\r\n",
+    ),
+    rawRequest(
+      "POST",
+      "/x",
+      fireworksName,
+      "host: api.fireworks.ai\r\ncontent-length: 2",
+      "{}",
+    ),
+    rawRequest(
+      "POST",
+      "/x",
+      fireworksName,
+      "authorization: Bearer cog\r\ncontent-length: 2\r\ncontent-length: 2",
+      "{}",
+    ),
+    rawRequest(
+      "POST",
+      "/x",
+      fireworksName,
+      "authorization: Bearer cog\r\ncontent-length: 2\r\ntransfer-encoding: chunked",
+      "{}",
+    ),
+  ];
+  for (const request of raw) {
+    const reply = await exchange(socket, fireworksName, request);
+    assert.ok([400, 403].includes(statusOf(reply)), request);
+  }
+  assert.equal(provider.requests.length, 0);
+  assert.equal(anthropic.requests.length, 0);
+  const rows = state.logs(instance.id);
+  assert.ok(rows.length >= requests.length);
+  for (const row of rows) {
+    assert.equal(row.allowed, false);
+    assert.equal(row.operation, "model.fireworks");
+    assert.equal(row.outcome, "denied");
+  }
+  noKeys(rows, stderr);
+});
+
+test("the Fireworks health path is answered locally whatever the key file holds", async () => {
+  for (const content of [keys.one, null, "two words"]) {
+    captureStderr();
+    const { socket, instance, state, provider } = await startFireworks(content);
+    const audit = recordFinishes(state);
+    const reply = await fireworks(socket, "GET", "/__cog__/health");
+    assert.equal(reply.status, 200);
+    assert.equal(reply.body.toString(), "cog ready\n");
+    await within("the audit row", audit.first);
+    assert.equal(provider.requests.length, 0);
+    const [row, ...others] = state.logs(instance.id);
+    assert.deepEqual(others, []);
+    assert.equal(row?.operation, "public.read");
+    assert.equal(row.reason, "anonymous read");
+  }
+});
+
+test("the key file is read for each credentialed request, and a missing file stops only those, silently", async () => {
+  const stderr = captureStderr();
+  const { socket, file, provider, instance, state } = await startFireworks(
+    `${keys.one}\n`,
+  );
+  const post = (headers: Record<string, string>): Promise<ModelReply> =>
+    fireworks(socket, "POST", "/inference/v1/messages", headers, "{}");
+  assert.equal((await post(poolHeaders)).status, 200);
+  writeFileSync(file, `${keys.two}\n`);
+  assert.equal((await post(poolHeaders)).status, 200);
+  rmSync(file);
+  const gone = await post(poolHeaders);
+  assert.equal(gone.status, 503);
+  assert.deepEqual(claudeError(gone), {
+    type: "api_error",
+    message: `cog gateway: ${unavailable}`,
+  });
+  assert.equal((await post({})).status, 200);
+  writeFileSync(file, `${keys.one}\n`);
+  assert.equal((await post(poolHeaders)).status, 200);
+  assert.deepEqual(
+    provider.requests.map((entry) => entry.headers.authorization),
+    [
+      `Bearer ${keys.one}`,
+      `Bearer ${keys.two}`,
+      undefined,
+      `Bearer ${keys.one}`,
+    ],
+  );
+  assert.deepEqual(stderr, []);
+  const rows = state.logs(instance.id);
+  assert.deepEqual(
+    rows.map(({ allowed, reason }) => [allowed, reason]).toReversed(),
+    [
+      [true, "fireworks key"],
+      [true, "fireworks key"],
+      [false, unavailable],
+      [true, "no credential"],
+      [true, "fireworks key"],
+    ],
+  );
+  noKeys(rows, stderr);
+});
+
+test("a key file that breaks the reading rule makes credentialed Fireworks requests 503, names no content, and leaves other requests alone", async () => {
+  const bad: [string, string | Buffer][] = [
+    ["an empty file", ""],
+    ["only whitespace", " \r\n\t\n"],
+    ["two words", `${keys.one} ${keys.two}`],
+    ["two lines", `${keys.one}\n${keys.two}\n`],
+    ["a tab inside", `${keys.one}\t${keys.two}`],
+    ["a vertical tab inside", `${keys.one}\v${keys.two}`],
+    ["a control character", `${keys.one}\u{1}`],
+    ["a NUL", `${keys.one}\0`],
+    ["a DEL", `${keys.one}\u{7F}`],
+    ["a non-ASCII byte", Buffer.from([...Buffer.from(keys.one), 0xe9])],
+    ["a UTF-8 character", `${keys.one}é`],
+    ["too many bytes", `${"k".repeat(4096)}\n`],
+    ["too much padding", `${keys.one}${" ".repeat(4100)}`],
+  ];
+  for (const [what, content] of bad) {
+    const stderr = captureStderr();
+    const { socket, provider, instance, state } = await startFireworks(content);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reply = await fireworks(
+        socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      );
+      assert.equal(reply.status, 503, what);
+      assert.deepEqual(claudeError(reply), {
+        type: "api_error",
+        message: `cog gateway: ${unavailable}`,
+      });
+    }
+    assert.equal(provider.requests.length, 0, what);
+    assert.equal(stderr.length, 1, what);
+    assert.match(
+      stderr[0] ?? "",
+      /^cog: Fireworks key file .*FIREWORKS_API_KEY .+\n$/,
+    );
+    for (const row of state.logs(instance.id)) {
+      assert.equal(row.allowed, false);
+      assert.equal(row.operation, "model.fireworks");
+      assert.equal(row.reason, unavailable);
+    }
+    noKeys(state.logs(instance.id), stderr);
+    assert.equal(
+      (await fireworks(socket, "GET", "/inference/api/hello")).status,
+      200,
+    );
+    mock.restore();
+  }
+});
+
+test("a key file that is a directory or a named pipe makes credentialed requests 503 without waiting for it", async () => {
+  captureStderr();
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-key-"));
+  defer(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+  mkdirSync(path.join(directory, "folder"));
+  const pipe = path.join(directory, "pipe");
+  assert.equal(spawnSync("mkfifo", [pipe]).status, 0);
+  for (const file of [path.join(directory, "folder"), pipe]) {
+    const provider = await startModelStub();
+    const { socket } = await startGateway({
+      models: { fireworks: provider.origin, fireworksKeyFile: file },
+    });
+    const reply = await fireworks(
+      socket,
+      "POST",
+      "/inference/v1/messages",
+      poolHeaders,
+      "{}",
+    );
+    assert.equal(reply.status, 503, file);
+    assert.equal(provider.requests.length, 0);
+  }
+});
+
+test("a key file that follows the reading rule is used", async () => {
+  const punctuation = "!\"#$%&'()*+,-./:;<=>?@[]^_`{|}~";
+  const good: [string, string, string][] = [
+    ["a trailing newline", `${keys.one}\n`, keys.one],
+    ["carriage returns", `\r\n ${keys.one} \r\n`, keys.one],
+    ["a carriage return inside", "fw-made\r-up", "fw-made-up"],
+    ["the byte limit", `${"k".repeat(4095)}\n`, "k".repeat(4095)],
+    ["visible punctuation", punctuation, punctuation],
+  ];
+  for (const [what, content, expected] of good) {
+    const { socket, provider } = await startFireworks(content);
+    const reply = await fireworks(
+      socket,
+      "POST",
+      "/inference/v1/messages",
+      poolHeaders,
+      "{}",
+    );
+    assert.equal(reply.status, 200, what);
+    assert.equal(
+      provider.requests[0]?.headers.authorization,
+      `Bearer ${expected}`,
+      what,
+    );
+  }
+  const provider = await startModelStub();
+  const file = keyFile(null);
+  const real = `${file}.real`;
+  writeFileSync(real, `${keys.two}\n`);
+  symlinkSync(real, file);
+  const { socket } = await startGateway({
+    models: { fireworks: provider.origin, fireworksKeyFile: file },
+  });
+  await fireworks(socket, "POST", "/inference/v1/messages", poolHeaders, "{}");
+  assert.equal(
+    provider.requests[0]?.headers.authorization,
+    `Bearer ${keys.two}`,
+  );
+});
+
+test("the stderr line is written once per changed reason, and never for a missing file, a dangling link or an option that was not given", async () => {
+  const stderr = captureStderr();
+  const { socket, file } = await startFireworks(null);
+  const credentialed = async (): Promise<number> =>
+    (
+      await fireworks(
+        socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      )
+    ).status;
+  assert.equal(await credentialed(), 503);
+  symlinkSync(`${file}.nowhere`, file);
+  assert.equal(await credentialed(), 503);
+  rmSync(file);
+  assert.deepEqual(stderr, []);
+  writeFileSync(file, "");
+  await credentialed();
+  await credentialed();
+  assert.equal(stderr.length, 1);
+  writeFileSync(file, "a b");
+  await credentialed();
+  assert.equal(stderr.length, 2);
+  assert.notEqual(stderr[0], stderr[1]);
+  writeFileSync(file, keys.one);
+  assert.equal(await credentialed(), 200);
+  writeFileSync(file, "a b");
+  await credentialed();
+  assert.equal(stderr.length, 3);
+  assert.equal(stderr[2], stderr[1]);
+  noKeys(stderr);
+
+  const quiet = captureStderr();
+  const provider = await startModelStub();
+  const unset = await startGateway({ models: { fireworks: provider.origin } });
+  const reply = await fireworks(
+    unset.socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 503);
+  assert.deepEqual(quiet, []);
+  assert.equal(provider.requests.length, 0);
+});
+
+test("a Fireworks fault does not touch Claude, and a Claude pool fault does not touch Fireworks", async () => {
+  captureStderr();
+  const broken = await startFireworks("two words");
+  assert.equal(
+    (
+      await fireworks(
+        broken.socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      )
+    ).status,
+    503,
+  );
+  const claudeReply = await claude(
+    broken.socket,
+    "POST",
+    "/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(claudeReply.status, 200);
+  assert.equal(broken.anthropic.requests.length, 1);
+  assert.equal(
+    broken.anthropic.requests[0]?.headers.authorization,
+    `Bearer ${accountToken}`,
+  );
+  const fine = await startFireworks(keys.one, undefined, "missing");
+  assert.equal(
+    (await claude(fine.socket, "POST", "/v1/messages", poolHeaders, "{}"))
+      .status,
+    503,
+  );
+  const reply = await fireworks(
+    fine.socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 200);
+  assert.equal(
+    fine.provider.requests[0]?.headers.authorization,
+    `Bearer ${keys.one}`,
+  );
+});
+
+test("a placeholder request never gets the other host's credential or reaches the other host's upstream, whatever its SNI", async () => {
+  const { socket, provider, anthropic } = await startFireworks(keys.one);
+  for (const servername of [claudeName, fireworksName]) {
+    for (const [host, target] of [
+      [fireworksName, "/v1/messages"],
+      [claudeName, "/inference/v1/messages"],
+    ] as const) {
+      const request = https.request({
+        socketPath: socket,
+        servername,
+        rejectUnauthorized: false,
+        method: "POST",
+        path: target,
+        agent: false,
+        headers: { host, ...poolHeaders },
+      });
+      defer(() => {
+        request.destroy();
+      });
+      const answered = once(request, "response");
+      request.end("{}");
+      const [response] = (await within("the answer", answered)) as [
+        IncomingMessage,
+      ];
+      response.resume();
+      assert.equal(response.statusCode, 200);
+    }
+  }
+  assert.equal(provider.requests.length, 2);
+  assert.equal(anthropic.requests.length, 2);
+  for (const entry of provider.requests) {
+    assert.deepEqual(headerValues(entry.rawHeaders, "host"), [fireworksName]);
+    assert.equal(entry.headers.authorization, `Bearer ${keys.one}`);
+  }
+  for (const entry of anthropic.requests) {
+    assert.deepEqual(headerValues(entry.rawHeaders, "host"), [claudeName]);
+    assert.equal(entry.headers.authorization, `Bearer ${accountToken}`);
+  }
+  for (const host of [
+    "api.fireworks.ai:443",
+    "api.fireworks.ai.",
+    "fireworks.ai",
+  ]) {
+    const reply = await fireworks(
+      socket,
+      "POST",
+      "/x",
+      { host, ...poolHeaders },
+      "{}",
+    );
+    assert.equal(reply.status, 403, host);
+  }
+  assert.equal(provider.requests.length, 2);
+  assert.equal(anthropic.requests.length, 2);
+});
+
+test("Fireworks responses are not read for rate limits, so the pool's choice is unchanged", async () => {
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
+  const { socket, anthropic, instance } = await startFireworks(
+    keys.one,
+    (_request, response, entry) => {
+      void entry.ended.then(() => {
+        response
+          .writeHead(429, {
+            "anthropic-ratelimit-unified-status": "rejected",
+            "anthropic-ratelimit-unified-reset": reset,
+          })
+          .end("{}");
+      });
+    },
+    bothAccounts,
+  );
+  const reply = await fireworks(
+    socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 429);
+  await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal(tokenSeen(lastRequest(anthropic)), firstAccount(instance.id));
+});
+
+test("a Fireworks upstream that fails is a retryable 503 and a gateway-error row, with no key reported", async () => {
+  const stderr = captureStderr();
+  const { socket, instance, state } = await startFireworks(
+    keys.one,
+    (request, _response, entry) => {
+      void entry.ended.then(() => {
+        request.socket.destroy();
+      });
+    },
+  );
+  const reply = await fireworks(
+    socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 503);
+  assert.equal(reply.headers["x-should-retry"], undefined);
+  assert.deepEqual(
+    state.logs(instance.id).map(({ outcome, operation }) => ({
+      outcome,
+      operation,
+    })),
+    [{ outcome: "gateway-error", operation: "model.fireworks" }],
+  );
+  noKeys(state.logs(instance.id), stderr, reply.body.toString());
+});
+
+test("Fireworks requests use the 600 s timeout, a safe body-less one is replayed once on a stale connection, and a VM's one agent serves both hosts but no other VM", async () => {
+  const requested = spyOn(http, "request");
+  let reused = 0;
+  const { socket, provider, anthropic, state, gateway } = await startFireworks(
+    keys.one,
+    (request, response, entry) => {
+      if (
+        entry.connection === 1 &&
+        provider.requests.filter((other) => other.connection === 1).length > 1
+      ) {
+        reused += 1;
+        request.socket.destroy();
+        return;
+      }
+      replyOk(request, response, entry);
+    },
+  );
+  assert.equal(
+    (
+      await fireworks(
+        socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await fireworks(socket, "GET", "/inference/v1/models", poolHeaders))
+      .status,
+    200,
+  );
+  assert.equal(reused, 1);
+  assert.deepEqual(
+    provider.requests.map(({ method, connection }) => [method, connection]),
+    [
+      ["POST", 1],
+      ["GET", 1],
+      ["GET", 2],
+    ],
+  );
+  assert.equal(
+    provider.requests[2]?.headers.authorization,
+    `Bearer ${keys.one}`,
+  );
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  assert.equal(anthropic.connections.length, 1);
+  const calls = requested.mock.calls.map(([target, options]) => ({
+    origin: String(target instanceof URL ? target.origin : target),
+    timeout: (options as http.RequestOptions | undefined)?.timeout,
+    agent: (options as http.RequestOptions | undefined)?.agent,
+  }));
+  assert.deepEqual(
+    calls.map(({ origin, timeout }) => [origin, timeout]),
+    [
+      [provider.origin, 600_000],
+      [provider.origin, 600_000],
+      [provider.origin, 600_000],
+      [anthropic.origin, 600_000],
+    ],
+  );
+  const agents = new Set(calls.map(({ agent }) => agent));
+  assert.equal(agents.size, 1);
+  const other = state.register(
+    "lima:other",
+    path.join(path.dirname(socket), "other.sock"),
+    "tester",
+  );
+  await gateway.refresh();
+  assert.equal(
+    (
+      await fireworks(
+        other.socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      )
+    ).status,
+    200,
+  );
+  assert.deepEqual(provider.connections.length, 3);
+  assert.equal(provider.requests.at(-1)?.connection, 3);
+});
+
+test("an http upstream for one model host and a TLS upstream for the other are each reached from one VM, in either order", async () => {
+  const secure: string[] = [];
+  const upstream = https.createServer(
+    { cert: readFileSync(certificate), key: readFileSync(key) },
+    (request, response) => {
+      secure.push(request.url ?? "");
+      request.resume();
+      response.writeHead(200, { "content-length": "2" }).end("ok");
+    },
+  );
+  await new Promise<void>((resolve) => {
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  defer(async () => {
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      upstream.close(() => {
+        resolve();
+      });
+    });
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+  const NativeAgent = https.Agent;
+  const mutable = https as { Agent: unknown };
+  mutable.Agent = class extends NativeAgent {
+    constructor(options?: https.AgentOptions) {
+      super({
+        ...options,
+        ca: readFileSync(certificate),
+        checkServerIdentity: () => {
+          return;
+        },
+      });
+    }
+  };
+  defer(() => {
+    mutable.Agent = NativeAgent;
+  });
+  const plain = await startModelStub();
+  const { socket, state, gateway } = await startGateway({
+    models: {
+      anthropic: plain.origin,
+      fireworks: `https://127.0.0.1:${String(address.port)}`,
+    },
+  });
+  const other = state.register(
+    "lima:other",
+    path.join(path.dirname(socket), "other.sock"),
+    "tester",
+  );
+  await gateway.refresh();
+  const reach = async (vm: string, host: "claude" | "fireworks") =>
+    host === "claude"
+      ? claude(vm, "POST", "/v1/messages", {}, "{}")
+      : fireworks(vm, "POST", "/inference/v1/messages", {}, "{}");
+  for (const [vm, order] of [
+    [socket, ["claude", "fireworks"]],
+    [other.socket, ["fireworks", "claude"]],
+  ] as const) {
+    for (const host of order) {
+      assert.equal((await reach(vm, host)).status, 200, host);
+    }
+  }
+  assert.deepEqual(
+    plain.requests.map(({ url }) => url),
+    ["/v1/messages", "/v1/messages"],
+  );
+  assert.deepEqual(secure, [
+    "/inference/v1/messages",
+    "/inference/v1/messages",
+  ]);
 });

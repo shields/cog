@@ -25,9 +25,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { claudeHost } from "./models.ts";
+import { claudeHost, fireworksHost } from "./models.ts";
 
-const leafNames = ["github.com", "api.github.com", claudeHost];
+const leafNames = ["github.com", "api.github.com", claudeHost, fireworksHost];
 
 export interface Certificates {
   ca: string;

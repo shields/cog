@@ -13,7 +13,12 @@
 // limitations under the License.
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import {
+  spawn,
+  spawnSync,
+  type ChildProcess,
+  type SpawnSyncReturns,
+} from "node:child_process";
 import { once } from "node:events";
 import {
   chmodSync,
@@ -27,6 +32,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import https from "node:https";
 import path from "node:path";
 import { onTestFinished, test } from "bun:test";
 import YAML from "yaml";
@@ -35,6 +41,26 @@ import { grantProfiles } from "../gateway/policy.ts";
 import { State } from "../gateway/state.ts";
 
 const main = path.join(import.meta.dirname, "main.ts");
+
+async function daemonHealthy(
+  control: Control,
+  service: ChildProcess,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 600; attempt++) {
+    try {
+      await control.health();
+      return true;
+    } catch {
+      if (service.exitCode !== null || service.signalCode !== null) {
+        return false;
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+    }
+  }
+  return false;
+}
 
 test("CLI grants and edits apply live and disabled VM logs stay addressable by ID", async () => {
   const root = mkdtempSync("/tmp/cog-");
@@ -91,21 +117,7 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
     actor: "tester",
   });
   try {
-    let healthy = false;
-    for (let attempt = 0; attempt < 600 && !healthy; attempt++) {
-      try {
-        await control.health();
-        healthy = true;
-      } catch {
-        if (service.exitCode !== null || service.signalCode !== null) {
-          break;
-        }
-        await new Promise((resolve) => {
-          setTimeout(resolve, 50);
-        });
-      }
-    }
-    assert.equal(healthy, true, serviceError);
+    assert.equal(await daemonHealthy(control, service), true, serviceError);
     assert.equal(
       serviceError.split(
         "cog: Claude pool unavailable: account work is accessible to group or other\n",
@@ -707,4 +719,80 @@ test("serve closes the listeners it opened and exits when it cannot open one for
     result.stderr,
     /^cog: [^\n]*ENOENT[^\n]*vanished\.sock[^\n]*\n$/,
   );
+}, 60_000);
+
+test("gateway serve reads the Fireworks key file under the daemon's HOME", async () => {
+  const root = mkdtempSync("/tmp/cog-");
+  const lima = path.join(root, "lima");
+  mkdirSync(path.join(lima, "sock"), { recursive: true });
+  mkdirSync(path.join(root, "home", ".config", "secrets"), { recursive: true });
+  const marker = "fw-made-up-one";
+  writeFileSync(
+    path.join(root, "home", ".config", "secrets", "FIREWORKS_API_KEY"),
+    `${marker} ${marker}\n`,
+  );
+  const environment = {
+    ...process.env,
+    COG_ROOT: path.join(root, "cog"),
+    HOME: path.join(root, "home"),
+  };
+  const service = spawn(process.execPath, [main, "gateway", "serve"], {
+    env: environment,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let serviceError = "";
+  const seen = Promise.withResolvers<undefined>();
+  const reasonSeen = seen.promise;
+  service.stderr.on("data", (chunk: Buffer) => {
+    serviceError += chunk.toString();
+    if (serviceError.includes("holds more than one word")) {
+      seen.resolve(undefined);
+    }
+  });
+  const control = new Control(locations(environment), {
+    ...controlOptions(environment),
+    actor: "tester",
+  });
+  try {
+    assert.equal(await daemonHealthy(control, service), true, serviceError);
+    const instance = await control.register("lima:trial", lima);
+    const reply = await new Promise<{ status: number; body: string }>(
+      (resolve, reject) => {
+        const request = https.request({
+          socketPath: instance.socket,
+          servername: "api.fireworks.ai",
+          rejectUnauthorized: false,
+          method: "GET",
+          path: "/inference/v1/models",
+          agent: false,
+          headers: { host: "api.fireworks.ai", authorization: "Bearer cog" },
+        });
+        request.once("error", reject);
+        request.once("response", (incoming) => {
+          const chunks: Buffer[] = [];
+          incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+          incoming.once("end", () => {
+            resolve({
+              status: incoming.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString(),
+            });
+          });
+        });
+        request.end();
+      },
+    );
+    assert.equal(reply.status, 503);
+    assert.ok(!reply.body.includes(marker));
+    await reasonSeen;
+    assert.ok(serviceError.includes("FIREWORKS_API_KEY"), serviceError);
+    assert.ok(!serviceError.includes(marker), serviceError);
+  } finally {
+    control.close();
+    if (service.exitCode === null && service.signalCode === null) {
+      const exited = once(service, "exit");
+      service.kill("SIGTERM");
+      await exited;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
 }, 60_000);

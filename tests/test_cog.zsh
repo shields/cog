@@ -1344,10 +1344,44 @@ new_gateway_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 print -r -- "  $FAKE_FIREWORKS  " > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
 run_cog new t1 --no-repo --no-claude-token --no-codex-auth
-assert_eq "new installs the saved Fireworks key" 0 "$RC"
+assert_eq "new with a Fireworks key file succeeds" 0 "$RC"
+assert_contains "--no-claude-token with a Fireworks key file wires only Fireworks" \
+    "shell t1 sudo $GUEST_LIB/setup-model-gateway fireworks" "$(<"$STATE/limactl.log")"
+assert_eq "--no-claude-token with a Fireworks key file runs the wiring once" 1 "$(count_in_log setup-model-gateway)"
+assert_eq "new probes the guest's Fireworks relay once" 1 "$(count_in_log 'https://api.fireworks.ai/__cog__/health')"
+assert_eq "--no-claude-token with a Fireworks key file skips the Anthropic probe" 0 "$(count_in_log api.anthropic.com)"
+assert_eq "the Fireworks wiring follows the GitHub wiring and precedes the secrets" 1 \
+    "$(( $(grep -n 'setup-github-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) < $(grep -n 'setup-model-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) && $(grep -n 'setup-model-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) < $(grep -n 'setup-secrets' "$STATE/limactl.log" | head -1 | cut -d: -f1) ))"
+assert_eq "a Fireworks key file means exactly one secret install" 1 "$(count_in_log setup-secrets)"
 fireworks_call=$(grep -n 'FIREWORKS_API_KEY' "$STATE/limactl.log" | head -1 | cut -d: -f1)
-assert_eq "the Fireworks key reaches only setup-secrets stdin, trimmed" "$FAKE_FIREWORKS" "$(stdin_of "$fireworks_call")"
+assert_eq "the Fireworks placeholder is exactly cog and a newline" "636f670a" "$(stdin_of "$fireworks_call" | od -An -tx1 | tr -d ' \n')"
+assert_eq "the real Fireworks key reaches no stdin" 0 "$(cat "$STATE"/calls/*.stdin(N) | grep -c "$FAKE_FIREWORKS" || true)"
 assert_no_secret_leak "new with a Fireworks key"
+
+new_gateway_case test-base
+mkdir -p "$HOME_DIR/.config/secrets"
+print -r -- "$FAKE_FIREWORKS" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
+run_cog new t1 --no-repo --no-codex-auth
+assert_eq "new with Claude and Fireworks succeeds" 0 "$RC"
+assert_contains "new wires both models in one run" \
+    "shell t1 sudo $GUEST_LIB/setup-model-gateway claude fireworks" "$(<"$STATE/limactl.log")"
+assert_eq "new with both models runs the wiring once" 1 "$(count_in_log setup-model-gateway)"
+assert_eq "new with both models probes Anthropic once" 1 "$(count_in_log 'https://api.anthropic.com/__cog__/health')"
+assert_eq "new with both models probes Fireworks once" 1 "$(count_in_log 'https://api.fireworks.ai/__cog__/health')"
+assert_eq "new with both models installs two placeholders" 2 "$(grep -c "^shell t1 $GUEST_LIB/setup-secrets" "$STATE/limactl.log" || true)"
+assert_no_secret_leak "new with Claude and Fireworks"
+
+new_gateway_case test-base
+mkdir -p "$HOME_DIR/.config/secrets"
+print -r -- "$FAKE_FIREWORKS" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
+EXTRA_ENV+=(LIMA_STUB_FAIL=api.fireworks.ai/__cog__/health LIMA_STUB_SNAPSHOT=delete)
+run_cog new t1 --no-repo --no-claude-token --no-codex-auth
+assert_eq "a failed Fireworks probe stops new" 1 "$RC"
+assert_contains "a failed Fireworks probe says to rebuild the base" "run cog base again" "$OUT"
+assert_eq "a failed Fireworks probe disables gateway access" '{"disabled":true,"grants":{}}' "$(instance_query t1 '{disabled, grants}')"
+assert_contains "a failed Fireworks probe deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+assert_eq "a failed Fireworks probe installs no secret" 0 "$(count_in_log setup-secrets)"
+assert_no_secret_leak "a failed Fireworks probe"
 
 new_gateway_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
@@ -1356,6 +1390,8 @@ run_cog new t1 --no-repo --no-claude-token --no-codex-auth
 assert_eq "a Fireworks key file with two words fails" 1 "$RC"
 assert_contains "a Fireworks key file with two words says so" "more than one word" "$OUT"
 assert_eq "a Fireworks key file with two words creates no VM" 0 "$(count_in_log clone)"
+assert_eq "a Fireworks key file with two words registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
+assert_eq "a Fireworks key file with two words never reaches limactl past the base check" 0 "$(count_in_log setup-)"
 assert_no_secret_leak "a Fireworks key file with two words"
 
 new_gateway_case test-base

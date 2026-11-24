@@ -59,32 +59,57 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   rollback, disable, grant, revoke and the policy document). It opens the
   state and the authorizations on first use, and
   `State` refuses to register `lima:cog-base` and the VM that `COG_BASE`
-  names. The same server answers `api.anthropic.com`, a third name on the leaf,
-  for a guest whose `/etc/hosts` points that name at the relay.
-  `guest/setup-github-gateway` maps the two GitHub names, and
-  `guest/setup-model-gateway claude` (run by `cog new` unless
-  `--no-claude-token`, after the GitHub health probe) maps `api.anthropic.com`.
-  The Cloudflare image runs neither script.
-  `gateway/models.ts` (pure) has no allow or deny list of paths: a guest could
-  already send any path with a token of its own, and a list would break when
-  Anthropic adds an endpoint. It refuses a target that is not origin-form
-  printable ASCII, a duplicate Host, ambiguous framing, TRACE, a chunked body
-  on a method that the runtime's client sends unframed (DELETE, OPTIONS), a
-  `Connection` header that names an end-to-end header, `x-api-key` and any
-  `Authorization` other than `Bearer cog`. A request with no `Authorization`
-  goes straight to Anthropic with the client's headers, less the hop-by-hop
-  ones and `Expect`. `Bearer cog` is pooled: the gateway replaces that header's
-  value in place with a token. It adds no header except `Content-Length: 0` on
-  a body-less request that would otherwise go out chunked. The target is sent
-  as written and bodies are streamed unparsed. `gateway/pool.ts` reads
-  `claude-pool/` in the secrets directory, one file per account, at start and on
-  `/sync`, which `register`, `disable` and `cog new`'s pool check request; a
-  missing or empty directory means no pool, one bad entry disables the pool, and
-  either way the pool route answers 503. Each VM gets a stable account order and
-  stays on an account until the rate-limit headers show it near its limit or
-  rejected. Each VM has its own upstream keep-alive agent.
+  names. The same server answers `api.anthropic.com` and `api.fireworks.ai`, the
+  third and fourth names on the leaf, for a guest whose `/etc/hosts` points
+  those names at the relay. `guest/setup-github-gateway` maps the two GitHub
+  names, and `guest/setup-model-gateway` (run by `cog new` after the GitHub
+  health probe) maps `api.anthropic.com` for `claude`, unless
+  `--no-claude-token`, and `api.fireworks.ai` for `fireworks`, when the Mac
+  has a Fireworks key file. The Cloudflare image runs neither script.
+  `gateway/models.ts` (pure) has no allow or deny list of paths: the relay lends
+  the host's credential for any path, which a guest that held a token of its own
+  could also use, and a list would break when a provider adds an endpoint. It
+  refuses a target that is not origin-form printable ASCII, a duplicate Host,
+  ambiguous framing, TRACE, a chunked body on a method that the runtime's client
+  sends unframed (DELETE, OPTIONS), a `Connection` header that names an
+  end-to-end header, `x-api-key` and any `Authorization` other than
+  `Bearer cog`. A request with no `Authorization` goes straight to Anthropic
+  with the client's headers, less the hop-by-hop ones and `Expect`. `Bearer cog`
+  is pooled: the gateway replaces that header's value in place with a token. It
+  adds no header except `Content-Length: 0` on a body-less request that would
+  otherwise go out chunked. The target is sent as written and bodies are
+  streamed unparsed. `gateway/pool.ts` reads `claude-pool/` in the secrets
+  directory, one file per account, at start and on `/sync`, which `register`,
+  `disable` and `cog new`'s pool check request; a missing or empty directory
+  means no pool, one bad entry disables the pool, and either way a `Bearer cog`
+  request to the Claude host answers 503. Each VM gets a stable account order
+  and stays on an account until the rate-limit headers show it near its limit or
+  rejected. A 401 holds the account for ten minutes; a guest picks the path and
+  headers of the request that draws one, so a hold only steers VMs, never
+  refuses one, and a 2xx clears it. Each VM has its own upstream keep-alive
+  agent for each scheme in use (both model hosts share the https one, since Node
+  keys connections by host and port) and none is shared between VMs.
+  `modelHosts` in `gateway/models.ts` is the table of model hosts (host,
+  upstream, audit operation, where `Bearer cog` is resolved), and the server
+  dispatches on the `Host` header through it. `api.fireworks.ai` follows the
+  same request rules as the Claude host. Its `Bearer cog` becomes
+  `Bearer KEY`, where `gateway/key-file.ts` reads KEY from
+  `Config.fireworksKeyFile` (`~/.config/secrets/FIREWORKS_API_KEY`, which
+  `COG_ROOT` does not move), which `cog gateway serve` passes as
+  `fireworksKeyFile`. The file is read for each credentialed request, so
+  replacing it takes effect at the next request with no restart or sync. It
+  must be a regular file (a link to one is followed) of at most 4096 bytes
+  holding one word of visible ASCII once carriage returns and surrounding
+  whitespace go; `cog new` checks the same rule with the same reader. Anything
+  else answers 503 with a fixed message, and the reason goes to stderr once per
+  change, never for a missing file. A request with no credential goes through
+  as sent. Rows are `model.fireworks`, reason `fireworks key` or
+  `no credential`. Nothing reads Fireworks responses for rate limits, and any
+  path on the host goes out with the key.
   `cog/commands/pool.ts` holds `cog pool`, whose `add` and `rm` change that
-  directory and ask the daemon to reload; `GET /pool` on the admin socket
+  directory and ask the daemon to reload (`rm` takes any plain file name there,
+  so a stray entry that disables the pool can be removed); `GET /pool` on the
+  admin socket
   (`Control.pool`) reports the state and each account's hold and readings, never
   a token, and `list` reads the directory with the loader.
   Bun's HTTP server groups response header lines of one name next to the first
@@ -113,8 +138,11 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
 ## Secrets
 
 No secret may reach an argument list, an environment, a log or a message. The
-Codex login and Fireworks key go to `guest/setup-secrets NAME` on stdin, and
-so does the Claude placeholder `cog`; a Lima guest holds no real Claude token.
+Codex login goes to `guest/setup-secrets NAME` on stdin, and so do the
+placeholder `cog` for Claude and, when the Mac has a Fireworks key file, for
+Fireworks; a Lima guest holds no real Claude token or Fireworks key. The
+gateway reads the Fireworks key on the Mac for each credentialed request, and
+`cog new` validates the file without keeping or sending it.
 The CA goes to `setup-github-gateway`'s stdin. `cog new` needs a usable Claude
 pool, checked before the clone, unless `--no-claude-token`. `cog pool add`
 reads a pool token with the no-echo prompt and creates the file exclusively

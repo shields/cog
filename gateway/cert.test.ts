@@ -117,7 +117,7 @@ function assertConsistent(certificates: Certificates): void {
   );
   assert.equal(
     leaf.subjectAltName,
-    "DNS:github.com, DNS:api.github.com, DNS:api.anthropic.com",
+    "DNS:github.com, DNS:api.github.com, DNS:api.anthropic.com, DNS:api.fireworks.ai",
   );
   assert.deepEqual(leaf.keyUsage, [serverAuth]);
   assert.equal(leaf.publicKey.asymmetricKeyDetails?.modulusLength, 3072);
@@ -294,6 +294,8 @@ test("a leaf inside the renewal window is reissued under the same CA", () => {
 for (const names of [
   ["github.com", "api.github.com"],
   ["github.com", "api.github.com", "other.example"],
+  ["github.com", "api.github.com", "api.anthropic.com"],
+  ["github.com", "api.github.com", "api.fireworks.ai"],
   ["github.com", "api.anthropic.com"],
   ["api.github.com", "api.anthropic.com"],
   ["other.example"],
@@ -337,6 +339,7 @@ test("a leaf that names more than the required hosts is kept as it is", () => {
       "github.com",
       "api.github.com",
       "api.anthropic.com",
+      "api.fireworks.ai",
       "other.example",
       "extra.example",
     ]);

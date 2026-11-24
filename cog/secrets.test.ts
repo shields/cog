@@ -34,7 +34,6 @@ import {
   fireworksKeyPresent,
   promptClaudeToken,
   readCodexAuth,
-  readFireworksKey,
   setOneWord,
   toBytes,
   writeSecretFile,
@@ -127,44 +126,16 @@ describe("setOneWord", () => {
 });
 
 describe("the Fireworks key file", () => {
-  test("presence counts a dangling link, which then fails the read", () => {
+  test("presence counts a dangling link and a regular file, not a missing path", () => {
     const dir = directory();
     const dangling = path.join(dir, "dangling");
     symlinkSync(path.join(dir, "nothing"), dangling);
     assert.equal(fireworksKeyPresent(dangling), true);
     assert.equal(fireworksKeyPresent(path.join(dir, "missing")), false);
-    assert.equal(
-      message(() => readFireworksKey(dangling)),
-      `${dangling} is not a regular file; remove it`,
-    );
-  });
-
-  test("a link to a file is followed", () => {
-    const dir = directory();
     writeFileSync(path.join(dir, "real"), `${marker}\n`);
     symlinkSync(path.join(dir, "real"), path.join(dir, "link"));
     assert.equal(fireworksKeyPresent(path.join(dir, "link")), true);
-    assert.equal(readFireworksKey(path.join(dir, "link")), marker);
-  });
-
-  test("one word is the key, and more than one is refused without quoting it", () => {
-    const file = path.join(directory(), "key");
-    writeFileSync(file, `${marker}\n`);
-    assert.equal(fireworksKeyPresent(file), true);
-    assert.equal(readFireworksKey(file), marker);
-    for (const content of [`${marker} x`, `x\n${marker}`]) {
-      writeFileSync(file, content);
-      const text = message(() => readFireworksKey(file));
-      assert.equal(
-        text,
-        `${file} holds more than one word; put only the key in it`,
-      );
-    }
-    writeFileSync(file, "\n");
-    assert.equal(
-      message(() => readFireworksKey(file)),
-      `${file} is empty; put the key in it, or remove it`,
-    );
+    assert.equal(fireworksKeyPresent(path.join(dir, "real")), true);
   });
 });
 

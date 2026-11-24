@@ -25,10 +25,11 @@ hosts=
 for model in "$@"; do
     case $model in
     claude) hosts+=$'127.0.0.1 api.anthropic.com # cog\n' ;;
-    *) die "unknown model $model; expected claude" ;;
+    fireworks) hosts+=$'127.0.0.1 api.fireworks.ai # cog\n' ;;
+    *) die "unknown model $model; expected claude or fireworks" ;;
     esac
 done
-[[ -n $hosts ]] || die "expected one or more model names: claude"
+[[ -n $hosts ]] || die "expected one or more model names: claude, fireworks"
 [[ $(id -u) == 0 ]] || die "run as root"
 [[ -r /etc/hosts ]] || die "cannot read /etc/hosts"
 

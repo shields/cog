@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  closeSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -54,6 +55,7 @@ interface Captured extends PoolIo {
   out: string[];
   linked: { names: string[]; usable: boolean }[];
   linkFails: boolean;
+  closeFails: boolean;
 }
 
 function capture(pool = ""): Captured {
@@ -61,6 +63,7 @@ function capture(pool = ""): Captured {
     out: [],
     linked: [],
     linkFails: false,
+    closeFails: false,
     say: (text) => {
       captured.out.push(`${text}\n`);
     },
@@ -75,6 +78,12 @@ function capture(pool = ""): Captured {
         throw Object.assign(new Error(`disk ${typed}`), { code: "ENOSPC" });
       }
       linkSync(existing, created);
+    },
+    close: (descriptor) => {
+      closeSync(descriptor);
+      if (captured.closeFails) {
+        throw Object.assign(new Error(`disk ${typed}`), { code: "EIO" });
+      }
     },
   };
   return captured;
@@ -357,25 +366,37 @@ test("add names its temporary file so that the loader skips it, and links rather
   ]);
 });
 
-for (const created of [false, true]) {
-  test(`add leaves no stray file after a failure to write${created ? ", and removes the directory it made" : ""}`, async () => {
-    const { root, pool, context, calls, io } = fixture();
-    if (!created) {
-      seed(pool, { alpha });
-    }
-    io.linkFails = true;
-    const message = await failure(poolCommand(["add", "work"], context, io));
-    assert.match(message, /cannot write account work \(ENOSPC\)/);
-    noToken(message);
-    assert.deepEqual(calls, []);
-    assert.equal(io.linked.length, 1);
-    if (created) {
-      assert.equal(existsSync(pool), false);
-      assert.deepEqual(readdirSync(path.join(root, "secrets")), []);
-    } else {
-      assert.deepEqual(readdirSync(pool), ["alpha"]);
-    }
-  });
+for (const [step, errno] of [
+  ["link", "ENOSPC"],
+  ["close", "EIO"],
+] as const) {
+  for (const created of [false, true]) {
+    test(`add leaves no stray file after the ${step} fails${created ? ", and removes the directory it made" : ""}`, async () => {
+      const { root, pool, context, calls, io } = fixture();
+      if (!created) {
+        seed(pool, { alpha });
+      }
+      if (step === "link") {
+        io.linkFails = true;
+      } else {
+        io.closeFails = true;
+      }
+      const message = await failure(poolCommand(["add", "work"], context, io));
+      assert.match(
+        message,
+        new RegExp(String.raw`cannot write account work \(${errno}\)`),
+      );
+      noToken(message);
+      assert.deepEqual(calls, []);
+      assert.equal(io.linked.length, step === "link" ? 1 : 0);
+      if (created) {
+        assert.equal(existsSync(pool), false);
+        assert.deepEqual(readdirSync(path.join(root, "secrets")), []);
+      } else {
+        assert.deepEqual(readdirSync(pool), ["alpha"]);
+      }
+    });
+  }
 }
 
 test("add says that the token is saved when the gateway cannot be told, and exits with an error", async () => {
@@ -480,6 +501,36 @@ test("rm refuses a missing entry, a bad name, and an entry that is not a regular
   ]);
   assert.deepEqual(calls, []);
 });
+
+test("rm removes a stray entry that the loader refuses, by its file name", async () => {
+  const { pool, calls, context, io } = fixture();
+  seed(pool, { alpha });
+  writeFileSync(path.join(pool, "notes.txt"), `${bravo}\n`, { mode: 0o600 });
+  writeFileSync(path.join(pool, ".work.0123456789ab"), `${bravo}\n`, {
+    mode: 0o600,
+  });
+  assert.equal(loadPool(pool).usable, false);
+  await poolCommand(["rm", "notes.txt"], context, io);
+  assert.equal(loadPool(pool).usable, true);
+  await poolCommand(["rm", ".work.0123456789ab"], context, io);
+  assert.deepEqual(readdirSync(pool), ["alpha"]);
+  assert.deepEqual(calls, ["sync", "pool", "sync", "pool"]);
+  noToken(...io.out);
+});
+
+test.each(["", ".", "..", "a/b", "../alpha", "/alpha"])(
+  "rm refuses the name %j without touching the pool directory",
+  async (name) => {
+    const { pool, calls, context, io } = fixture();
+    seed(pool, { alpha });
+    assert.match(
+      await failure(poolCommand(["rm", name], context, io)),
+      /account name/,
+    );
+    assert.deepEqual(readdirSync(pool), ["alpha"]);
+    assert.deepEqual(calls, []);
+  },
+);
 
 test("rm with no pool directory says there is no account", async () => {
   const { context, io } = fixture();

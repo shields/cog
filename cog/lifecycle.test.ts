@@ -18,6 +18,7 @@ import {
   mkdtempSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -309,13 +310,19 @@ test("new authorizes a private repository before cloning and grants only reads",
     [
       "shell",
       "vm",
-      ["sudo", "/usr/local/lib/cog/setup-model-gateway", "claude"],
+      ["sudo", "/usr/local/lib/cog/setup-model-gateway", "claude", "fireworks"],
       null,
     ],
     [
       "shell",
       "vm",
       [...curl, "10", ...output, "https://api.anthropic.com/__cog__/health"],
+      null,
+    ],
+    [
+      "shell",
+      "vm",
+      [...curl, "10", ...output, "https://api.fireworks.ai/__cog__/health"],
       null,
     ],
     ["grant", "lima:vm", "owner/repo", false],
@@ -342,7 +349,7 @@ test("new authorizes a private repository before cloning and grants only reads",
     ...[
       ["CLAUDE_CODE_OAUTH_TOKEN", "cog\n"],
       ["CODEX_AUTH", codex],
-      ["FIREWORKS_API_KEY", "fake-fireworks\n"],
+      ["FIREWORKS_API_KEY", "cog\n"],
     ].map(([key, value]) => [
       "shell",
       "vm",
@@ -351,6 +358,123 @@ test("new authorizes a private repository before cloning and grants only reads",
     ]),
     ["close"],
     ["enter", "vm", guest],
+  ]);
+  const everything = JSON.stringify(calls, (_, value: unknown) =>
+    value instanceof Uint8Array ? new TextDecoder().decode(value) : value,
+  );
+  assert.equal(everything.includes("fake-fireworks"), false);
+});
+
+function fireworksFixture(content: string | null, link = false) {
+  const made = fixture();
+  const file = made.context.config.fireworksKeyFile;
+  mkdirSync(path.dirname(file), { recursive: true });
+  if (link) {
+    symlinkSync(path.join(path.dirname(file), "missing"), file);
+  } else if (content !== null) {
+    writeFileSync(file, content);
+  }
+  return made;
+}
+
+const wiring = (calls: unknown[][]): string[][] =>
+  calls
+    .filter(
+      ([method, , argv]) =>
+        method === "shell" &&
+        (argv as string[]).some((word) =>
+          /setup-model-gateway|__cog__\/health/.test(word),
+        ),
+    )
+    .map((call) => (call[2] as string[]).filter((word) => word !== "sudo"));
+
+test("new wires only Fireworks when --no-claude-token is given with a key file", async () => {
+  const { calls, context } = fireworksFixture("fake-fireworks\n");
+  await newVM(noSecrets, context);
+  const lines = wiring(calls).map((argv) => argv.at(-1));
+  assert.deepEqual(lines, [
+    "https://api.github.com/__cog__/health",
+    "fireworks",
+    "https://api.fireworks.ai/__cog__/health",
+  ]);
+  const secrets = calls
+    .filter(([method]) => method === "shell")
+    .filter((call) => (call[2] as string[])[0]?.endsWith("setup-secrets"));
+  assert.deepEqual(
+    secrets.map((call) => [
+      (call[2] as string[])[1],
+      new TextDecoder().decode(call[3] as Uint8Array),
+    ]),
+    [["FIREWORKS_API_KEY", "cog\n"]],
+  );
+});
+
+test("new wires nothing for Fireworks without a key file", async () => {
+  const { calls, context } = fireworksFixture(null);
+  await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+  const text = JSON.stringify(calls);
+  assert.equal(text.includes("fireworks"), false);
+  assert.equal(text.includes("FIREWORKS"), false);
+});
+
+test.each([
+  ["two words", "fake-fireworks other\n", "holds more than one word"],
+  ["empty", "\n", "is empty"],
+  [
+    "not ASCII",
+    "fake-fireworks\u{E9}\n",
+    "holds a character that is not visible ASCII",
+  ],
+  ["too large", "k".repeat(4097), "is larger than 4096 bytes"],
+] as const)(
+  "a Fireworks key file that is %s fails before any VM work without quoting it",
+  async (_, content, reason) => {
+    const { calls, context } = fireworksFixture(content);
+    const file = context.config.fireworksKeyFile;
+    await assert.rejects(
+      newVM(["vm", "--repo", "owner/repo", "--no-codex-auth"], context),
+      {
+        message: `${file} ${reason}; fix it or remove it`,
+      },
+    );
+    assert.deepEqual(calls, [["health"], ["exists", "base"], ["exists", "vm"]]);
+  },
+);
+
+test("a dangling Fireworks key link fails before any VM work", async () => {
+  const { calls, context } = fireworksFixture(null, true);
+  await assert.rejects(
+    newVM(["vm", "--repo", "owner/repo", "--no-codex-auth"], context),
+    {
+      message: `${context.config.fireworksKeyFile} is not a regular file; remove it`,
+    },
+  );
+  assert.deepEqual(calls, [["health"], ["exists", "base"], ["exists", "vm"]]);
+});
+
+test("a failure of the Fireworks probe names Fireworks and rolls back", async () => {
+  const { calls, context, failures } = fireworksFixture("fake-fireworks\n");
+  failures.probeFails = "https://api.fireworks.ai/__cog__/health";
+  await assert.rejects(newVM(noSecrets, context), {
+    message:
+      "vm cannot reach Fireworks through the gateway; a base built by an older cog lacks this wiring, so run cog base again, or the running gateway is older than this cog, so run ./install.sh",
+  });
+  assert.deepEqual(calls.slice(-2), [
+    ["disable", "lima:vm"],
+    ["remove", "vm"],
+  ]);
+});
+
+test("a failure of the Fireworks probe with Claude wired names both models and both causes", async () => {
+  const { calls, context, failures } = fireworksFixture("fake-fireworks\n");
+  failures.probeFails = "https://api.fireworks.ai/__cog__/health";
+  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
+    message:
+      "vm cannot reach Claude and Fireworks through the gateway; a base built by an older cog lacks this wiring, so run cog base again, or the running gateway is older than this cog, so run ./install.sh",
+  });
+  assert.deepEqual(calls.slice(-2), [
+    ["disable", "lima:vm"],
+    ["remove", "vm"],
   ]);
 });
 

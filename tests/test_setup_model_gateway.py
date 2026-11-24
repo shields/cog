@@ -21,6 +21,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "guest/setup-model-gateway"
 GITHUB = "127.0.0.1 github.com api.github.com # cog"
 CLAUDE = "127.0.0.1 api.anthropic.com # cog"
+FIREWORKS = "127.0.0.1 api.fireworks.ai # cog"
 HOSTS = f"127.0.0.1 localhost\n{GITHUB}\n"
 
 
@@ -110,4 +111,27 @@ def test_refusals_change_nothing(
     assert result.returncode != 0
     assert result.stderr.startswith("setup-model-gateway: ")
     assert message in result.stderr
+    assert (guest / "etc/hosts").read_text() == HOSTS
+
+
+def test_fireworks_adds_its_line_once_alone_and_with_claude(guest: Path) -> None:
+    for _ in range(2):
+        result = run(guest, "fireworks")
+        assert result.returncode == 0, result.stderr
+        assert (guest / "etc/hosts").read_text() == f"{HOSTS}{FIREWORKS}\n"
+    result = run(guest, "claude", "fireworks", "claude")
+    assert result.returncode == 0, result.stderr
+    assert (guest / "etc/hosts").read_text() == f"{HOSTS}{FIREWORKS}\n{CLAUDE}\n"
+
+
+def test_both_models_in_one_run_add_both_lines_to_a_clean_file(guest: Path) -> None:
+    result = run(guest, "claude", "fireworks")
+    assert result.returncode == 0, result.stderr
+    assert (guest / "etc/hosts").read_text() == f"{HOSTS}{CLAUDE}\n{FIREWORKS}\n"
+
+
+def test_an_unknown_model_beside_fireworks_changes_nothing(guest: Path) -> None:
+    result = run(guest, "fireworks", "gemini")
+    assert result.returncode != 0
+    assert "expected claude or fireworks" in result.stderr
     assert (guest / "etc/hosts").read_text() == HOSTS

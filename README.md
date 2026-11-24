@@ -345,23 +345,35 @@ gateway cannot be reached, `add` and `rm` exit non-zero and say that the change
 is on disk; start the gateway and run `cog pool status`. A gateway from an older
 install does not know the pool: run `./install.sh` again. One bad entry makes
 the whole pool unusable, so use these commands rather than editing the
-directory. The gateway reads the directory when it starts and when `add`, `rm`,
-`cog new` or a VM's registration asks it to, so an entry that you fixed by hand
-counts after one of those.
+directory; `rm` also takes the file name of a stray entry that is not an
+account, such as a copied file. The gateway reads the directory when it starts
+and when `add`, `rm`, `cog new` or a VM's registration asks it to, so an entry
+that you fixed by hand counts after one of those.
 
 Every `cog new` VM uses the pool, and the gateway keeps each VM on one account
-until the rate-limit headers show it near its limit. Use only the
-inference-only token that `claude setup-token` makes, because the gateway
-forwards any path with it.
+until the rate-limit headers show it near its limit. A 401 from the provider
+holds that account for ten minutes, and a request that a VM sends can draw one,
+so `cog pool status` may show a hold on a working account; the next success
+clears it. Use only the inference-only token that `claude setup-token` makes,
+because the gateway forwards any path with it.
 
 ### The rest
 
-- `~/.config/secrets/FIREWORKS_API_KEY`, the key `cg` uses, goes to the same
-  path in the VM when the file exists on the Mac. `cog new` never asks for it,
-  and fails before it makes the VM when the file is not a regular file, empty,
-  unreadable or holds more than one word. A base built before `setup-secrets`
-  knew the name makes `cog new` fail after the other secrets and delete the VM,
-  until `cog base` rebuilds the base.
+- `~/.config/secrets/FIREWORKS_API_KEY`, the key `cg` uses, stays on the Mac.
+  When the file exists, `cog new` wires `api.fireworks.ai` to the gateway in
+  the VM (`setup-model-gateway fireworks`), probes it, and writes only the
+  placeholder `cog` to the same path in the VM, so `cg` sends `Bearer cog` and
+  the gateway replaces it with the key on the Mac. `cog new` never asks for the
+  file, and fails before it makes the VM when the file is not a regular file,
+  empty, unreadable, larger than 4096 bytes, or not one word of visible ASCII;
+  the message never quotes the content. The gateway reads the file for each
+  request that carries the placeholder, so replacing the key on the Mac takes
+  effect at the next request, with no restart and no sync. While the file is
+  missing or unusable, those requests get a 503 (the daemon writes the reason
+  to its stderr once for each change, and nothing for a missing file), and the
+  Claude pool and GitHub are unaffected. A request with no credential goes
+  through as sent. A base built before `setup-model-gateway` knew `fireworks`
+  makes `cog new` fail and delete the VM until `cog base` rebuilds the base.
 - Codex's login on the Mac, `~/.codex/auth.json` (the file OpenAI documents
   copying to a headless machine), goes to `setup-secrets CODEX_AUTH`, which
   checks that it is a JSON object and writes it to the same path in the VM
@@ -403,6 +415,10 @@ accepts only the placeholder or no credential. The gateway attributes each
 request to the VM, and `cog logs NAME` shows it. A VM made with
 `--no-claude-token` has no mapping and keeps whatever login it makes.
 
+The same holds for Fireworks when the Mac has a key file: the VM holds only the
+placeholder `cog` for `api.fireworks.ai`, the gateway adds the key on the Mac,
+and any other credential, or `x-api-key`, sent to that name is refused with 403.
+
 Not isolated:
 
 - The internet. The agents need it, so HTTPS and every other public address
@@ -415,8 +431,12 @@ Not isolated:
   every possible GitHub connection through itself. It does keep its app tokens
   off the VM; the policy is a boundary around those tokens, not around arbitrary
   network traffic or credentials acquired by the guest.
-- The Codex login and Fireworks key in the VM. Agents can read and send those
-  to public addresses. The VM has no GitHub App token or refresh token.
+- The Codex login in the VM. Agents can read and send it to public addresses.
+  The VM has no GitHub App token or refresh token.
+- What a Fireworks key on the Mac allows. The gateway forwards any path on
+  `api.fireworks.ai` with it, as it does for the Claude token, so anything in an
+  enabled VM can do what the key allows without reading it, until
+  `cog gateway disable NAME` or removing the key file stops it.
 - The Mac's own public address, if it has one. Only the private ranges are
   rejected.
 
@@ -463,8 +483,9 @@ their sandboxed, prompting behavior.
   `provision.sh` configures only gist.github.com's helper.
 - On Lima, `setup-github-gateway` also installs the CA, the `/etc/hosts`
   mapping of the GitHub hosts to `127.0.0.1` and the relay unit
-  `cog-github-gateway`. `setup-model-gateway claude` then adds the mapping of
-  `api.anthropic.com` to the same relay. The Cloudflare image does not run it.
+  `cog-github-gateway`. `setup-model-gateway` then adds the mappings of
+  `api.anthropic.com` (`claude`) and `api.fireworks.ai` (`fireworks`) to the
+  same relay. The Cloudflare image does not run it.
 - Both backends tell agents their exact `cog/VM-ID/*` namespace and instruct
   them to fetch and rebase onto the updated base branch before every push.
   Lima installs these instructions during gateway setup. The Cloudflare Worker
@@ -509,9 +530,12 @@ deploy or an agent image build. After installing, run `cog base` and
   `cog gateway disable t1` makes `claude -p hi` fail. `codex` runs without a
   login too (with the Mac's `codex login`; `codex login status` says so).
 - `emacs -nw` starts and exits.
-- With a Fireworks key, `cg -p hi` answers on the Mac and in the VM, `/status`
+- With a Fireworks key on the Mac, `cg -p hi` answers on the Mac and in a fresh
+  cog whose `~/.config/secrets/FIREWORKS_API_KEY` holds only `cog`, `/status`
   in `cg` names the Fireworks URL and the drop-in among the setting sources, and
   the status line's cost after a few requests matches the Fireworks dashboard.
+  `cog logs NAME` shows `model.fireworks` rows with the reason `fireworks key`,
+  and replacing the key file on the Mac makes the next request use the new key.
 - From the VM, `curl -m3 host.lima.internal:PORT` fails at once for a server on
   the Mac, and `lsof -nP -iTCP -sTCP:LISTEN` on the Mac shows only Lima's
   `127.0.0.1` ports.
