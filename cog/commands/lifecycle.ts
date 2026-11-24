@@ -23,11 +23,6 @@ import {
 } from "../names.ts";
 import { note, say } from "../output.ts";
 import { capture, run } from "../proc.ts";
-import {
-  requireRegularOrAbsent,
-  toBytes,
-  writeSecretFile,
-} from "../secrets.ts";
 import { deleteTailscale } from "../tailscale.ts";
 import type { LifecycleContext } from "./context.ts";
 
@@ -66,22 +61,6 @@ export async function list(
     throw new CogError("usage: cog list");
   }
   await context.lima.list();
-}
-
-export async function claudeToken(
-  args: readonly string[],
-  context: Pick<LifecycleContext<never>, "config" | "prompt">,
-): Promise<void> {
-  if (args.length !== 0) {
-    throw new CogError("usage: cog claude-token");
-  }
-  const { claudeTokenFile, promptInput } = context.config;
-  requireRegularOrAbsent(claudeTokenFile);
-  const token = await context.prompt(promptInput);
-  writeSecretFile(claudeTokenFile, toBytes(`${token}\n`));
-  say(
-    `cog: the Claude token is in ${claudeTokenFile}; cog new installs it from there`,
-  );
 }
 
 export async function remove(

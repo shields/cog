@@ -213,6 +213,7 @@ function checkGuestScripts(guest: string): void {
     "install-push-instructions.sh",
     "reset-identity.sh",
     "setup-github-gateway",
+    "setup-model-gateway",
     "setup-secrets",
     "throwaway.sh",
   ]) {

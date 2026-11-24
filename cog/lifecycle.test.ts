@@ -16,7 +16,6 @@ import assert from "node:assert/strict";
 import {
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -25,7 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { onTestFinished, spyOn, test } from "bun:test";
 import { State } from "../gateway/state.ts";
-import { claudeToken, grant, list, remove } from "./commands/lifecycle.ts";
+import { grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
 import { loadConfig } from "./config.ts";
 import { CommandFailed, Interrupted } from "./errors.ts";
@@ -63,6 +62,9 @@ function fixture() {
     signal: "SIGTERM" as "SIGHUP" | "SIGINT" | "SIGQUIT" | "SIGTERM",
     disableFails: false,
     interruptCleanup: false,
+    pool: "usable" as "unconfigured" | "unusable" | "usable" | "old",
+    probeFails: "",
+    syncFails: false,
   };
   const boundary = (stage: string): void => {
     if (failures.stopAt === stage) {
@@ -71,10 +73,6 @@ function fixture() {
   };
   const context: Parameters<typeof newVM>[1] & Parameters<typeof remove>[1] = {
     config,
-    prompt: (input, hint) => {
-      mark("prompt", input, hint);
-      return Promise.resolve("fake-claude");
-    },
     lima: {
       hasGatewaySocket: () =>
         Promise.reject(new Error("unexpected socket query")),
@@ -112,6 +110,9 @@ function fixture() {
         if (failures.stopAt === "upgrade-error" && argv[1] === "upgrade") {
           return Promise.reject(new CommandFailed("limactl shell", 7));
         }
+        if (failures.probeFails !== "" && argv.at(-1) === failures.probeFails) {
+          return Promise.reject(new CommandFailed("limactl shell", 1));
+        }
         boundary(argv[1] ?? "");
         signals.check();
         return Promise.resolve();
@@ -127,6 +128,28 @@ function fixture() {
       health: () => {
         mark("health");
         return Promise.resolve();
+      },
+      sync: () => {
+        mark("sync");
+        return failures.syncFails
+          ? Promise.reject(new Error("gateway administration failed"))
+          : Promise.resolve();
+      },
+      pool: () => {
+        mark("pool");
+        if (failures.pool === "old") {
+          return Promise.reject(
+            new Error(
+              "the running gateway is older than this cog; run ./install.sh in the cog checkout",
+            ),
+          );
+        }
+        return Promise.resolve({
+          state: failures.pool,
+          reason:
+            failures.pool === "unusable" ? "account work is broken" : null,
+          accounts: [],
+        });
       },
       prepareRepository: (repository) => {
         mark("prepareRepository", repository);
@@ -198,24 +221,6 @@ test("rm does not delete if disable fails and refuses both base names", async ()
   assert.deepEqual(calls, [["disable", "lima:vm"]]);
 });
 
-test("claude-token writes the prompted bytes to a private file and does not prompt for a directory", async () => {
-  const { calls, context } = fixture();
-  await claudeToken([], context);
-  assert.equal(
-    readFileSync(context.config.claudeTokenFile, "utf8"),
-    "fake-claude\n",
-  );
-  assert.equal(statSync(context.config.claudeTokenFile).mode & 0o777, 0o600);
-  assert.equal(
-    statSync(path.dirname(context.config.claudeTokenFile)).mode & 0o777,
-    0o700,
-  );
-  rmSync(context.config.claudeTokenFile);
-  mkdirSync(context.config.claudeTokenFile);
-  await assert.rejects(claudeToken([], context), /is not a regular file/);
-  assert.deepEqual(calls, [["prompt", "", undefined]]);
-});
-
 test("grant validates the VM and applies the selected profile", async () => {
   const { calls, context, mark } = fixture();
   await assert.rejects(
@@ -263,7 +268,8 @@ test("new authorizes a private repository before cloning and grants only reads",
     ["health"],
     ["exists", "base"],
     ["exists", "vm"],
-    ["prompt", "", ", run cog claude-token once, or pass --no-claude-token"],
+    ["sync"],
+    ["pool"],
     ["prepareRepository", "owner/repo"],
     ["clone", "base", "vm", ["--cpus", "2"]],
     ["directory", "vm"],
@@ -300,6 +306,18 @@ test("new authorizes a private repository before cloning and grants only reads",
       [...curl, "10", ...output, "https://api.github.com/__cog__/health"],
       null,
     ],
+    [
+      "shell",
+      "vm",
+      ["sudo", "/usr/local/lib/cog/setup-model-gateway", "claude"],
+      null,
+    ],
+    [
+      "shell",
+      "vm",
+      [...curl, "10", ...output, "https://api.anthropic.com/__cog__/health"],
+      null,
+    ],
     ["grant", "lima:vm", "owner/repo", false],
     [
       "shell",
@@ -322,7 +340,7 @@ test("new authorizes a private repository before cloning and grants only reads",
       null,
     ],
     ...[
-      ["CLAUDE_CODE_OAUTH_TOKEN", "fake-claude\n"],
+      ["CLAUDE_CODE_OAUTH_TOKEN", "cog\n"],
       ["CODEX_AUTH", codex],
       ["FIREWORKS_API_KEY", "fake-fireworks\n"],
     ].map(([key, value]) => [
@@ -334,6 +352,113 @@ test("new authorizes a private repository before cloning and grants only reads",
     ["close"],
     ["enter", "vm", guest],
   ]);
+});
+
+test("new asks no one for a Claude token and fails before any VM work when the pool cannot serve", async () => {
+  for (const [pool, message] of [
+    [
+      "unconfigured",
+      "the Claude pool has no account; run cog pool add NAME, or pass --no-claude-token",
+    ],
+    [
+      "unusable",
+      "the Claude pool is not usable: account work is broken; fix that (cog pool rm NAME removes an account), or pass --no-claude-token",
+    ],
+    [
+      "old",
+      "cannot read the Claude pool state from the gateway: the running gateway is older than this cog; run ./install.sh in the cog checkout, or pass --no-claude-token",
+    ],
+  ] as const) {
+    const { calls, context, failures } = fixture();
+    failures.pool = pool;
+    await assert.rejects(
+      newVM(["vm", "--no-repo", "--no-codex-auth"], context),
+      {
+        message,
+      },
+    );
+    assert.deepEqual(calls, [
+      ["health"],
+      ["exists", "base"],
+      ["exists", "vm"],
+      ["sync"],
+      ["pool"],
+    ]);
+  }
+});
+
+test("new stops before any VM work when the gateway cannot read the pool again", async () => {
+  const { calls, context, failures } = fixture();
+  failures.syncFails = true;
+  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
+    message:
+      "cannot read the Claude pool state from the gateway: gateway administration failed, or pass --no-claude-token",
+  });
+  assert.deepEqual(calls, [
+    ["health"],
+    ["exists", "base"],
+    ["exists", "vm"],
+    ["sync"],
+  ]);
+});
+
+test.each([
+  [
+    "the wiring step",
+    ["sudo", "/usr/local/lib/cog/setup-model-gateway", "claude"],
+  ],
+  [
+    "the Anthropic probe",
+    [
+      "curl",
+      "--fail",
+      "--silent",
+      "--show-error",
+      "--max-time",
+      "10",
+      "--noproxy",
+      "*",
+      "--output",
+      "/dev/null",
+      "https://api.anthropic.com/__cog__/health",
+    ],
+  ],
+] as const)(
+  "a failure of %s says to run cog base and rolls back",
+  async (_, step) => {
+    const { calls, context, failures } = fixture();
+    failures.probeFails = step.at(-1) ?? "";
+    await assert.rejects(
+      newVM(["vm", "--no-repo", "--no-codex-auth"], context),
+      {
+        message:
+          "vm cannot reach Claude through the gateway; a base built by an older cog lacks this wiring, so run cog base again",
+      },
+    );
+    assert.deepEqual(calls.slice(-2), [
+      ["disable", "lima:vm"],
+      ["remove", "vm"],
+    ]);
+    assert.equal(
+      calls.some(
+        ([method, , argv]) =>
+          method === "shell" &&
+          (argv as string[])[0]?.endsWith("setup-secrets"),
+      ),
+      false,
+    );
+  },
+);
+
+test("--no-claude-token skips the pool, the wiring and the placeholder", async () => {
+  const { calls, context, failures } = fixture();
+  failures.pool = "unconfigured";
+  await newVM(noSecrets, context);
+  const text = JSON.stringify(calls);
+  assert.equal(text.includes('"pool"'), false);
+  assert.equal(text.includes("setup-model-gateway"), false);
+  assert.equal(text.includes("api.anthropic.com"), false);
+  assert.equal(text.includes("setup-secrets"), false);
 });
 
 const noSecrets = ["vm", "--no-repo", "--no-claude-token", "--no-codex-auth"];

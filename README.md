@@ -58,7 +58,7 @@ this `PATH` order does not hold.
 cog base [--dotfiles DIR] [MODULE...]
 cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
 cog grant NAME [OWNER/REPO] [--profile read|cog]
-cog claude-token
+cog pool add NAME | rm NAME | list | status
 cog tailscale config CLIENT-ID
 cog rm NAME
 cog list
@@ -67,8 +67,8 @@ cog list
 `cog base` builds the base VM `cog-base` once, and again to refresh it; it takes
 tens of minutes. `cog new` makes a VM from a clone of the base, installs the
 secrets and the repository, and opens a shell in it. `cog grant` adds a
-repository grant to a running VM. `cog claude-token` keeps the Claude token on
-the Mac for every later `new`. `cog rm` disables the VM's GitHub access and
+repository grant to a running VM. `cog pool` keeps the Claude accounts that
+every VM uses through the gateway. `cog rm` disables the VM's GitHub access and
 deletes it, and refuses the base. `cog list` is `limactl list`. `ssh lima-NAME`
 also works, through `~/.lima/*/ssh.config`.
 
@@ -303,42 +303,56 @@ list, an environment or a message.
 
 ### Claude Code
 
-`cog claude-token` asks, without echo, for the token that `claude setup-token`
-prints (run that in another terminal first and paste the result) and keeps it in
-`~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN` on the Mac (directory 0700, file
-0600, written atomically). `cog new` installs the token from that file when it
-exists, and fails, naming the file, when it is not a regular file, empty,
-unreadable or holds more than one word; without the file it asks the same way
-and reminds you of `claude-token`. In the VM the token goes to the same path,
-which dotfiles' `.zshrc` exports only on Linux in interactive shells, and
-Claude's sandbox on the Mac denies reads under `~/.config/secrets`. It is never
-taken from the command line or the environment. An empty answer is an error;
-`--no-claude-token` skips the token, file or prompt, for a VM where you will run
-`claude auth login`.
+A VM holds no Claude credential. `cog new` runs `setup-model-gateway claude` in
+the guest, which maps `api.anthropic.com` to `127.0.0.1` in `/etc/hosts`, where
+the relay answers with the gateway's certificate. It then checks
+`https://api.anthropic.com/__cog__/health` from the guest. The VM's
+`~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN`, which dotfiles' `.zshrc` exports
+only on Linux in interactive shells, holds the placeholder `cog`; the gateway
+replaces `Authorization: Bearer cog` with the token of a pool account and
+forwards the request.
+
+`cog new` has the gateway read the pool again and asks it for the pool state
+before it clones anything, and fails with what to do when the pool has no
+account, is not usable, or the running gateway is too old to answer. Add an
+account with `cog pool add NAME`, or pass `--no-claude-token`, which skips the
+pool check, the mapping and the placeholder, so that the VM reaches Anthropic
+directly and you can run `claude auth login` in it. `cog new` no longer reads or
+asks for a token, and leaves `~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN` on the
+Mac alone.
+
+A base built by an older cog lacks `setup-model-gateway`. Run `cog base` again
+before `cog new`; `new` fails and deletes the VM when the script is missing or
+the probe fails. VMs that exist already keep the token they have and are not
+affected.
 
 ### The Claude pool
 
 The gateway can hold several Claude accounts, and their tokens stay on the Mac.
 Make one token for each account with `claude setup-token`, then add it with
 `cog pool add NAME` (NAME is 1 to 32 lowercase letters, digits and hyphens,
-starting with a letter or digit). It asks for the token the way
-`cog claude-token` does, stores it in `~/.config/secrets/cog/claude-pool/NAME`
-(directory 0700, file 0600), and tells the running gateway to reload the
-directory. `cog pool rm NAME` removes an account and reloads. `cog pool list`
-prints the names, and works without the gateway. `cog pool status` asks the
-gateway for each account's hold and its rate-limit utilization and reset times
-(UTC), and fails with the reason when the pool is configured but unusable.
+starting with a letter or digit). It asks for the token without echo, stores it
+in `~/.config/secrets/cog/claude-pool/NAME` (directory 0700, file 0600), and
+tells the running gateway to reload the directory. `cog pool rm NAME` removes an
+account and reloads. `cog pool list` prints the names, and works without the
+gateway. `cog pool status` asks the gateway for each account's hold and, for
+each rate-limit window, its utilization and the time that reading lasts until
+(UTC, the window's reset when the provider gave one). It fails with the reason
+when the pool is configured but unusable.
 
 `add` refuses a name that exists, so run `rm` first to replace a token. When the
 gateway cannot be reached, `add` and `rm` exit non-zero and say that the change
-is on disk; start the gateway and run `cog pool status`. A gateway from an
-older install does not know the pool: run `./install.sh` again. One bad entry
-makes the whole pool unusable, so use these commands rather than editing the
-directory.
+is on disk; start the gateway and run `cog pool status`. A gateway from an older
+install does not know the pool: run `./install.sh` again. One bad entry makes
+the whole pool unusable, so use these commands rather than editing the
+directory. The gateway reads the directory when it starts and when `add`, `rm`,
+`cog new` or a VM's registration asks it to, so an entry that you fixed by hand
+counts after one of those.
 
-Guests do not use the pool yet; that comes later. Use only the inference-only
-token that `claude setup-token` makes, because the gateway forwards any path
-with it.
+Every `cog new` VM uses the pool, and the gateway keeps each VM on one account
+until the rate-limit headers show it near its limit. Use only the
+inference-only token that `claude setup-token` makes, because the gateway
+forwards any path with it.
 
 ### The rest
 
@@ -381,6 +395,14 @@ Isolated, with `lima/dev.yaml` as the source:
   The VM may use only DNS and DHCP at `192.168.5.2`. The rules load before the
   network comes up on every boot, and Lima rewrites them on every boot.
 
+A VM holds no real Claude credential: its Claude Code sends the placeholder
+`cog`, and the gateway adds a pool token on the Mac. While the `/etc/hosts`
+mapping is installed, a program in the guest that sends its own Anthropic API
+key or login to `api.anthropic.com` is refused with 403, since the gateway
+accepts only the placeholder or no credential. The gateway attributes each
+request to the VM, and `cog logs NAME` shows it. A VM made with
+`--no-claude-token` has no mapping and keeps whatever login it makes.
+
 Not isolated:
 
 - The internet. The agents need it, so HTTPS and every other public address
@@ -393,9 +415,8 @@ Not isolated:
   every possible GitHub connection through itself. It does keep its app tokens
   off the VM; the policy is a boundary around those tokens, not around arbitrary
   network traffic or credentials acquired by the guest.
-- The Claude token, Codex login and Fireworks key in the VM. Agents can read and
-  send those to public addresses. The VM has no GitHub App token or refresh
-  token.
+- The Codex login and Fireworks key in the VM. Agents can read and send those
+  to public addresses. The VM has no GitHub App token or refresh token.
 - The Mac's own public address, if it has one. Only the private ranges are
   rejected.
 
@@ -442,7 +463,8 @@ their sandboxed, prompting behavior.
   `provision.sh` configures only gist.github.com's helper.
 - On Lima, `setup-github-gateway` also installs the CA, the `/etc/hosts`
   mapping of the GitHub hosts to `127.0.0.1` and the relay unit
-  `cog-github-gateway`.
+  `cog-github-gateway`. `setup-model-gateway claude` then adds the mapping of
+  `api.anthropic.com` to the same relay. The Cloudflare image does not run it.
 - Both backends tell agents their exact `cog/VM-ID/*` namespace and instruct
   them to fetch and rebase onto the updated base branch before every push.
   Lima installs these instructions during gateway setup. The Cloudflare Worker
@@ -480,9 +502,12 @@ deploy or an agent image build. After installing, run `cog base` and
 - Replacing an expiring access token happens on the Mac on demand. After a
   revoked or expired refresh token, `cog authorize OWNER/REPO` restores
   the authorization; the VM never receives it.
-- `claude` runs without a login (with the token from `cog claude-token` or the
-  `cog new` prompt), and so does `codex` (with the Mac's `codex login`;
-  `codex login status` says so).
+- `claude -p hi` answers in a fresh cog without a login, and
+  `~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN` in the VM holds only `cog` (no
+  `sk-ant-` string is in the VM's files or environment). `cog logs t1` on the
+  Mac shows `model.claude` rows that name the pool account, and
+  `cog gateway disable t1` makes `claude -p hi` fail. `codex` runs without a
+  login too (with the Mac's `codex login`; `codex login status` says so).
 - `emacs -nw` starts and exits.
 - With a Fireworks key, `cg -p hi` answers on the Mac and in the VM, `/status`
   in `cg` names the Fireworks URL and the drop-in among the setting sources, and

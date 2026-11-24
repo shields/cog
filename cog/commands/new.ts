@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { placeholderCredential } from "../../gateway/models.ts";
 import { grantProfiles } from "../../gateway/policy.ts";
+import type { Control, PoolStatus } from "../../gateway/control.ts";
 import type { Instance } from "../../gateway/state.ts";
 import { dotfilesRepo, guestLib, guestRepo } from "../config.ts";
-import { CogError, Interrupted } from "../errors.ts";
+import { CogError, CommandFailed, Interrupted } from "../errors.ts";
 import { gatewayName, sizeArgs, validName, validRepository } from "../names.ts";
 import { note, say } from "../output.ts";
 import {
@@ -28,7 +30,6 @@ import {
 import { signals } from "../proc.ts";
 import {
   fireworksKeyPresent,
-  readClaudeTokenFile,
   readCodexAuth,
   readFireworksKey,
   toBytes,
@@ -53,8 +54,10 @@ type NewContext = LifecycleContext<
   | "disable"
   | "grant"
   | "health"
+  | "pool"
   | "prepareRepository"
   | "state"
+  | "sync"
   | "register"
 >;
 
@@ -116,6 +119,33 @@ function parseArgs(args: readonly string[]): {
   };
 }
 
+async function requireUsablePool(
+  gateway: Pick<Control, "pool" | "sync">,
+): Promise<void> {
+  const skip = "or pass --no-claude-token";
+  let status: PoolStatus;
+  try {
+    // The gateway reads the pool directory when it starts and when it syncs,
+    // so a bad entry that was fixed by hand counts only after a sync.
+    await gateway.sync();
+    status = await gateway.pool();
+  } catch (error) {
+    throw new CogError(
+      `cannot read the Claude pool state from the gateway: ${error instanceof Error ? error.message : "unknown error"}, ${skip}`,
+    );
+  }
+  if (status.state === "unconfigured") {
+    throw new CogError(
+      `the Claude pool has no account; run cog pool add NAME, ${skip}`,
+    );
+  }
+  if (status.state === "unusable") {
+    throw new CogError(
+      `the Claude pool is not usable: ${status.reason ?? "unknown reason"}; fix that (cog pool rm NAME removes an account), ${skip}`,
+    );
+  }
+}
+
 function cleanupNote(text: string): void {
   try {
     note(text);
@@ -150,16 +180,8 @@ export async function newVM(
     noCodex,
   } = parseArgs(args);
   const name = validName(inputName);
-  const {
-    base,
-    githubWebUrl,
-    cpus,
-    memory,
-    claudeTokenFile,
-    codexAuthFile,
-    fireworksKeyFile,
-    promptInput,
-  } = context.config;
+  const { base, githubWebUrl, cpus, memory, codexAuthFile, fireworksKeyFile } =
+    context.config;
   if (name === base || name === "cog-base") {
     throw new CogError(`${name} is the base VM; choose another name`);
   }
@@ -205,17 +227,8 @@ export async function newVM(
   const fireworks = fireworksKeyPresent(fireworksKeyFile)
     ? readFireworksKey(fireworksKeyFile)
     : undefined;
-  let claude: string | undefined;
   if (!noClaude) {
-    if (existsSync(claudeTokenFile)) {
-      claude = readClaudeTokenFile(claudeTokenFile);
-    } else {
-      claude = await context.prompt(
-        promptInput,
-        ", run cog claude-token once, or pass --no-claude-token",
-      );
-      note("cog: cog claude-token keeps the token for next time");
-    }
+    await requireUsablePool(gateway);
   }
   const access =
     repository === null
@@ -293,6 +306,26 @@ export async function newVM(
       name,
       probe("10", "https://api.github.com/__cog__/health"),
     );
+    if (!noClaude) {
+      try {
+        await lima.shell(name, [
+          "sudo",
+          `${guestLib}/setup-model-gateway`,
+          "claude",
+        ]);
+        await lima.shell(
+          name,
+          probe("10", "https://api.anthropic.com/__cog__/health"),
+        );
+      } catch (error) {
+        if (!(error instanceof CommandFailed)) {
+          throw error;
+        }
+        throw new CogError(
+          `${name} cannot reach Claude through the gateway; a base built by an older cog lacks this wiring, so run cog base again`,
+        );
+      }
+    }
 
     let cloned = false;
     if (repository !== null) {
@@ -328,7 +361,7 @@ export async function newVM(
     const secrets: readonly (readonly [string, Uint8Array | undefined])[] = [
       [
         "CLAUDE_CODE_OAUTH_TOKEN",
-        claude === undefined ? undefined : toBytes(`${claude}\n`),
+        noClaude ? undefined : toBytes(`${placeholderCredential}\n`),
       ],
       ["CODEX_AUTH", codex],
       [

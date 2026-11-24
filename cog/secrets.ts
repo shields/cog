@@ -92,24 +92,6 @@ function regularFile(file: string): boolean {
   }
 }
 
-export function readClaudeTokenFile(file: string): string {
-  if (!regularFile(file)) {
-    throw new CogError(
-      `${file} is not a regular file; remove it, or pass --no-claude-token`,
-    );
-  }
-  if (!readable(file)) {
-    throw new CogError(
-      `cannot read ${file}; run cog claude-token to replace it, or pass --no-claude-token`,
-    );
-  }
-  return setOneWord(
-    latin1(readFileSync(file)),
-    `${file} is empty; run cog claude-token to replace it, or pass --no-claude-token`,
-    `${file} holds more than one token; run cog claude-token to replace it`,
-  );
-}
-
 // A dangling symbolic link counts as present, and then fails the read.
 export function fireworksKeyPresent(file: string): boolean {
   if (existsSync(file)) {
@@ -175,12 +157,6 @@ export function readCodexAuth(file: string): Uint8Array {
   return bytes;
 }
 
-export function requireRegularOrAbsent(file: string): void {
-  if (existsSync(file) && !regularFile(file)) {
-    throw new CogError(`${file} is not a regular file; remove it first`);
-  }
-}
-
 // The helper restores the terminal on a signal as well as on a normal end.
 const hiddenRead = `saved=$(stty -g) || exit 1
 trap 'stty "$saved"' EXIT
@@ -195,14 +171,13 @@ printf %s "$line"`;
 async function readHidden(
   promptText: string,
   subject: string,
-  orElse: string,
 ): Promise<string> {
   let terminal: number;
   try {
     terminal = openSync("/dev/tty", "r+");
   } catch {
     throw new CogError(
-      `there is no terminal to ask for the ${subject}; run in a terminal${orElse}`,
+      `there is no terminal to ask for the ${subject}; run in a terminal`,
     );
   }
   try {
@@ -238,10 +213,9 @@ export async function promptSecretLine(
   input: string,
   prompt: string,
   subject: string,
-  hint = "",
 ): Promise<string> {
   if (input === "") {
-    return firstLine(await readHidden(prompt, subject, hint));
+    return firstLine(await readHidden(prompt, subject));
   }
   if (!readable(input)) throw new CogError("cannot read COG_PROMPT_INPUT");
   try {
@@ -252,19 +226,15 @@ export async function promptSecretLine(
 }
 
 // promptInput names a file to read instead of the terminal, for tests.
-export async function promptClaudeToken(
-  promptInput: string,
-  orElse = "",
-): Promise<string> {
+export async function promptClaudeToken(promptInput: string): Promise<string> {
   const line = await promptSecretLine(
     promptInput,
     "Paste the output of claude setup-token (no echo), then press Enter: ",
     "Claude token",
-    orElse,
   );
   return setOneWord(
     line,
-    `the Claude token is empty; run claude setup-token in another terminal and paste its output${orElse}`,
+    "the Claude token is empty; run claude setup-token in another terminal and paste its output",
     "the Claude token has spaces in it; paste only the token",
   );
 }

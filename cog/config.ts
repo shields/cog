@@ -30,7 +30,6 @@ export interface Config {
   readonly githubWebUrl: string;
   readonly promptInput: string;
   readonly tailscaleFile: string;
-  readonly claudeTokenFile: string;
   readonly fireworksKeyFile: string;
   readonly codexAuthFile: string;
   readonly defaultDotfiles: string;
@@ -57,12 +56,6 @@ export function loadConfig(env: Env): Config {
     githubWebUrl: setting(env, "COG_GITHUB_WEB_URL", "https://github.com"),
     promptInput: setting(env, "COG_PROMPT_INPUT"),
     tailscaleFile: path.join(locations(env).secrets, "tailscale-oauth.json"),
-    claudeTokenFile: path.join(
-      home,
-      ".config",
-      "secrets",
-      "CLAUDE_CODE_OAUTH_TOKEN",
-    ),
     fireworksKeyFile: path.join(
       home,
       ".config",

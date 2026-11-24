@@ -289,7 +289,7 @@ function describeAccount(account: AccountSnapshot): string {
       ? ["no rate-limit reading"]
       : account.buckets.map(
           ({ bucket, utilization, expires }) =>
-            `${bucket} ${String(Math.round(utilization * 100))}% resets ${utc(expires)}`,
+            `${bucket} ${String(Math.round(utilization * 100))}% until ${utc(expires)}`,
         );
   return [account.name, held, ...readings].join("; ");
 }

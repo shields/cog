@@ -26,7 +26,6 @@ test("the defaults come from HOME alone", () => {
     githubWebUrl: "https://github.com",
     promptInput: "",
     tailscaleFile: "/h/.config/secrets/cog/tailscale-oauth.json",
-    claudeTokenFile: "/h/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN",
     fireworksKeyFile: "/h/.config/secrets/FIREWORKS_API_KEY",
     codexAuthFile: "/h/.codex/auth.json",
     defaultDotfiles: "/h/src/github.com/shields/dotfiles",

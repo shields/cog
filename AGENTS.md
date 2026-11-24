@@ -60,8 +60,11 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   state and the authorizations on first use, and
   `State` refuses to register `lima:cog-base` and the VM that `COG_BASE`
   names. The same server answers `api.anthropic.com`, a third name on the leaf,
-  for a guest whose `/etc/hosts` points that name at the relay;
-  `guest/setup-github-gateway` maps only the two GitHub names.
+  for a guest whose `/etc/hosts` points that name at the relay.
+  `guest/setup-github-gateway` maps the two GitHub names, and
+  `guest/setup-model-gateway claude` (run by `cog new` unless
+  `--no-claude-token`, after the GitHub health probe) maps `api.anthropic.com`.
+  The Cloudflare image runs neither script.
   `gateway/models.ts` (pure) has no allow or deny list of paths: a guest could
   already send any path with a token of its own, and a list would break when
   Anthropic adds an endpoint. It refuses a target that is not origin-form
@@ -74,17 +77,16 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   value in place with a token. It adds no header except `Content-Length: 0` on
   a body-less request that would otherwise go out chunked. The target is sent
   as written and bodies are streamed unparsed. `gateway/pool.ts` reads
-  `claude-pool/` in the secrets directory, one file per account, at start and
-  on `/sync`, which `register` and `disable` request; a missing or empty
-  directory means no pool, one bad entry disables the pool, and either way the
-  pool route answers 503. Each VM gets a stable account order and stays on an
-  account until the rate-limit headers show it near its limit or rejected. Each
-  VM has its own upstream keep-alive agent. `cog/commands/pool.ts` holds
-  `cog pool`, whose `add` and `rm` change that directory and ask the daemon to
-  reload;
-  `GET /pool` on the admin socket (`Control.pool`) reports the state and each
-  account's hold and readings, never a token, and `list` reads the directory
-  with the loader.
+  `claude-pool/` in the secrets directory, one file per account, at start and on
+  `/sync`, which `register`, `disable` and `cog new`'s pool check request; a
+  missing or empty directory means no pool, one bad entry disables the pool, and
+  either way the pool route answers 503. Each VM gets a stable account order and
+  stays on an account until the rate-limit headers show it near its limit or
+  rejected. Each VM has its own upstream keep-alive agent.
+  `cog/commands/pool.ts` holds `cog pool`, whose `add` and `rm` change that
+  directory and ask the daemon to reload; `GET /pool` on the admin socket
+  (`Control.pool`) reports the state and each account's hold and readings, never
+  a token, and `list` reads the directory with the loader.
   Bun's HTTP server groups response header lines of one name next to the first
   and respells later ones, so duplicates keep their values and count but not
   their exact order.
@@ -111,10 +113,13 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
 ## Secrets
 
 No secret may reach an argument list, an environment, a log or a message. The
-Claude token, Codex login and Fireworks key go to `guest/setup-secrets NAME` on
-stdin, and the CA to `setup-github-gateway`'s stdin. `cog pool add` reads a
-pool token like `claude-token` and creates the file exclusively with mode 600
-by a dot-named temporary and a link, so the loader never sees a partial entry.
+Codex login and Fireworks key go to `guest/setup-secrets NAME` on stdin, and
+so does the Claude placeholder `cog`; a Lima guest holds no real Claude token.
+The CA goes to `setup-github-gateway`'s stdin. `cog new` needs a usable Claude
+pool, checked before the clone, unless `--no-claude-token`. `cog pool add`
+reads a pool token with the no-echo prompt and creates the file exclusively
+with mode 600 by a dot-named temporary and a link, so the loader never sees a
+partial entry.
 `cog new` upgrades the agents before it installs any secret. Rollback starts
 after a successful clone and ends before opening the interactive shell. A setup
 failure or signal in that interval disables the registration and deletes the VM.

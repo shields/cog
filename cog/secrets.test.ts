@@ -33,10 +33,8 @@ import { CogError } from "./errors.ts";
 import {
   fireworksKeyPresent,
   promptClaudeToken,
-  readClaudeTokenFile,
   readCodexAuth,
   readFireworksKey,
-  requireRegularOrAbsent,
   setOneWord,
   toBytes,
   writeSecretFile,
@@ -128,71 +126,6 @@ describe("setOneWord", () => {
   });
 });
 
-describe("the Claude token file", () => {
-  const read = (content: string): string => {
-    const file = path.join(directory(), "token");
-    writeFileSync(file, content);
-    return readClaudeTokenFile(file);
-  };
-
-  test("holds one word, which may be followed by newlines", () => {
-    assert.equal(read(`${marker}\n`), marker);
-    assert.equal(read(`  ${marker}\r\n\n\n`), marker);
-  });
-
-  test("two words, from any separator, are refused without quoting them", () => {
-    for (const content of [
-      `${marker} other`,
-      `${marker}\nsecond-line`,
-      `${marker}\tsecond`,
-      `other ${marker}`,
-    ]) {
-      const text = message(() => read(content));
-      assert.match(text, /holds more than one token; run cog claude-token/);
-      assert.equal(text.includes(marker), false);
-    }
-  });
-
-  test("an empty file says so", () => {
-    assert.match(
-      message(() => read(" \n")),
-      / is empty; run cog claude-token to replace it, or pass --no-claude-token$/,
-    );
-  });
-
-  test("a directory, a missing file and a dangling link are not regular files", () => {
-    const dir = directory();
-    const dangling = path.join(dir, "dangling");
-    symlinkSync(path.join(dir, "nothing"), dangling);
-    for (const file of [dir, path.join(dir, "missing"), dangling]) {
-      assert.equal(
-        message(() => readClaudeTokenFile(file)),
-        `${file} is not a regular file; remove it, or pass --no-claude-token`,
-      );
-    }
-  });
-
-  test("a file that cannot be read says so", () => {
-    if (process.getuid?.() === 0) {
-      return;
-    }
-    const file = path.join(directory(), "token");
-    writeFileSync(file, marker, { mode: 0o000 });
-    chmodSync(file, 0o000);
-    assert.equal(
-      message(() => readClaudeTokenFile(file)),
-      `cannot read ${file}; run cog claude-token to replace it, or pass --no-claude-token`,
-    );
-  });
-
-  test("a link to a file is followed", () => {
-    const dir = directory();
-    writeFileSync(path.join(dir, "real"), `${marker}\n`);
-    symlinkSync(path.join(dir, "real"), path.join(dir, "link"));
-    assert.equal(readClaudeTokenFile(path.join(dir, "link")), marker);
-  });
-});
-
 describe("the Fireworks key file", () => {
   test("presence counts a dangling link, which then fails the read", () => {
     const dir = directory();
@@ -204,6 +137,14 @@ describe("the Fireworks key file", () => {
       message(() => readFireworksKey(dangling)),
       `${dangling} is not a regular file; remove it`,
     );
+  });
+
+  test("a link to a file is followed", () => {
+    const dir = directory();
+    writeFileSync(path.join(dir, "real"), `${marker}\n`);
+    symlinkSync(path.join(dir, "real"), path.join(dir, "link"));
+    assert.equal(fireworksKeyPresent(path.join(dir, "link")), true);
+    assert.equal(readFireworksKey(path.join(dir, "link")), marker);
   });
 
   test("one word is the key, and more than one is refused without quoting it", () => {
@@ -310,19 +251,6 @@ describe("the Codex login", () => {
   });
 });
 
-test("an existing token target must be a regular file", () => {
-  const dir = directory();
-  requireRegularOrAbsent(path.join(dir, "absent"));
-  writeFileSync(path.join(dir, "file"), "x");
-  requireRegularOrAbsent(path.join(dir, "file"));
-  assert.equal(
-    message(() => {
-      requireRegularOrAbsent(dir);
-    }),
-    `${dir} is not a regular file; remove it first`,
-  );
-});
-
 describe("the typed token", () => {
   const typed = (content: string): Promise<string> => {
     const file = path.join(directory(), "prompt");
@@ -350,17 +278,11 @@ describe("the typed token", () => {
     }
   });
 
-  test("an empty line says what to do, with the caller's addition", async () => {
-    assert.equal(
-      await rejection(() => typed("\n")),
-      "the Claude token is empty; run claude setup-token in another terminal and paste its output",
-    );
-    const file = path.join(directory(), "prompt");
-    writeFileSync(file, "");
-    assert.equal(
-      await rejection(() => promptClaudeToken(file, ", or pass X")),
-      "the Claude token is empty; run claude setup-token in another terminal and paste its output, or pass X",
-    );
+  test("an empty line says what to do", async () => {
+    const empty =
+      "the Claude token is empty; run claude setup-token in another terminal and paste its output";
+    assert.equal(await rejection(() => typed("\n")), empty);
+    assert.equal(await rejection(() => typed("")), empty);
   });
 
   test("a directory reads as an empty line", async () => {

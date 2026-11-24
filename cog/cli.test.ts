@@ -643,7 +643,6 @@ test("lifecycle verbs reject invalid arguments before using a VM", () => {
     ],
     [["new", "invalid name"], "invalid VM name: invalid name"],
     [["grant"], "usage: cog grant NAME [OWNER/REPO] [--profile read|cog]"],
-    [["claude-token", "x"], "usage: cog claude-token"],
     [["pool"], "usage: cog pool add NAME | rm NAME | list | status"],
     [["pool", "add", "Bad"], /^cog: the account name must be/],
     [["rm"], "usage: cog rm NAME"],

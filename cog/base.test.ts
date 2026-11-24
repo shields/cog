@@ -96,7 +96,6 @@ async function fixture() {
   };
   const context: Parameters<typeof baseVM>[1] = {
     config,
-    prompt: () => assert.fail("base does not prompt"),
     gateway: () => assert.fail("base does not use the gateway"),
     lima: {
       exists: async (name) => {

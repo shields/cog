@@ -399,6 +399,7 @@ test("add fails when the pool is not usable afterwards and gives the reason", as
   const { pool, context, io } = fixture();
   seed(pool, { alpha });
   writeFileSync(path.join(pool, "loose"), `${bravo}\n`, { mode: 0o644 });
+  chmodSync(path.join(pool, "loose"), 0o644);
   const message = await failure(poolCommand(["add", "work"], context, io));
   assert.match(message, /^the token for work is saved in /);
   assert.match(message, /not usable: account loose is accessible to group/);
@@ -435,6 +436,7 @@ test("rm fails when the pool is unusable for another reason, after the removal",
   const { pool, context, io } = fixture();
   seed(pool, { alpha });
   writeFileSync(path.join(pool, "loose"), `${bravo}\n`, { mode: 0o644 });
+  chmodSync(path.join(pool, "loose"), 0o644);
   const message = await failure(poolCommand(["rm", "alpha"], context, io));
   assert.match(message, /^account alpha is removed from /);
   assert.match(message, /not usable: account loose is accessible/);
@@ -552,7 +554,7 @@ test("status prints one line for each account with times in UTC", async () => {
   const { out } = io;
   await poolCommand(["status"], context, io);
   assert.deepEqual(out, [
-    "alpha; held until 2026-11-24T12:00:00Z; 5h 42% resets 2026-11-24T13:00:00Z; 7d 100% resets 2026-11-25T12:00:00Z\n",
+    "alpha; held until 2026-11-24T12:00:00Z; 5h 42% until 2026-11-24T13:00:00Z; 7d 100% until 2026-11-25T12:00:00Z\n",
     "bravo; not held; no rate-limit reading\n",
   ]);
 });

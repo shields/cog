@@ -17,7 +17,7 @@ import { baseVM } from "./commands/base.ts";
 import { cloudCommand } from "./commands/cloud.ts";
 import { gatewayCommand } from "./commands/gateway.ts";
 import type { Context } from "./commands/context.ts";
-import { claudeToken, grant, list, remove } from "./commands/lifecycle.ts";
+import { grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
 import { poolCommand } from "./commands/pool.ts";
 import { authorize, edit, logs, revoke, show } from "./commands/policy.ts";
@@ -30,13 +30,7 @@ import { configureTailscale } from "./tailscale.ts";
 import { promptClaudeToken } from "./secrets.ts";
 
 function usage(config: Config): string {
-  const {
-    base,
-    defaultDotfiles,
-    claudeTokenFile,
-    codexAuthFile,
-    fireworksKeyFile,
-  } = config;
+  const { base, defaultDotfiles, codexAuthFile, fireworksKeyFile } = config;
   return `usage: cog base [--dotfiles DIR] [MODULE...]
                               build ${base} from lima/dev.yaml and guest/ of this cog and
                               the dotfiles checkout DIR
@@ -61,7 +55,6 @@ function usage(config: Config): string {
                               administer Cloudflare containers
        cog pool add NAME | rm NAME | list | status
                               keep Claude pool tokens in the gateway, one per account
-       cog claude-token       keep the token that claude setup-token prints, for every later new
        cog rm NAME            delete a VM (${base} is refused)
        cog list               list the VMs
 
@@ -85,11 +78,11 @@ Credentials stay on the Mac. new clones the repository in the VM at
 the shell there. --no-repo skips repository selection. To enable pushes to
 cog/VM-ID/*, run cog grant NAME OWNER/REPO --profile cog on the Mac.
 
-new installs the Claude token from ${claudeTokenFile}
-when that file exists, and otherwise asks for it without echo: run claude
-setup-token in another terminal first. claude-token asks the same way and writes
-the file (mode 600), so that new never asks again. --no-claude-token skips the
-token, for a VM that will use claude auth login.
+new gives the VM no Claude credential: its Claude Code reaches Anthropic through
+the gateway, which uses an account from the pool that cog pool add keeps, and the
+VM holds only a placeholder. new fails when the pool has no usable account.
+--no-claude-token skips the placeholder and the mapping, for a VM that will use
+claude auth login.
 
 new copies this Mac's Codex login, ${codexAuthFile}, into the VM, and
 fails when there is none: run codex login here first, with
@@ -123,9 +116,6 @@ async function dispatch(
       return await newVM(args, context);
     case "list":
       await list(args, context);
-      return 0;
-    case "claude-token":
-      await claudeToken(args, context);
       return 0;
     case "rm":
       await remove(args, context);
