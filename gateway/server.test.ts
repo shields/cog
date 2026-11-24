@@ -4662,6 +4662,132 @@ test("a request with no body is sent again once after a reset on a reused connec
   assert.equal(stub.requests.length, 3);
 });
 
+test("a request with no body is sent again until a fresh connection carries it when every idle connection has gone stale", async () => {
+  const waiting: (() => void)[] = [];
+  let stale = false;
+  const stub = await startModelStub((request, response, entry) => {
+    if (stale && entry.connection <= 2) {
+      request.socket.destroy();
+      return;
+    }
+    if (!stale) {
+      waiting.push(() => {
+        replyOk(request, response, entry);
+      });
+      if (waiting.length === 2) {
+        for (const release of waiting) {
+          release();
+        }
+      }
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const warm = await Promise.all([
+    claude(socket, "GET", "/v1/models", poolHeaders),
+    claude(socket, "GET", "/v1/models", poolHeaders),
+  ]);
+  assert.deepEqual(
+    warm.map(({ status }) => status),
+    [200, 200],
+  );
+  assert.equal(stub.connections.length, 2);
+  stale = true;
+  assert.equal(
+    (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+    200,
+  );
+  assert.deepEqual(
+    stub.requests
+      .slice(2)
+      .map(({ connection }) => connection)
+      .toSorted((a, b) => a - b),
+    [1, 2, 3],
+  );
+});
+
+test("a GitHub request with a body is not sent again after a reset on a reused connection", async () => {
+  const connections: (number | undefined)[] = [];
+  const { socket } = await startGateway({
+    handler: (request, response) => {
+      connections.push(request.socket.remotePort);
+      const first = connections.length === 1;
+      request.resume();
+      request.once("end", () => {
+        if (first) {
+          response.writeHead(200).end("ok");
+        } else {
+          request.socket.destroy();
+        }
+      });
+    },
+  });
+  captureStderr();
+  const negotiation = Buffer.concat([
+    packet(`want ${"1".repeat(40)}\n`),
+    Buffer.from("0000"),
+  ]);
+  const target = "/shields/dotfiles.git/git-upload-pack";
+  assert.equal((await send(socket, "POST", target, negotiation)).status, 200);
+  const failed = await within(
+    "the answer to the second request",
+    send(socket, "POST", target, negotiation),
+  );
+  assert.equal(failed.status, 503);
+  assert.equal(connections.length, 2);
+  assert.equal(connections[1], connections[0]);
+});
+
+test("a response that has begun is not sent again when the provider resets the reused connection in its body", async () => {
+  let requests = 0;
+  const failures: Error[] = [];
+  const provider = rawUpstream((socket) => {
+    socket.on("error", (error) => {
+      failures.push(error);
+    });
+    socket.on("data", () => {
+      requests += 1;
+      if (requests === 1) {
+        socket.write("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}");
+        return;
+      }
+      socket.write("HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\npartial-");
+      setTimeout(() => {
+        socket.resetAndDestroy();
+      }, 50);
+    });
+  });
+  defer(() => {
+    provider.closeAllConnections();
+    provider.close();
+  });
+  await new Promise<void>((resolve) => {
+    provider.listen(0, "127.0.0.1", resolve);
+  });
+  const address = provider.address();
+  assert.ok(address && typeof address !== "string");
+  captureStderr();
+  const { socket } = await startGateway({
+    models: { anthropic: `http://127.0.0.1:${String(address.port)}` },
+  });
+  assert.equal(
+    (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+    200,
+  );
+  const cut = await within(
+    "the cut response",
+    claude(socket, "GET", "/v1/models", poolHeaders),
+  );
+  assert.equal(cut.status, 200);
+  assert.equal(cut.complete, false);
+  assert.equal(cut.body.toString(), "partial-");
+  await new Promise((resolve) => {
+    setTimeout(resolve, 200);
+  });
+  assert.equal(requests, 2);
+});
+
 test("a disabled VM is refused on both routes and on health, and its socket no longer answers", async () => {
   const stub = await startModelStub();
   const { socket, instance, state, gateway } = await startGateway({

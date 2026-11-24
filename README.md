@@ -29,10 +29,32 @@ same way after updating the checkout. Nothing installed points into the
 checkout. The executable embeds the Lima template, guest scripts and stager.
 It does not load `.env` or `bunfig.toml` at runtime.
 
-The installer waits for `cog gateway health` to report readiness. If it fails,
-check `~/Library/Logs/dev.msrl.cog.gateway.err`; standard output goes to the
-adjacent `.out` file. `./install.sh --uninstall` unloads the agent and removes
-its plist, binary and link. It keeps logs, `~/.local/state/cog`,
+The gateway runs under a Seatbelt profile (`gateway/gateway.sb`, installed as
+`~/.local/share/cog/gateway.sb`) through `sandbox-exec`. It may read and write
+only `~/.local/state/cog`, `~/.config/secrets/cog` and one socket per VM in the
+Lima directory, read its own executable, `openssl`, the system libraries and
+`~/.config/secrets/FIREWORKS_API_KEY`, and connect only to port 443 and the
+name resolver. It cannot read the rest of your home directory, run any other
+program, or connect to other ports or sockets. Apple deprecates `sandbox-exec`
+but it works. The installer resolves every path in the profile to a real path
+and creates the state, secrets and Lima directories (mode 700) when they are
+missing, so the profile is fixed at install: moving the Lima directory
+(`LIMA_HOME` or the `~/.lima` link), or the place the
+`FIREWORKS_API_KEY` link points to, needs `./install.sh` again. The profile
+does not protect the token files from other programs running as you, and it
+leaves the Tailscale and Cloudflare credentials that only the CLI reads, which
+share the secrets directory, readable and writable by the gateway. Before it
+replaces the running gateway, the installer runs the new executable's `help`
+under the profile and stops if that fails; that checks the profile and the
+executable, not what the gateway does.
+
+The installer stops the old agent first: the gateway finishes the requests in
+flight, such as a streaming model response, and launchd kills it after 5
+seconds, so the installer waits up to 15 seconds for it to go. Then it waits
+for `cog gateway health` to report readiness. If that fails, check
+`~/Library/Logs/dev.msrl.cog.gateway.err`; standard output goes to the adjacent
+`.out` file. `./install.sh --uninstall` unloads the agent and removes
+its plist, binary, profile and link. It keeps logs, `~/.local/state/cog`,
 `~/.config/secrets/cog`, `~/.config/cog` and the VMs.
 
 The Mac needs `limactl`, `git`, `tar`, `gitleaks` 8.19 or newer, `jq`, `socat`,
@@ -353,9 +375,11 @@ that you fixed by hand counts after one of those.
 Every `cog new` VM uses the pool, and the gateway keeps each VM on one account
 until the rate-limit headers show it near its limit. A 401 from the provider
 holds that account for ten minutes, and a request that a VM sends can draw one,
-so `cog pool status` may show a hold on a working account; the next success
-clears it. Use only the inference-only token that `claude setup-token` makes,
-because the gateway forwards any path with it.
+so `cog pool status` may show a hold on a working account. A held account gets
+no request while another is free, so the hold lasts its ten minutes unless
+every account is held and a request then succeeds on it. Use only the
+inference-only token that `claude setup-token` makes, because the gateway
+forwards any path with it.
 
 ### The rest
 
@@ -503,6 +527,13 @@ agent behavior with managed settings, live GitHub authorizations, a Wrangler
 deploy or an agent image build. After installing, run `cog base` and
 `cog new t1 --repo OWNER/REPO` for a public repository. Then check:
 
+- The installed gateway starts under its Seatbelt profile
+  (`launchctl print gui/$UID/dev.msrl.cog.gateway` lists
+  `/usr/bin/sandbox-exec` first among its arguments), `cog gateway health`
+  passes, a new cog registers, fetches and pushes through it, a certificate is
+  reissued (delete `github.pem` and `github-key.pem` in
+  `~/.config/secrets/cog` and restart), and a model request is served.
+  `~/Library/Logs/dev.msrl.cog.gateway.err` shows no `EPERM` line.
 - `zsh -ic exit` prints nothing, `git --version` is 2.54 or later, and
   `git hook list pre-commit` lists gitleaks.
 - `stat /usr/local/lib/cog` shows it root-owned and not writable by group or

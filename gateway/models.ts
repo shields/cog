@@ -18,8 +18,6 @@ export const claudeHost = "api.anthropic.com";
 export const fireworksHost = "api.fireworks.ai";
 export const placeholderCredential = "cog";
 
-// "placeholder" is a request that carries the placeholder credential, which
-// the gateway replaces with the host's own.
 export type ModelRoute = "placeholder" | "direct";
 
 export interface ModelHost {
@@ -27,7 +25,6 @@ export interface ModelHost {
   readonly upstream: string;
   readonly upstreamOption: "anthropicUpstream" | "fireworksUpstream";
   readonly operation: Extract<Operation, `model.${string}`>;
-  // Where the credential for a placeholder request comes from.
   readonly credential: "pool" | "key file";
 }
 

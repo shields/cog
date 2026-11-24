@@ -2,9 +2,11 @@
 
 ## Commands
 
-- **Install**: `make install` compiles and installs `cog` and starts its
-  LaunchAgent on macOS. `./install.sh --uninstall` keeps state, secrets, config,
-  logs and VMs. Test only with a temporary HOME and a stub launchctl.
+- **Install**: `make install` compiles and installs `cog` and `gateway.sb` and
+  starts its LaunchAgent on macOS; it needs `sandbox-exec`.
+  `./install.sh --uninstall` keeps state, secrets, config, logs and VMs. Test
+  only with a temporary HOME and stubs for `launchctl`, `sandbox-exec` and
+  `plutil`.
 - **Setup**: `make setup` installs the locked Bun and uv dependencies.
 - **Checks**: `make lint build test`. `COG_FAIL_ON_SKIP=1` makes any skipped
   pytest test fail the run, so a test that needs a tool needs it added to
@@ -86,9 +88,11 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   and stays on an account until the rate-limit headers show it near its limit or
   rejected. A 401 holds the account for ten minutes; a guest picks the path and
   headers of the request that draws one, so a hold only steers VMs, never
-  refuses one, and a 2xx clears it. Each VM has its own upstream keep-alive
-  agent for each scheme in use (both model hosts share the https one, since Node
-  keys connections by host and port) and none is shared between VMs.
+  refuses one. A 2xx clears it, but a held account is chosen only when every
+  account is held, so otherwise the hold lasts its ten minutes. Each VM has its
+  own upstream keep-alive agent for each scheme in use (both model hosts share
+  the https one, since Node keys connections by host and port) and none is
+  shared between VMs.
   `modelHosts` in `gateway/models.ts` is the table of model hosts (host,
   upstream, audit operation, where `Bearer cog` is resolved), and the server
   dispatches on the `Host` header through it. `api.fireworks.ai` follows the
@@ -132,6 +136,25 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   links `~/bin/cog` to it. The generated `dev.msrl.cog.gateway` LaunchAgent
   names that executable, not the checkout. The README describes the manual
   migration and the unrelated Homebrew formula named `cog`.
+- The LaunchAgent runs `cog gateway serve` through `/usr/bin/sandbox-exec`
+  with `-f ~/.local/share/cog/gateway.sb` and one `-D NAME=VALUE` for each
+  parameter, with working directory `/` (the profile allows reading it) and
+  `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so that `openssl` is
+  `/usr/bin/openssl`, the only other program the profile lets it run. The
+  gateway finishes its requests in flight on SIGTERM, and a model response can
+  stream for minutes, so the plist sets `ExitTimeOut` to 5 seconds, after which
+  launchd kills it, and `install.sh` waits ten seconds longer than that for the
+  label to go.
+  `gateway/gateway.sb` takes exactly the parameters BINARY, STATE, SECRETS,
+  LIMA and FIREWORKS_KEY through `(param "NAME")`, and the plist passes the
+  same set. Seatbelt matches resolved paths, so `install.sh` resolves each value
+  at install time (the Lima directory, `${LIMA_HOME:-~/.lima}`, may be a link;
+  the Fireworks key link's final target, or its default name under the resolved
+  directory when missing) and creates the missing state, secrets and Lima
+  directories with mode 700, since the gateway cannot create parents. Before it
+  unloads the running agent, it runs the staged binary's `help` under the
+  staged profile from `/`. A change to the profile or to the paths it names
+  needs the matching change in `install.sh` and the README.
 - `guest/throwaway.sh` requires `--claude-settings FILE`, since cog has no
   `.claude/settings.json`; the tests use `tests/fixtures/claude-settings.json`.
 
@@ -195,10 +218,21 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   `base`, and redaction of parse errors. `tests/test_setup_secrets.zsh` runs
   in temporary guest homes.
 - `tests/test_install.py` gives the installer a temporary home and substitutes
-  launchctl, Bun and plutil. `gateway/*.test.ts` and `cloudflare/*.test.ts` cover
-  the policy, token refresh, live grants, audit and the HTTPS Unix socket.
-  `cog/*.test.ts` cover the CLI and foundation modules; the no-echo prompt
-  runs under a pseudo-terminal and needs `stty`.
+  launchctl, Bun, plutil and sandbox-exec. The sandbox-exec stub checks the
+  working directory, the profile's content and the parameters, and the
+  launchctl stub's `bootstrap` checks that the profile and executable that the
+  plist names are in place. The tests cover the plist, the profile's
+  installation and its parameter set, link resolution (the Lima directory, the
+  Fireworks key, the parents of the share, state and secrets directories, and
+  HOME), refusal of control characters and link loops, directory modes, a slow
+  unload, a failing validation and uninstall. The stub scripts run
+  under `/bin/bash` 3.2 on a Mac, where `set -e` ignores a failing `[[ ]]`, so
+  each guard ends in `|| exit 1`.
+- `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
+  refresh, live grants, audit and the HTTPS Unix socket. `cog/*.test.ts` cover
+  the CLI and foundation modules; the no-echo prompt runs under a
+  pseudo-terminal and needs `stty`.
+- No automated test runs the real profile, which needs macOS.
 - No automated test covers a live launchd install, real GitHub authorization,
   network isolation and the relay in a VM, live Tailscale enrollment or a
   Herdr phone connection, agent behavior under the installed

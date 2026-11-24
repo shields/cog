@@ -1002,7 +1002,6 @@ export class Gateway {
     const result = new Promise<Settlement>((resolve, reject) => {
       let settled = false;
       let upstreamStatus: number | null = null;
-      let retries = retryable ? 1 : 0;
       const settle = (outcome: Settlement["outcome"]): void => {
         settled = true;
         resolve({ upstreamStatus, outcome });
@@ -1074,16 +1073,16 @@ export class Gateway {
         });
         // A kept-alive socket that the peer closed while it was idle resets
         // the first request on it. Only a safe request with no body is sent
-        // again.
+        // again, and it is sent again until a fresh socket carries it, since
+        // every idle socket of the VM may have gone stale together.
         current.once("error", (error: Error & { code?: string }) => {
           if (
-            retries > 0 &&
+            retryable &&
             !answered &&
             !settled &&
             error.code === "ECONNRESET" &&
             current.reusedSocket
           ) {
-            retries -= 1;
             try {
               begin(true);
             } catch (retryError) {

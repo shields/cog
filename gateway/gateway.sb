@@ -1,0 +1,56 @@
+;; Copyright © 2026 Michael Shields
+;;
+;; Licensed under the Apache License, Version 2.0 (the "License");
+;; you may not use this file except in compliance with the License.
+;; You may obtain a copy of the License at
+;;
+;;     http://www.apache.org/licenses/LICENSE-2.0
+;;
+;; Unless required by applicable law or agreed to in writing, software
+;; distributed under the License is distributed on an "AS IS" BASIS,
+;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+;; See the License for the specific language governing permissions and
+;; limitations under the License.
+
+;; The gateway daemon's profile. install.sh passes BINARY, STATE, SECRETS, LIMA
+;; and FIREWORKS_KEY as real paths, because Seatbelt matches resolved paths.
+
+(version 1)
+(deny default)
+(import "system.sb")
+(system-network)
+
+;; The gateway runs openssl to issue certificates; nothing else may run.
+(allow process-fork)
+(allow process-exec
+  (literal (param "BINARY"))
+  (literal "/usr/bin/openssl"))
+
+(allow file-read-metadata)
+;; system.sb covers the system libraries; these are the rest.
+(allow file-read*
+  (literal (param "BINARY"))
+  (literal "/usr/bin/openssl")
+  (subpath "/private/etc/ssl")
+  (subpath "/private/var/db/timezone"))
+
+(allow file-read* file-write*
+  (subpath (param "STATE"))
+  (subpath (param "SECRETS")))
+
+;; The key is read for each request and never written.
+(allow file-read*
+  (literal (param "FIREWORKS_KEY")))
+
+;; One listener per VM, in that VM's Lima directory.
+(allow file-read* file-write* network-bind network-inbound
+  (regex (string-append "^" (regex-quote (param "LIMA")) "/[^/]+/sock/github-[0-9a-f-]+\\.sock$")))
+(allow network-bind network-inbound
+  (literal (string-append (param "STATE") "/admin.sock")))
+
+;; Upstream HTTPS, and name resolution through mDNSResponder.
+(allow network-outbound (remote tcp "*:443"))
+(allow network-outbound (literal "/private/var/run/mDNSResponder"))
+(allow mach-lookup
+  (global-name "com.apple.dnssd.service")
+  (global-name "com.apple.SystemConfiguration.DNSConfiguration"))

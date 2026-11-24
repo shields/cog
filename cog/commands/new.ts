@@ -277,7 +277,9 @@ export async function newVM(
       registeredId = registration.id;
     } catch {
       signals.check();
-      throw new CogError(`cannot register ${name} with the GitHub gateway`);
+      throw new CogError(
+        `cannot register ${name} with the GitHub gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err, and run ./install.sh again if LIMA_HOME or the ~/.lima link moved`,
+      );
     }
     signals.check();
     const { id, socket } = registration;

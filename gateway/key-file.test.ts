@@ -21,9 +21,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { onTestFinished, test } from "bun:test";
+import { onTestFinished, spyOn, test } from "bun:test";
 import { keyFileLimit, readKeyFile } from "./key-file.ts";
 
 const marker = "fw-made-up-one";
@@ -140,6 +141,23 @@ test("a directory and a named pipe are not regular files, and the pipe is not wa
       file,
     );
   }
+});
+
+test("a named pipe that replaces the file after the check is neither waited for nor read", () => {
+  const directory = scratch();
+  const regular = path.join(directory, "regular");
+  writeFileSync(regular, marker);
+  const pipe = path.join(directory, "pipe");
+  assert.equal(spawnSync("mkfifo", [pipe]).status, 0);
+  const status = fs.statSync(regular);
+  const check = spyOn(fs, "statSync").mockImplementation(() => status as never);
+  onTestFinished(() => {
+    check.mockRestore();
+  });
+  assert.deepEqual(readKeyFile(pipe), {
+    kind: "unusable",
+    reason: "is not a regular file",
+  });
 });
 
 test("a file that cannot be opened is unusable and names only the error code", () => {

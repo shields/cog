@@ -26,12 +26,56 @@ need() {
     command -v "$1" >/dev/null || die "$1 is required; install the Homebrew formula $2"
 }
 
+check_path() {
+    [[ $1 == /* && ! $1 =~ [[:cntrl:]] ]] || die "$2 must be an absolute path without control characters"
+}
+
+real_dir() {
+    local dir
+    dir=$(cd -P -- "$1" 2>/dev/null && pwd -P && printf x) || die "cannot resolve the directory $1"
+    dir=${dir%?x}
+    check_path "$dir" "$1"
+    printf '%s' "$dir"
+}
+
+# Seatbelt matches resolved paths, and the key file may be a link or may not
+# exist yet, so a missing file keeps its name under its resolved parent.
+real_file() {
+    local path=$1 dir target hop
+    for ((hop = 0; hop < 40; ++hop)); do
+        dir=$(real_dir "${path%/*}/") || exit 1
+        dir=${dir%/}
+        path=$dir/${path##*/}
+        [[ -L $path ]] || break
+        target=$(readlink -n "$path" && printf x) || exit 1
+        target=${target%x}
+        [[ $target == /* ]] || target=$dir/$target
+        path=$target
+    done
+    [[ $hop -lt 40 ]] || die "too many links in $1"
+    dir=$(real_dir "${path%/*}/") || exit 1
+    dir=${dir%/}
+    [[ -n ${path##*/} && ${path##*/} != . && ${path##*/} != .. ]] || die "cannot resolve $1"
+    path=$dir/${path##*/}
+    check_path "$path" "$1"
+    printf '%s' "$path"
+}
+
+private_dir() {
+    [[ -d $1 ]] || (umask 077 && mkdir -p -- "$1") || die "cannot create $1"
+}
+
+xml() {
+    printf '%s' "$1" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
 unload() {
     if launchctl print "$service" >/dev/null 2>&1; then
         launchctl bootout "$service"
-        # bootout returns before launchd releases the label.
+        # bootout returns before launchd releases the label, which happens once
+        # the gateway has finished its requests in flight, or ExitTimeOut later.
         local attempt
-        for ((attempt = 0; attempt < 100; ++attempt)); do
+        for ((attempt = 0; attempt < (exit_timeout + 10) * 10; ++attempt)); do
             if ! launchctl print "$service" >/dev/null 2>&1; then
                 return 0
             fi
@@ -50,15 +94,17 @@ esac
 command -v launchctl >/dev/null || die "macOS launchctl is required"
 
 label=dev.msrl.cog.gateway
+exit_timeout=5
 domain=gui/$UID
 service=$domain/$label
 share=$HOME/.local/share/cog
 binary=$share/cog
+profile=$share/gateway.sb
 link=$HOME/bin/cog
 plist=$HOME/Library/LaunchAgents/$label.plist
 logs=$HOME/Library/Logs
 
-[[ ! -L $share && ! -d $binary && ! -d $plist ]] || die "unexpected cog installation paths"
+[[ ! -L $share && ! -d $binary && ! -d $plist && ! -d $profile ]] || die "unexpected cog installation paths"
 link_is_ours=0
 if [[ -L $link && $(readlink "$link") == "$binary" ]]; then
     link_is_ours=1
@@ -69,7 +115,7 @@ if [[ ${1:-} == --uninstall ]]; then
     if [[ $link_is_ours == 1 ]]; then
         rm -f "$link"
     fi
-    rm -f "$plist" "$binary"
+    rm -f "$plist" "$binary" "$profile"
     if [[ -d $share ]]; then
         rmdir "$share"
     fi
@@ -88,6 +134,9 @@ need socat socat
 need openssl openssl@3
 command -v tar >/dev/null || die "macOS tar is required"
 command -v plutil >/dev/null || die "macOS plutil is required"
+sandbox_exec=$(command -v sandbox-exec) || die "macOS sandbox-exec is required"
+lima_dir=${LIMA_HOME:-$HOME/.lima}
+check_path "$lima_dir" "LIMA_HOME"
 
 checkout=$(
     unset CDPATH
@@ -97,6 +146,15 @@ cd -- "$checkout"
 bun install --frozen-lockfile </dev/null
 
 mkdir -p "$share" "${link%/*}" "${plist%/*}" "$logs"
+private_dir "$HOME/.local/state/cog"
+private_dir "$HOME/.config/secrets/cog"
+private_dir "$lima_dir"
+real_share=$(real_dir "$share")
+real_state=$(real_dir "$HOME/.local/state/cog")
+real_secrets=$(real_dir "$HOME/.config/secrets/cog")
+real_lima=$(real_dir "$lima_dir")
+real_key=$(real_file "$HOME/.config/secrets/FIREWORKS_API_KEY")
+parameters=("STATE=$real_state" "SECRETS=$real_secrets" "LIMA=$real_lima" "FIREWORKS_KEY=$real_key")
 build_dir=
 plist_dir=
 trap '[[ -z $build_dir ]] || rm -rf "$build_dir"; [[ -z $plist_dir ]] || rm -rf "$plist_dir"' EXIT
@@ -106,7 +164,21 @@ bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig \
     cog/main.ts --outfile "$build_dir/cog" </dev/null
 [[ -f $build_dir/cog && -x $build_dir/cog ]] || die "Bun did not produce an executable"
 
-xml_home=$(printf '%s' "$HOME" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g")
+cat gateway/gateway.sb >"$build_dir/gateway.sb"
+chmod 644 "$build_dir/gateway.sb"
+real_build=$(real_dir "$build_dir")
+
+xml_home=$(xml "$HOME")
+xml_arguments="        <string>-D</string>
+        <string>$(xml "BINARY=$real_share/cog")</string>
+"
+validate_arguments=(-f "$real_build/gateway.sb" -D "BINARY=$real_build/cog")
+for parameter in "${parameters[@]}"; do
+    xml_arguments+="        <string>-D</string>
+        <string>$(xml "$parameter")</string>
+"
+    validate_arguments+=(-D "$parameter")
+done
 cat >"$plist_dir/$label.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -116,14 +188,26 @@ cat >"$plist_dir/$label.plist" <<EOF
     <string>$label</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$xml_home/.local/share/cog/cog</string>
+        <string>/usr/bin/sandbox-exec</string>
+        <string>-f</string>
+        <string>$(xml "$real_share/gateway.sb")</string>
+${xml_arguments}        <string>$(xml "$real_share/cog")</string>
         <string>gateway</string>
         <string>serve</string>
     </array>
+    <key>WorkingDirectory</key>
+    <string>/</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ExitTimeOut</key>
+    <integer>$exit_timeout</integer>
     <key>StandardOutPath</key>
     <string>$xml_home/Library/Logs/$label.out</string>
     <key>StandardErrorPath</key>
@@ -133,8 +217,16 @@ cat >"$plist_dir/$label.plist" <<EOF
 EOF
 plutil -lint "$plist_dir/$label.plist" >/dev/null || die "the generated LaunchAgent plist is invalid"
 
+validation=$(
+    cd / &&
+        unset COG_ROOT COG_BASE &&
+        PATH=/usr/bin:/bin:/usr/sbin:/sbin &&
+        "$sandbox_exec" "${validate_arguments[@]}" "$real_build/cog" help 2>&1 </dev/null
+) || die "cog does not run under the sandbox profile (status $?): $validation"
+
 unload
 mv -f "$build_dir/cog" "$binary"
+mv -f "$build_dir/gateway.sb" "$profile"
 mv -f "$plist_dir/$label.plist" "$plist"
 if [[ $link_is_ours == 0 ]]; then
     ln -s "$binary" "$link"
