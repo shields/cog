@@ -56,6 +56,11 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
       api_url: "https://api.github.com",
     }),
   );
+  const poolToken = "sk-ant-oat01-cli-test-token";
+  mkdirSync(path.join(secrets, "claude-pool"), { mode: 0o700 });
+  const accountFile = path.join(secrets, "claude-pool", "work");
+  writeFileSync(accountFile, `${poolToken}\n`);
+  chmodSync(accountFile, 0o644);
   const environment = { ...process.env, COG_ROOT: root };
   const bundle = path.join(root, "main.mjs");
   const build = spawnSync(
@@ -101,6 +106,14 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
       }
     }
     assert.equal(healthy, true, serviceError);
+    assert.equal(
+      serviceError.split(
+        "cog: Claude pool unavailable: account work is accessible to group or other\n",
+      ).length - 1,
+      1,
+      serviceError,
+    );
+    assert.ok(!serviceError.includes(poolToken));
     assert.equal(call(["gateway", "health"]), "ready\n");
     assert.equal(
       statSync(path.join(root, "state", "admin.sock")).mode & 0o077,

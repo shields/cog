@@ -115,7 +115,10 @@ function assertConsistent(certificates: Certificates): void {
     leaf.checkPrivateKey(createPrivateKey(readFileSync(certificates.key))),
     "the leaf key does not match the leaf certificate",
   );
-  assert.equal(leaf.subjectAltName, "DNS:github.com, DNS:api.github.com");
+  assert.equal(
+    leaf.subjectAltName,
+    "DNS:github.com, DNS:api.github.com, DNS:api.anthropic.com",
+  );
   assert.deepEqual(leaf.keyUsage, [serverAuth]);
   assert.equal(leaf.publicKey.asymmetricKeyDetails?.modulusLength, 3072);
 }
@@ -171,6 +174,47 @@ function issueLeaf(directory: string, days: number): void {
     path.join(directory, "github.pem"),
   );
   rmSync(request);
+}
+
+function issueLeafNamed(directory: string, names: string[]): void {
+  const request = path.join(directory, "named.csr");
+  const extensions = path.join(directory, "named.ext");
+  openssl(
+    "req",
+    "-new",
+    "-key",
+    path.join(directory, "github-key.pem"),
+    "-subj",
+    "/CN=github.com",
+    "-out",
+    request,
+  );
+  writeFileSync(
+    extensions,
+    `subjectAltName=${names.map((name) => `DNS:${name}`).join(",")}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n`,
+  );
+  openssl(
+    "x509",
+    "-req",
+    "-in",
+    request,
+    "-CA",
+    path.join(directory, "ca.pem"),
+    "-CAkey",
+    path.join(directory, "ca-key.pem"),
+    "-CAserial",
+    path.join(directory, "ca.srl"),
+    "-CAcreateserial",
+    "-days",
+    "365",
+    "-sha256",
+    "-extfile",
+    extensions,
+    "-out",
+    path.join(directory, "github.pem"),
+  );
+  rmSync(request);
+  rmSync(extensions);
 }
 
 function listing(directory: string): string[] {
@@ -244,6 +288,62 @@ test("a leaf inside the renewal window is reissued under the same CA", () => {
     assert.ok(daysLeft(directory) > 360);
     assertConsistent(certificates);
     assertKeysPrivate(directory);
+  });
+});
+
+for (const names of [
+  ["github.com", "api.github.com"],
+  ["github.com", "api.github.com", "other.example"],
+  ["github.com", "api.anthropic.com"],
+  ["api.github.com", "api.anthropic.com"],
+  ["other.example"],
+  ["api.anthropic.com"],
+]) {
+  test(`a leaf that names only ${names.join(", ")} is reissued once, under the same CA`, () => {
+    withIssued((directory) => {
+      issueLeafNamed(directory, names);
+      assert.ok(daysLeft(directory) > 360);
+      const before = read(directory, "github.pem");
+      const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
+      const certificates = ensureCertificates(directory);
+      assert.deepEqual(
+        snapshot(directory, ["ca.pem", "ca-key.pem"]),
+        authority,
+      );
+      assert.notEqual(read(directory, "github.pem"), before);
+      assertConsistent(certificates);
+      assertKeysPrivate(directory);
+      const issued = snapshot(directory);
+      assert.deepEqual(ensureCertificates(directory), certificates);
+      assert.deepEqual(snapshot(directory), issued);
+      assert.deepEqual(strays(directory), []);
+    });
+  });
+}
+
+test("a leaf with no names at all is reissued under the same CA", () => {
+  withIssued((directory) => {
+    issueLeaf(directory, 365);
+    assert.ok(daysLeft(directory) > 360);
+    const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
+    assertConsistent(ensureCertificates(directory));
+    assert.deepEqual(snapshot(directory, ["ca.pem", "ca-key.pem"]), authority);
+  });
+});
+
+test("a leaf that names more than the required hosts is kept as it is", () => {
+  withIssued((directory) => {
+    issueLeafNamed(directory, [
+      "github.com",
+      "api.github.com",
+      "api.anthropic.com",
+      "other.example",
+      "extra.example",
+    ]);
+    const before = snapshot(directory);
+    const certificates = ensureCertificates(directory);
+    assert.deepEqual(snapshot(directory), before);
+    assert.equal(certificates.cert, path.join(directory, "github.pem"));
   });
 });
 

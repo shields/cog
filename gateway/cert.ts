@@ -25,6 +25,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { claudeHost } from "./models.ts";
+
+const leafNames = ["github.com", "api.github.com", claudeHost];
 
 export interface Certificates {
   ca: string;
@@ -54,6 +57,15 @@ function openssl(...arguments_: string[]): void {
 
 function succeeds(...arguments_: string[]): boolean {
   return run(arguments_, 30_000).status === 0;
+}
+
+function hasAllNames(cert: string): boolean {
+  const present = new Set(
+    new X509Certificate(readFileSync(cert)).subjectAltName
+      ?.split(",")
+      .map((name) => name.trim()),
+  );
+  return leafNames.every((name) => present.has(`DNS:${name}`));
 }
 
 function paired(cert: string, key: KeyObject): boolean {
@@ -172,9 +184,11 @@ function validLeaf({ ca, cert, key }: Paths): Certificates | undefined {
   const leafKey = readLeafKey(key, cert);
   // A leaf issued by any other CA is unexpired but fails every handshake, and
   // a key that is not the leaf's fails when the first listener starts, so the
-  // chain and the key pair are checked as well as the dates.
+  // chain and the key pair are checked as well as the dates. A leaf that lacks
+  // a name that guests connect to fails every handshake for it.
   return succeeds("x509", "-checkend", "2592000", "-noout", "-in", cert) &&
     succeeds("verify", "-CAfile", ca, cert) &&
+    hasAllNames(cert) &&
     paired(cert, leafKey)
     ? { ca, cert, key }
     : undefined;
@@ -187,7 +201,7 @@ function issueLeaf(scratch: string, paths: Paths): void {
   const newCert = path.join(scratch, "github.pem");
   writeFileSync(
     extensions,
-    "subjectAltName=DNS:github.com,DNS:api.github.com\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
+    `subjectAltName=${leafNames.map((name) => `DNS:${name}`).join(",")}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n`,
     { mode: 0o600 },
   );
   openssl(

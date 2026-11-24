@@ -84,11 +84,13 @@ test("locations come from COG_ROOT, else from HOME", () => {
     state: "/r/state",
     secrets: "/r/secrets",
     admin: "/r/state/admin.sock",
+    pool: "/r/secrets/claude-pool",
   });
   assert.deepEqual(locations({ HOME: "/h" }), {
     state: "/h/.local/state/cog",
     secrets: "/h/.config/secrets/cog",
     admin: "/h/.local/state/cog/admin.sock",
+    pool: "/h/.config/secrets/cog/claude-pool",
   });
   assert.throws(() => locations({}), /HOME is not set/);
   assert.throws(() => locations({ HOME: "" }), /HOME is not set/);

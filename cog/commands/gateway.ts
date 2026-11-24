@@ -29,6 +29,7 @@ async function serve(args: string[], context: Context): Promise<void> {
   const gateway = new Gateway(control.state, control.auth, {
     ...control.certificates(),
     adminSocket: control.location.admin,
+    pool: control.location.pool,
   });
   await gateway.start();
   await new Promise<void>((resolve) => {

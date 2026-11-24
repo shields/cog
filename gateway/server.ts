@@ -23,6 +23,15 @@ import https from "node:https";
 import { once } from "node:events";
 import { AppAuth } from "./auth.ts";
 import {
+  claudeHost,
+  classifyModel,
+  isReplayable,
+  modelRefusal,
+  modelRequestHeaders,
+  modelResponseHeaders,
+  needsExplicitLength,
+} from "./models.ts";
+import {
   authorize,
   classify,
   denial,
@@ -37,6 +46,12 @@ import {
   PushParser,
   type Classification,
 } from "./policy.ts";
+import {
+  AccountPool,
+  loadPool,
+  unconfiguredReason,
+  type Account,
+} from "./pool.ts";
 import { State } from "./state.ts";
 
 interface RequestBody {
@@ -55,6 +70,8 @@ export interface GatewayOptions {
   adminSocket: string;
   webUpstream?: string;
   apiUpstream?: string;
+  pool?: string;
+  anthropicUpstream?: string;
 }
 
 const forwardedHeaders = [
@@ -67,6 +84,15 @@ const forwardedHeaders = [
   "x-github-api-version",
   "content-length",
 ] as const;
+
+const reasonPhrase = /^[\t\u{20}-\u{7E}]*$/u;
+
+class PoolUnavailable extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "PoolUnavailable";
+  }
+}
 
 function bodyIterator(request: IncomingMessage): AsyncIterator<Buffer> {
   return request[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
@@ -184,6 +210,16 @@ function requestHeaders(
   return outgoing;
 }
 
+function respondReady(response: ServerResponse): void {
+  response.writeHead(200, { "content-type": "text/plain" }).end("cog ready\n");
+}
+
+function headerNames(headers: http.OutgoingHttpHeaders | string[]): string[] {
+  return Array.isArray(headers)
+    ? headers.filter((_name, index) => index % 2 === 0)
+    : Object.keys(headers);
+}
+
 function copyResponseHeaders(
   headers: IncomingHttpHeaders,
   classification: Classification,
@@ -210,6 +246,10 @@ export class Gateway {
   private syncing: Promise<void> = Promise.resolve();
   private readonly pending = new Set<Promise<void>>();
   private readonly retired = new Map<https.Server, Promise<void>>();
+  private readonly agents = new Map<string, http.Agent>();
+  private pool: AccountPool | null = null;
+  private lastPool: AccountPool | null = null;
+  private poolReason: string | null = null;
   private stopped = false;
   private starting: Promise<void> | null = null;
   private stopping: Promise<void> | null = null;
@@ -235,6 +275,7 @@ export class Gateway {
   }
 
   private async open(): Promise<void> {
+    this.loadPool();
     await this.refresh();
     this.requireRunning();
     await this.startAdmin();
@@ -242,6 +283,28 @@ export class Gateway {
     this.refreshTimer = setInterval(() => {
       this.track(this.refreshAndPrune());
     }, 60_000);
+  }
+
+  private loadPool(): void {
+    const loaded =
+      this.options.pool === undefined
+        ? { usable: false as const, reason: unconfiguredReason }
+        : loadPool(this.options.pool);
+    this.pool = loaded.usable
+      ? new AccountPool(loaded.accounts, this.lastPool)
+      : null;
+    if (this.pool !== null) {
+      this.lastPool = this.pool;
+    }
+    const reason = loaded.usable ? null : loaded.reason;
+    if (
+      reason !== null &&
+      reason !== unconfiguredReason &&
+      reason !== this.poolReason
+    ) {
+      process.stderr.write(`cog: Claude pool unavailable: ${reason}\n`);
+    }
+    this.poolReason = reason;
   }
 
   // stop() closes servers only once open() has settled, so open() fails at
@@ -293,6 +356,7 @@ export class Gateway {
           this.retired.delete(server);
         });
         this.listeners.delete(id);
+        this.destroyAgent(id);
       }
     }
     for (const instance of active.values()) {
@@ -366,6 +430,7 @@ export class Gateway {
 
   private async sync(response: ServerResponse): Promise<void> {
     try {
+      this.loadPool();
       await this.refresh();
       response
         .writeHead(200, { "content-type": "application/json" })
@@ -419,6 +484,28 @@ export class Gateway {
     this.listeners.clear();
     this.admin = null;
     await this.awaitHandlers();
+    for (const id of this.agents.keys()) {
+      this.destroyAgent(id);
+    }
+  }
+
+  private destroyAgent(instanceId: string): void {
+    this.agents.get(instanceId)?.destroy();
+    this.agents.delete(instanceId);
+  }
+
+  private agentFor(instanceId: string, secure: boolean): http.Agent {
+    if (this.stopped || !this.listeners.has(instanceId)) {
+      throw new Error("the VM's listener is closed");
+    }
+    let agent = this.agents.get(instanceId);
+    if (agent === undefined) {
+      agent = secure
+        ? new https.Agent({ keepAlive: true })
+        : new http.Agent({ keepAlive: true });
+      this.agents.set(instanceId, agent);
+    }
+    return agent;
   }
 
   private async awaitHandlers(): Promise<void> {
@@ -435,6 +522,7 @@ export class Gateway {
     const requestId = randomUUID();
     const started = Date.now();
     let classification: Classification | null = null;
+    let modelHost = false;
     let revision = 0;
     let logged = false;
     let settlement: Settlement;
@@ -442,117 +530,191 @@ export class Gateway {
     try {
       revision = this.state.byId(instanceId)?.revision ?? 0;
       const host = request.headers.host?.toLowerCase();
-      if (host !== "github.com" && host !== "api.github.com") {
-        throw new PolicyError("unsupported GitHub host");
-      }
       const target = request.url ?? "";
       const method = request.method ?? "";
-      const inspected = inspectedBody(host, method, target);
-      const body: RequestBody =
-        inspected === null
-          ? { buffered: Buffer.alloc(0), remaining }
-          : await readBody(
-              remaining,
-              request.headers["content-encoding"],
-              1_048_576,
-              inspected === "push" ? instanceId : undefined,
-            );
-      classification = classify(
-        {
-          host,
+      if (host === claudeHost) {
+        modelHost = true;
+        classification = {
+          repository: null,
+          operation: "model.claude",
+          refs: [],
+        };
+        const route = classifyModel(method, target, request.rawHeaders);
+        requireNoGetOrHeadBody(
           method,
-          target,
-          ...(inspected === null ? {} : { body: body.buffered }),
-        },
-        instanceId,
-      );
-      // Node writes the body of a GET or HEAD upstream without framing unless
-      // the client gave a Content-Length, and GitHub would read it as the next
-      // request on a connection that every VM shares.
-      requireNoGetOrHeadBody(
-        method,
-        request.headers["transfer-encoding"],
-        request.headers["content-length"],
-      );
-      const beforeRefresh = this.state.byId(instanceId);
-      if (!beforeRefresh || beforeRefresh.disabled) {
-        throw new PolicyError("VM access has been revoked");
-      }
-      if (classification.operation === "identity.read") {
-        classification.repository =
-          Object.keys(this.state.grants(instanceId))[0] ?? null;
-        if (classification.repository === null) {
+          request.headers["transfer-encoding"],
+          request.headers["content-length"],
+        );
+        const current = this.state.byId(instanceId);
+        if (!current || current.disabled) {
+          throw new PolicyError("VM access has been revoked");
+        }
+        revision = current.revision;
+        let account: Account | null = null;
+        if (route.kind === "forward" && route.route === "pool") {
+          if (this.pool === null) {
+            // A load failure can name an account, which a guest is not told.
+            throw new PoolUnavailable(
+              this.poolReason === unconfiguredReason
+                ? unconfiguredReason
+                : "the Claude pool is not usable",
+            );
+          }
+          account = this.pool.choose(instanceId, Date.now());
+        }
+        if (route.kind === "health") {
+          classification.operation = "public.read";
+        }
+        this.state.logDecision({
+          id: requestId,
+          instanceId,
+          repository: null,
+          operation: classification.operation,
+          refs: [],
+          allowed: true,
+          reason:
+            route.kind === "health"
+              ? "anonymous read"
+              : account === null
+                ? "no credential"
+                : `pool account ${account.name}`,
+          revision,
+        });
+        logged = true;
+        if (route.kind === "health") {
+          respondReady(response);
+          settlement = { upstreamStatus: 200, outcome: "completed" };
+        } else {
+          settlement = await this.forwardModel(
+            request,
+            response,
+            account,
+            instanceId,
+            target,
+            remaining,
+          );
+        }
+      } else if (host === "github.com" || host === "api.github.com") {
+        const inspected = inspectedBody(host, method, target);
+        const body: RequestBody =
+          inspected === null
+            ? { buffered: Buffer.alloc(0), remaining }
+            : await readBody(
+                remaining,
+                request.headers["content-encoding"],
+                1_048_576,
+                inspected === "push" ? instanceId : undefined,
+              );
+        classification = classify(
+          {
+            host,
+            method,
+            target,
+            ...(inspected === null ? {} : { body: body.buffered }),
+          },
+          instanceId,
+        );
+        // Node writes the body of a GET or HEAD upstream without framing unless
+        // the client gave a Content-Length, and GitHub would read it as the next
+        // request on a connection that every VM shares.
+        requireNoGetOrHeadBody(
+          method,
+          request.headers["transfer-encoding"],
+          request.headers["content-length"],
+        );
+        const beforeRefresh = this.state.byId(instanceId);
+        if (!beforeRefresh || beforeRefresh.disabled) {
+          throw new PolicyError("VM access has been revoked");
+        }
+        if (classification.operation === "identity.read") {
+          classification.repository =
+            Object.keys(this.state.grants(instanceId))[0] ?? null;
+          if (classification.repository === null) {
+            throw new PolicyError("repository is not granted to this VM");
+          }
+        }
+        const access = authorize(
+          classification.repository === null
+            ? null
+            : this.state.grant(instanceId, classification.repository),
+          classification.operation,
+        );
+        const token =
+          access === "authenticated" && classification.repository !== null
+            ? await this.auth.token(classification.repository)
+            : null;
+        const current = this.state.byId(instanceId);
+        if (!current || current.disabled) {
+          throw new PolicyError("VM access has been revoked");
+        }
+        revision = current.revision;
+        const currentAccess = authorize(
+          classification.repository === null
+            ? null
+            : this.state.grant(instanceId, classification.repository),
+          classification.operation,
+        );
+        if (access === "authenticated" && currentAccess !== access) {
           throw new PolicyError("repository is not granted to this VM");
         }
-      }
-      const access = authorize(
-        classification.repository === null
-          ? null
-          : this.state.grant(instanceId, classification.repository),
-        classification.operation,
-      );
-      const token =
-        access === "authenticated" && classification.repository !== null
-          ? await this.auth.token(classification.repository)
-          : null;
-      const current = this.state.byId(instanceId);
-      if (!current || current.disabled) {
-        throw new PolicyError("VM access has been revoked");
-      }
-      revision = current.revision;
-      const currentAccess = authorize(
-        classification.repository === null
-          ? null
-          : this.state.grant(instanceId, classification.repository),
-        classification.operation,
-      );
-      if (access === "authenticated" && currentAccess !== access) {
-        throw new PolicyError("repository is not granted to this VM");
-      }
-      this.state.logDecision({
-        id: requestId,
-        instanceId,
-        repository: classification.repository,
-        operation: classification.operation,
-        refs: classification.refs,
-        allowed: true,
-        reason: access === "anonymous" ? "anonymous read" : "granted",
-        revision,
-      });
-      logged = true;
-      if (isHealthCheck(classification)) {
-        response
-          .writeHead(200, { "content-type": "text/plain" })
-          .end("cog ready\n");
-        settlement = { upstreamStatus: 200, outcome: "completed" };
-      } else {
-        settlement = await this.forward(
-          request,
-          response,
-          host,
-          target,
-          requestHeaders(
-            request.headers,
-            token,
+        this.state.logDecision({
+          id: requestId,
+          instanceId,
+          repository: classification.repository,
+          operation: classification.operation,
+          refs: classification.refs,
+          allowed: true,
+          reason: access === "anonymous" ? "anonymous read" : "granted",
+          revision,
+        });
+        logged = true;
+        if (isHealthCheck(classification)) {
+          respondReady(response);
+          settlement = { upstreamStatus: 200, outcome: "completed" };
+        } else {
+          settlement = await this.forward(
+            request,
+            response,
             host,
-            classification.operation === "git.read" && method === "POST",
-          ),
-          classification,
-          body,
-        );
+            target,
+            requestHeaders(
+              request.headers,
+              token,
+              host,
+              classification.operation === "git.read" && method === "POST",
+            ),
+            classification,
+            body,
+          );
+        }
+      } else {
+        throw new PolicyError("unsupported GitHub host");
       }
     } catch (error) {
       // Reading the body fails with the request's own error when the
       // connection closes before the body ends.
       const aborted = error === request.errored;
-      if (!aborted && !(error instanceof PolicyError)) {
+      const refusal =
+        error instanceof PolicyError || error instanceof PoolUnavailable
+          ? error
+          : null;
+      if (!aborted && refusal === null) {
         process.stderr.write(
           `cog: gateway request failed (request ${requestId}, VM ${instanceId}): ${describeFailure(error)}\n`,
         );
       }
-      const reason =
-        error instanceof PolicyError ? error.message : "gateway request failed";
+      const reason = refusal?.message ?? "gateway request failed";
       const respond = (status: number, message: string): void => {
+        if (modelHost) {
+          const answer = modelRefusal(
+            status === 403 ? 403 : 503,
+            message,
+            requestId,
+            refusal !== null,
+          );
+          response.writeHead(status, answer.headers).end(answer.body);
+          return;
+        }
         const { contentType, body } = denial(
           request.headers.host?.toLowerCase() ?? "",
           request.url ?? "",
@@ -662,21 +824,116 @@ export class Gateway {
     if (upstreamUrl.origin !== base.origin) {
       throw new Error("upstream target escaped its host");
     }
+    const transport = upstreamUrl.protocol === "https:" ? https : http;
+    return this.relay(
+      incoming,
+      response,
+      () =>
+        transport.request(upstreamUrl, {
+          method: incoming.method,
+          headers,
+          timeout: 60_000,
+        }),
+      (upstreamResponse) =>
+        copyResponseHeaders(upstreamResponse.headers, classification),
+      body,
+    );
+  }
+
+  // The target goes out as the request's path: a URL built from it would be
+  // normalised, and the provider is to get the client's bytes.
+  private forwardModel(
+    incoming: IncomingMessage,
+    response: ServerResponse,
+    account: Account | null,
+    instanceId: string,
+    target: string,
+    remaining: AsyncIterator<Buffer>,
+  ): Promise<Settlement> {
+    const base = new URL(
+      this.options.anthropicUpstream ?? `https://${claudeHost}`,
+    );
+    if (
+      (base.protocol !== "https:" && base.protocol !== "http:") ||
+      base.username ||
+      base.password ||
+      base.search ||
+      base.hash ||
+      base.pathname !== "/"
+    ) {
+      throw new Error("invalid upstream configuration");
+    }
+    const headers = modelRequestHeaders(
+      incoming.rawHeaders,
+      account?.token ?? null,
+    );
+    const method = incoming.method ?? "";
+    if (needsExplicitLength(method, incoming.rawHeaders)) {
+      headers.push("Content-Length", "0");
+    }
+    const secure = base.protocol === "https:";
+    const transport = secure ? https : http;
+    const pool = this.pool;
+    const started = Date.now();
+    return this.relay(
+      incoming,
+      response,
+      () =>
+        transport.request(base, {
+          method,
+          path: target,
+          headers,
+          timeout: 600_000,
+          agent: this.agentFor(instanceId, secure),
+        }),
+      (upstreamResponse) => {
+        if (account !== null) {
+          pool?.observe(
+            account.name,
+            upstreamResponse.statusCode ?? 0,
+            upstreamResponse.rawHeaders,
+            Date.now(),
+            started,
+          );
+        }
+        return modelResponseHeaders(upstreamResponse.rawHeaders);
+      },
+      { buffered: Buffer.alloc(0), remaining },
+      isReplayable(method, incoming.rawHeaders),
+    );
+  }
+
+  private async relay(
+    incoming: IncomingMessage,
+    response: ServerResponse,
+    open: () => http.ClientRequest,
+    relayedHeaders: (
+      upstreamResponse: IncomingMessage,
+    ) => http.OutgoingHttpHeaders | string[],
+    body: RequestBody,
+    retryable = false,
+  ): Promise<Settlement> {
     // The client may have left while the request was being authorized. The
     // response counts as destroyed only once it emits "close", which can trail
     // the destruction of its socket, so both are checked.
     if (response.destroyed || incoming.socket.destroyed) {
       return { upstreamStatus: null, outcome: "interrupted" };
     }
-    const transport = upstreamUrl.protocol === "https:" ? https : http;
-    const upstream = transport.request(upstreamUrl, {
-      method: incoming.method,
-      headers,
-      timeout: 60_000,
-    });
+    let upstream: http.ClientRequest | null = null;
+    // The server stops reporting a client that leaves mid-upload once the
+    // response has finished, so an upstream that answers early would keep its
+    // half-sent request open.
+    const abandon = (): void => {
+      upstream?.destroy();
+    };
+    const watching = !incoming.complete;
+    if (watching) {
+      incoming.socket.once("close", abandon);
+    }
     const result = new Promise<Settlement>((resolve, reject) => {
       let settled = false;
       let upstreamStatus: number | null = null;
+      let retries = retryable ? 1 : 0;
       const settle = (outcome: Settlement["outcome"]): void => {
         settled = true;
         resolve({ upstreamStatus, outcome });
@@ -692,58 +949,94 @@ export class Gateway {
           return;
         }
         settle("interrupted");
-        upstream.destroy();
+        upstream?.destroy();
       });
-      upstream.once("response", (upstreamResponse) => {
-        upstreamStatus = upstreamResponse.statusCode ?? 502;
-        const relayed = copyResponseHeaders(
-          upstreamResponse.headers,
-          classification,
-        );
-        // The parser accepts a status line such as "099", which writeHead
-        // rejects by throwing, and nothing catches a throw from this listener.
-        try {
-          response.writeHead(upstreamStatus, relayed);
-        } catch (error) {
-          // writeHead can throw after it stored some of the headers, and the
-          // 503 that handle() sends would carry them.
-          for (const name of Object.keys(relayed)) {
-            response.removeHeader(name);
+      const begin = (replay: boolean): void => {
+        const current = open();
+        upstream = current;
+        current.once("close", () => {
+          if (watching && upstream === current) {
+            incoming.socket.off("close", abandon);
           }
-          reject(error instanceof Error ? error : new Error("response failed"));
-          upstream.destroy();
-          return;
-        }
-        upstreamResponse.pipe(response);
-        // An upstream that closes mid-body never ends the pipe, and Node
-        // reports that on the response only while an "error" listener exists.
-        upstreamResponse.once("error", reject);
-        response.once("finish", () => {
-          settle("completed");
         });
-      });
-      upstream.once("error", reject);
-      upstream.once("timeout", () => {
-        upstream.destroy(new Error("upstream timed out"));
-      });
-    });
-    // The server stops reporting a client that leaves mid-upload once the
-    // response has finished, so an upstream that answers early would keep its
-    // half-sent request open.
-    if (!incoming.complete) {
-      const { socket } = incoming;
-      const abandon = (): void => {
-        upstream.destroy();
+        let answered = false;
+        const fail = (error: Error): void => {
+          reject(error);
+          current.destroy();
+        };
+        current.once("response", (upstreamResponse) => {
+          answered = true;
+          upstreamStatus = upstreamResponse.statusCode ?? 502;
+          const relayed = relayedHeaders(upstreamResponse);
+          const reason = upstreamResponse.statusMessage;
+          // The parser accepts a status line such as "099", which writeHead
+          // rejects by throwing, and nothing catches a throw from this
+          // listener. A reason phrase that writeHead rejects stays on the
+          // response and makes the 503 that handle() sends throw as well.
+          try {
+            if (reason !== undefined && reasonPhrase.test(reason)) {
+              response.writeHead(upstreamStatus, reason, relayed);
+            } else {
+              response.writeHead(upstreamStatus, relayed);
+            }
+            response.flushHeaders();
+          } catch (error) {
+            // writeHead can throw after it stored some of the headers, and the
+            // 503 that handle() sends would carry them.
+            for (const name of headerNames(relayed)) {
+              response.removeHeader(name);
+            }
+            fail(error instanceof Error ? error : new Error("response failed"));
+            return;
+          }
+          upstreamResponse.pipe(response);
+          // An upstream that closes mid-body never ends the pipe, and Node
+          // reports that on the response only while an "error" listener
+          // exists.
+          upstreamResponse.once("error", fail);
+          response.once("finish", () => {
+            settle("completed");
+          });
+        });
+        // A kept-alive socket that the peer closed while it was idle resets
+        // the first request on it. Only a safe request with no body is sent
+        // again.
+        current.once("error", (error: Error & { code?: string }) => {
+          if (
+            retries > 0 &&
+            !answered &&
+            !settled &&
+            error.code === "ECONNRESET" &&
+            current.reusedSocket
+          ) {
+            retries -= 1;
+            try {
+              begin(true);
+            } catch (retryError) {
+              reject(
+                retryError instanceof Error
+                  ? retryError
+                  : new Error("request failed"),
+              );
+            }
+            return;
+          }
+          fail(error);
+        });
+        current.once("timeout", () => {
+          current.destroy(new Error("upstream timed out"));
+        });
+        if (replay) {
+          current.end();
+        } else {
+          void sendBody(current, body).catch((error: unknown) => {
+            current.destroy(
+              error instanceof Error ? error : new Error("request body failed"),
+            );
+          });
+        }
       };
-      socket.once("close", abandon);
-      upstream.once("close", () => {
-        socket.off("close", abandon);
-      });
-    }
-    void sendBody(upstream, body).catch((error: unknown) => {
-      upstream.destroy(
-        error instanceof Error ? error : new Error("request body failed"),
-      );
+      begin(false);
     });
     return result;
   }

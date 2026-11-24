@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, mock, spyOn, test } from "bun:test";
+import { compareCodeUnits } from "./policy.ts";
 import { State } from "./state.ts";
 
 afterEach(() => {
@@ -258,6 +259,59 @@ function insertLog(state: State, id: string, createdAt: number): void {
     )
     .run(id, createdAt);
 }
+
+test("model requests are audited with no repository, and rows from before the model operations still read back", () => {
+  withState((state) => {
+    const instance = state.register(
+      "lima:work",
+      path.join(tmpdir(), "work.sock"),
+      "tester",
+    );
+    state.logDecision({
+      id: "model.claude",
+      instanceId: instance.id,
+      repository: null,
+      operation: "model.claude",
+      refs: [],
+      allowed: true,
+      reason: "pool account work",
+      revision: 0,
+    });
+    state.finish("model.claude", 429, 12, "completed");
+    insertLog(state, "older", Date.now() - day);
+    state.db
+      .prepare("UPDATE access_logs SET instance_id = ? WHERE id = 'older'")
+      .run(instance.id);
+    assert.deepEqual(
+      state
+        .logs(instance.id)
+        .map(({ id, operation, repository, upstreamStatus, outcome }) => ({
+          id,
+          operation,
+          repository,
+          upstreamStatus,
+          outcome,
+        }))
+        .toSorted((a, b) => compareCodeUnits(a.id, b.id)),
+      [
+        {
+          id: "model.claude",
+          operation: "model.claude",
+          repository: null,
+          upstreamStatus: 429,
+          outcome: "completed",
+        },
+        {
+          id: "older",
+          operation: "git.read",
+          repository: null,
+          upstreamStatus: null,
+          outcome: "completed",
+        },
+      ],
+    );
+  });
+});
 
 function insertEvent(state: State, id: string, createdAt: number): void {
   state.db

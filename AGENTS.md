@@ -59,12 +59,36 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   rollback, disable, grant, revoke and the policy document). It opens the
   state and the authorizations on first use, and
   `State` refuses to register `lima:cog-base` and the VM that `COG_BASE`
-  names. `cloudflare/` holds the Worker (`worker.ts`), the authority Durable
-  Object and the outbound interceptor, which applies `gateway/policy.ts`. The
-  container gets no GitHub token. `cog/commands/cloud.ts` administers the Worker
-  using the HTTPS origin saved by `cog cloud config` and the admin token file
-  written by `cloudflare/deploy.sh`. It refuses redirects and does not depend
-  on the checkout. `gateway/policy.ts` defines both built-in grant profiles.
+  names. The same server answers `api.anthropic.com`, a third name on the leaf,
+  for a guest whose `/etc/hosts` points that name at the relay;
+  `guest/setup-github-gateway` maps only the two GitHub names.
+  `gateway/models.ts` (pure) has no allow or deny list of paths: a guest could
+  already send any path with a token of its own, and a list would break when
+  Anthropic adds an endpoint. It refuses a target that is not origin-form
+  printable ASCII, a duplicate Host, ambiguous framing, TRACE, a chunked body
+  on a method that the runtime's client sends unframed (DELETE, OPTIONS), a
+  `Connection` header that names an end-to-end header, `x-api-key` and any
+  `Authorization` other than `Bearer cog`. A request with no `Authorization`
+  goes straight to Anthropic with the client's headers, less the hop-by-hop
+  ones and `Expect`. `Bearer cog` is pooled: the gateway replaces that header's
+  value in place with a token. It adds no header except `Content-Length: 0` on
+  a body-less request that would otherwise go out chunked. The target is sent
+  as written and bodies are streamed unparsed. `gateway/pool.ts` reads
+  `claude-pool/` in the secrets directory, one file per account, at start and
+  on `/sync`, which `register` and `disable` request; a missing directory means
+  no pool, one bad entry disables the pool, and either way the pool route
+  answers 503. Each VM gets a stable account order and stays on an account
+  until the rate-limit headers show it near its limit or rejected. Each VM has
+  its own upstream keep-alive agent.
+  Bun's HTTP server groups response header lines of one name next to the first
+  and respells later ones, so duplicates keep their values and count but not
+  their exact order.
+  `cloudflare/` holds the Worker (`worker.ts`), the authority Durable Object and
+  the outbound interceptor, which applies `gateway/policy.ts`. The container
+  gets no GitHub token. `cog/commands/cloud.ts` administers the Worker using the
+  HTTPS origin saved by `cog cloud config` and the admin token file written by
+  `cloudflare/deploy.sh`. It refuses redirects and does not depend on the
+  checkout. `gateway/policy.ts` defines both built-in grant profiles.
   `pushCogBranches` enables pushes in a persisted grant. `cog new` reads public
   repositories anonymously and grants read-only access to a private checkout.
 - Names: the push namespace is `cog/VM-ID/*`; the markers are

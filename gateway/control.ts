@@ -41,6 +41,7 @@ export interface Locations {
   state: string;
   secrets: string;
   admin: string;
+  pool: string;
 }
 
 // HOME comes from the environment, not from the passwd entry.
@@ -51,6 +52,7 @@ export function locations(env: Env): Locations {
       state: path.join(root, "state"),
       secrets: path.join(root, "secrets"),
       admin: path.join(root, "state", "admin.sock"),
+      pool: path.join(root, "secrets", "claude-pool"),
     };
   }
   const home = env.HOME;
@@ -58,10 +60,12 @@ export function locations(env: Env): Locations {
     throw new Error("HOME is not set");
   }
   const state = path.join(home, ".local", "state", "cog");
+  const secrets = path.join(home, ".config", "secrets", "cog");
   return {
     state,
-    secrets: path.join(home, ".config", "secrets", "cog"),
+    secrets,
     admin: path.join(state, "admin.sock"),
+    pool: path.join(secrets, "claude-pool"),
   };
 }
 
