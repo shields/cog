@@ -22,33 +22,40 @@ async function serve(args: string[], context: Context): Promise<void> {
   if (args.length > 0) {
     throw new CogError("usage: cog gateway serve");
   }
-  // The daemon's sockets and files are private to the user. No other command
-  // sets a umask, since limactl, git and tar run under the caller's.
-  process.umask(0o077);
-  const control = context.gateway();
-  control.ensureSocketDirectory();
-  for (const instance of control.disableOutsideSocketDirectory()) {
-    note(
-      `cog: ${instance.name.replace(/^lima:/, "")} (${instance.id}) was registered by an older cog; its gateway access is disabled; run cog rm ${instance.name.replace(/^lima:/, "")} and make it again with cog new`,
-    );
+  // A signal with no handler ends the process wherever it is, and one that
+  // arrives while the certificates are issued would leave their lock behind,
+  // which blocks every later start.
+  const { promise: stopped, resolve } = Promise.withResolvers<undefined>();
+  const stop = (): void => {
+    resolve(undefined);
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    // The daemon's sockets and files are private to the user. No other command
+    // sets a umask, since limactl, git and tar run under the caller's.
+    process.umask(0o077);
+    const control = context.gateway();
+    control.ensureSocketDirectory();
+    for (const instance of control.disableOutsideSocketDirectory()) {
+      note(
+        `cog: ${instance.name.replace(/^lima:/, "")} (${instance.id}) was registered by an older cog; its gateway access is disabled; run cog rm ${instance.name.replace(/^lima:/, "")} and make it again with cog new`,
+      );
+    }
+    control.removeStaleSockets();
+    const gateway = new Gateway(control.state, control.auth, {
+      ...control.certificates(),
+      adminSocket: control.location.admin,
+      pool: control.location.pool,
+      fireworksKeyFile: context.config.fireworksKeyFile,
+    });
+    await gateway.start();
+    await stopped;
+    await gateway.stop();
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
   }
-  control.removeStaleSockets();
-  const gateway = new Gateway(control.state, control.auth, {
-    ...control.certificates(),
-    adminSocket: control.location.admin,
-    pool: control.location.pool,
-    fireworksKeyFile: context.config.fireworksKeyFile,
-  });
-  await gateway.start();
-  await new Promise<void>((resolve) => {
-    process.once("SIGINT", () => {
-      resolve();
-    });
-    process.once("SIGTERM", () => {
-      resolve();
-    });
-  });
-  await gateway.stop();
 }
 
 export async function gatewayCommand(

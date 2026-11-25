@@ -891,3 +891,60 @@ test("gateway serve disables older registrations, clears stale sockets and remov
     rmSync(root, { recursive: true, force: true });
   }
 }, 60_000);
+
+test("gateway serve that is signalled while it issues the certificates ends cleanly and leaves no lock", async () => {
+  const root = mkdtempSync("/tmp/cog-");
+  const shims = path.join(root, "shims");
+  mkdirSync(shims);
+  const marker = path.join(root, "issuing");
+  const real = spawnSync("sh", ["-c", "command -v openssl"], {
+    encoding: "utf8",
+  }).stdout.trim();
+  writeFileSync(
+    path.join(shims, "openssl"),
+    `#!/bin/sh\nif [ ! -e "${marker}" ]; then : >"${marker}"; sleep 1; fi\nexec "${real}" "$@"\n`,
+    { mode: 0o700 },
+  );
+  const secrets = path.join(root, "secrets");
+  const service = spawn(process.execPath, [main, "gateway", "serve"], {
+    env: {
+      ...process.env,
+      COG_ROOT: root,
+      HOME: path.join(root, "home"),
+      PATH: `${shims}:${process.env.PATH ?? ""}`,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let serviceError = "";
+  service.stderr.on("data", (chunk: Buffer) => {
+    serviceError += chunk.toString();
+  });
+  try {
+    for (let attempt = 0; attempt < 600 && !existsSync(marker); attempt++) {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+    }
+    assert.ok(existsSync(marker), serviceError);
+    assert.ok(existsSync(path.join(secrets, ".lock")), serviceError);
+    const exited = once(service, "exit");
+    service.kill("SIGTERM");
+    await exited;
+    assert.deepEqual(
+      { status: service.exitCode, signal: service.signalCode },
+      { status: 0, signal: null },
+      serviceError,
+    );
+    assert.deepEqual(
+      readdirSync(secrets).filter((name) => name.startsWith(".")),
+      [],
+    );
+  } finally {
+    if (service.exitCode === null && service.signalCode === null) {
+      const exited = once(service, "exit");
+      service.kill("SIGKILL");
+      await exited;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);

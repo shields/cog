@@ -220,7 +220,11 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   gateway finishes its requests in flight on SIGTERM, and a model response can
   stream for minutes, so the plist sets `ExitTimeOut` to 60 seconds, after which
   launchd kills it, and `install.sh` waits ten seconds longer than that for the
-  label to go.
+  label to go. `cog gateway serve` handles SIGINT and SIGTERM from its first
+  line, since the default action during the issue of the certificates would
+  leave their lock behind and block every later start. The handler runs once
+  the issue ends, so a signal that arrives while it waits for a lock that
+  another run holds (up to 120 seconds) is bounded by `ExitTimeOut`.
   `gateway/gateway.sb` takes exactly the parameters BINARY, STATE, SECRETS and
   FIREWORKS_KEY through `(param "NAME")`, and the plist passes the same set. The
   daemon never touches the Lima directory, which may be on an external volume.
@@ -391,7 +395,8 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
 - `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
   refresh, live grants, audit and the HTTPS Unix socket. `cog/*.test.ts` cover
   the CLI and foundation modules, including a real `gateway serve` that
-  disables older registrations, clears stale sockets and removes its own, and
+  disables older registrations, clears stale sockets and removes its own, one
+  that is signalled while it issues the certificates, and
   `cog/pool.test.ts` signals `cog pool add` through a hook in the write; the
   no-echo prompt runs under a pseudo-terminal and needs `stty`.
 - `gateway/cert.test.ts` checks strict verification and the identifiers on
