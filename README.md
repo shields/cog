@@ -247,8 +247,17 @@ It holds the GitHub App access and refresh tokens under
 `~/.local/state/cog/`. A Lima guest receives only a public CA certificate and an
 immutable VM ID, never a GitHub token. The gateway's own certificate is valid
 for a year and is replaced, when the gateway starts or a VM is registered, once
-half of that is left; guests trust the CA, so they do not notice. A guest's
-HTTPS requests for `github.com` and `api.github.com` go to a relay on
+half of that is left; guests trust the CA, so they do not notice. The CA and
+the leaf carry key identifiers (a Subject Key Identifier on both, and an
+Authority Key Identifier on the leaf), so the set passes strict verification,
+which Python 3.13 and later apply by default. A CA that lacks a Subject Key
+Identifier is replaced once, with a new key, when the gateway starts or a VM is
+registered, and a leaf that lacks either identifier is replaced under its CA. A
+CA that openssl cannot read is an error that names the files to remove, never
+a reason to replace it. A VM made before that trusts the old CA and fails to
+verify the gateway: run `cog rm NAME` and make it again with `cog new`.
+
+A guest's HTTPS requests for `github.com` and `api.github.com` go to a relay on
 `127.0.0.1:443` in the guest, which sends them through the per-VM Unix socket
 `/tmp/cog-github.sock` (a reverse forward, one per VM) to the Mac, where the
 gateway listens on `~/.local/state/cog/sock/github-UUID.sock`. The gateway

@@ -89,6 +89,17 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   disabled deletes it when the Lima VM still forwards to the socket that was
   registered (`State.retiredSocket`, `lima.hasGatewaySocket`), and otherwise
   answers `VM is not active`.
+  `gateway/cert.ts` gives the CA a Subject Key Identifier and the leaf a
+  Subject Key Identifier and an Authority Key Identifier, so the set passes
+  `openssl verify -x509_strict` (Python 3.13+ verifies strictly by default).
+  `validLeaf` requires strict verification and both identifiers, and under the
+  lock `ensureCertificates` replaces a CA with no Subject Key Identifier, with a
+  new key, and then the leaf. LibreSSL's `-x509_strict` does not check the
+  identifiers, so `hasExtension` looks for them in `x509 -text`, and throws,
+  naming the files to remove, when openssl cannot read the certificate, so that
+  a damaged CA is never mistaken for one with no identifier and replaced; strict
+  verification is real only on OpenSSL 3, as in CI. The Seatbelt profile needs
+  nothing more, since only `req`, `x509` and `verify` run.
   The same server answers `api.anthropic.com` and `api.fireworks.ai`, the
   third and fourth names on the leaf, for a guest whose `/etc/hosts` points
   those names at the relay. `guest/setup-github-gateway` maps the two GitHub
@@ -286,6 +297,8 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   disables older registrations, clears stale sockets and removes its own, and
   `cog/pool.test.ts` signals `cog pool add` through a hook in the write; the
   no-echo prompt runs under a pseudo-terminal and needs `stty`.
+- `gateway/cert.test.ts` checks strict verification and the identifiers on
+  both OpenSSL 3 and LibreSSL; a real TLS handshake from Python is not tested.
 - No automated test runs the real profile, which needs macOS.
 - No automated test covers a live launchd install, real GitHub authorization,
   network isolation and the relay in a VM, live Tailscale enrollment or a
