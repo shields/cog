@@ -151,13 +151,31 @@ test("a named pipe that replaces the file after the check is neither waited for 
   assert.equal(spawnSync("mkfifo", [pipe]).status, 0);
   const status = fs.statSync(regular);
   const check = spyOn(fs, "statSync").mockImplementation(() => status as never);
+  // A blocking open of a pipe with no writer never returns, which would hang
+  // the run instead of failing the test, so the open is made non-blocking
+  // whatever the reader asked for and the flags it asked for are checked.
+  const requested: number[] = [];
+  const open = fs.openSync;
+  const opening = spyOn(fs, "openSync").mockImplementation(((
+    file: fs.PathLike,
+    flags: number,
+    mode?: fs.Mode,
+  ) => {
+    requested.push(flags);
+    return open(file, flags | fs.constants.O_NONBLOCK, mode);
+  }) as never);
   onTestFinished(() => {
     check.mockRestore();
+    opening.mockRestore();
   });
   assert.deepEqual(readKeyFile(pipe), {
     kind: "unusable",
     reason: "is not a regular file",
   });
+  assert.deepEqual(
+    requested.map((flags) => flags & fs.constants.O_NONBLOCK),
+    [fs.constants.O_NONBLOCK],
+  );
 });
 
 test("a file that cannot be opened is unusable and names only the error code", () => {

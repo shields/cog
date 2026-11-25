@@ -519,6 +519,11 @@ const malformed: [string, string, RegExp][] = [
     /invalid pool reason/,
   ],
   [
+    "an unusable pool with an empty reason",
+    JSON.stringify({ state: "unusable", reason: "", accounts: [] }),
+    /invalid pool reason/,
+  ],
+  [
     "accounts of an unusable pool",
     JSON.stringify({ ...usableAnswer, state: "unusable", reason: "why" }),
     /cannot use/,
@@ -563,6 +568,19 @@ const malformed: [string, string, RegExp][] = [
         {
           ...usableAnswer.accounts[0],
           buckets: [{ bucket: "5h", utilization: "0.5", expires: 1 }],
+        },
+      ],
+    }),
+    /invalid pool bucket/,
+  ],
+  [
+    "a bucket with an expiry that is a string",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [
+        {
+          ...usableAnswer.accounts[0],
+          buckets: [{ bucket: "5h", utilization: 0.5, expires: "soon" }],
         },
       ],
     }),

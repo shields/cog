@@ -647,6 +647,68 @@ test("private keys and an in-directory serial file do not depend on openssl's de
   }
 });
 
+// OpenSSL 3 adds the key identifiers by default, and the build that the
+// launchd service resolves does not, so a request that leaves them to the
+// defaults passes here and fails there.
+const withoutDefaultIdentifiers = (
+  real: string,
+): string => String.raw`#!${process.execPath}
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const asked = (text) => text.includes("subjectKeyIdentifier=");
+if (args[0] === "req" && args.includes("-x509") && !args.some(asked)) {
+  args.push("-addext", "subjectKeyIdentifier=none");
+}
+if (args[0] === "x509" && args.includes("-req")) {
+  const index = args.indexOf("-extfile") + 1;
+  let text = readFileSync(args[index], "utf8");
+  for (const name of ["subjectKeyIdentifier", "authorityKeyIdentifier"]) {
+    if (!text.includes(name + "=")) text += name + "=none\n";
+  }
+  writeFileSync(args[index] + ".defaults", text);
+  args[index] += ".defaults";
+}
+const { status, error } = spawnSync(${JSON.stringify(real)}, args, { stdio: "inherit" });
+if (error) throw error;
+process.exit(status ?? 1);
+`;
+
+test("the key identifiers are asked for and not left to openssl's defaults", () => {
+  const shims = mkdtempSync(path.join(tmpdir(), "cog-cert-defaults-"));
+  const originalPath = process.env.PATH;
+  if (!isLibreSSL()) {
+    writeFileSync(
+      path.join(shims, "openssl"),
+      withoutDefaultIdentifiers(realOpenssl()),
+      { mode: 0o755 },
+    );
+  }
+  process.env.PATH = `${shims}${path.delimiter}${originalPath ?? ""}`;
+  try {
+    withDirectory((directory) => {
+      ensureCertificates(directory);
+      const subject = identifier(
+        path.join(directory, "ca.pem"),
+        "Subject Key Identifier",
+      );
+      assert.match(subject, /^[0-9A-F:]{20,}$/u);
+      assert.equal(
+        identifier(
+          path.join(directory, "github.pem"),
+          "Authority Key Identifier",
+        ),
+        subject,
+      );
+      assert.ok(strictlyVerifies(directory));
+    });
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(shims, { recursive: true, force: true });
+  }
+});
+
 test("a lock left by a crashed run is an error that names the lock, and nothing is rewritten", () => {
   withIssued((directory) => {
     issueLeaf(directory, 1);
