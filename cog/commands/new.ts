@@ -234,6 +234,32 @@ const probe = (seconds: string, url: string): string[] => [
   url,
 ];
 
+// Claude Code in a guest needs the CA bundle and, for Claude, the placeholder
+// token that the dotfiles' .zshenv and .zshrc export, so a variable that is
+// only set in the shell does not count. Only fixed words leave the guest, since
+// the token variable could hold a real credential. zsh's startup noise ("can't
+// change option: zle" without a terminal) goes to /dev/null.
+const guestExportsCheck = (claude: boolean): string[] => [
+  "sh",
+  "-c",
+  'exec zsh -i -c "$1" 2>/dev/null',
+  "sh",
+  [
+    `[[ \${(t)NODE_EXTRA_CA_CERTS} == *export* && -r $NODE_EXTRA_CA_CERTS && $NODE_EXTRA_CA_CERTS -ef /etc/ssl/certs/ca-certificates.crt ]] || print ca`,
+    ...(claude
+      ? [
+          `[[ \${(t)CLAUDE_CODE_OAUTH_TOKEN} == *export* && $CLAUDE_CODE_OAUTH_TOKEN == ${placeholderCredential} ]] || print token`,
+        ]
+      : []),
+    "print done",
+  ].join("; "),
+];
+
+const guestExportsMissing = {
+  ca: "NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle (.zshenv)",
+  token: `CLAUDE_CODE_OAUTH_TOKEN is not exported as the placeholder ${placeholderCredential} (.zshrc)`,
+};
+
 export async function newVM(
   args: readonly string[],
   context: NewContext,
@@ -439,6 +465,29 @@ export async function newVM(
         await lima.shell(name, [`${guestLib}/setup-secrets`, key], {
           stdin: bytes,
         });
+      }
+    }
+
+    if (models.length > 0) {
+      let words: string[] | undefined;
+      try {
+        words = (
+          await lima.shellOutput(name, guestExportsCheck(!noClaude))
+        ).split("\n");
+      } catch (error) {
+        if (!(error instanceof CommandFailed)) {
+          throw error;
+        }
+      }
+      const problems = words?.includes("done")
+        ? (["ca", "token"] as const)
+            .filter((word) => words.includes(word))
+            .map((word) => guestExportsMissing[word])
+        : ["zsh did not run to the end of the check"];
+      if (problems.length > 0) {
+        throw new CogError(
+          `${name}'s shell is not set up for ${wired} through the gateway: ${problems.join("; ")}; the base was built from dotfiles that lack this, so update the dotfiles checkout and run cog base again`,
+        );
       }
     }
 

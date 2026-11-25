@@ -118,7 +118,8 @@ STUB
 # $LIMA_STUB_BLOCK creates $LIMA_STUB_STATE/blocked and waits for
 # a terminal signal. A call to a subcommand named in
 # $LIMA_STUB_SNAPSHOT saves the gateway's state to
-# $LIMA_STUB_STATE/snapshots/CALL.json before it does anything.
+# $LIMA_STUB_STATE/snapshots/CALL.json before it does anything. The guest shell
+# check answers $LIMA_STUB_GUEST_CHECK, "done" by default.
 cat > "$STUBS/limactl" <<'STUB'
 #!/bin/bash
 state=$LIMA_STUB_STATE
@@ -238,6 +239,7 @@ shell)
         tar -xf "$state/calls/$call.stdin" -C "$state/lib"
         ;;
     'env GIT_TERMINAL_PROMPT=0 git clone '*) ;;
+    'sh -c exec zsh -i -c '*) printf '%s\n' "${LIMA_STUB_GUEST_CHECK-done}" ;;
     'git '*) git -C "$state/guest" "${@:2}" || exit $? ;;
     esac
     ;;
@@ -1271,6 +1273,12 @@ assert_eq "the model wiring follows the GitHub wiring and precedes the secrets" 
     "$(( $(grep -n 'setup-github-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) < $(grep -n 'setup-model-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) && $(grep -n 'setup-model-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) < $(grep -n 'setup-secrets' "$STATE/limactl.log" | head -1 | cut -d: -f1) ))"
 assert_eq "new probes the guest's Anthropic relay once" 1 "$(count_in_log 'https://api.anthropic.com/__cog__/health')"
 assert_eq "new probes the guest's GitHub relay once" 1 "$(count_in_log 'https://api.github.com/__cog__/health')"
+assert_eq "new checks the guest's shell once" 1 "$(count_in_log 'sh -c exec zsh -i -c')"
+assert_eq "the guest shell check follows the last secret install" 1 \
+    "$(( $(grep -n 'setup-secrets' "$STATE/limactl.log" | tail -1 | cut -d: -f1) < $(grep -n 'exec zsh -i -c' "$STATE/limactl.log" | head -1 | cut -d: -f1) ))"
+guest_check_call=$(grep -n 'exec zsh -i -c' "$STATE/limactl.log" | head -1 | cut -d: -f1)
+assert_eq "the guest shell check reads nothing from stdin" "" "$(stdin_of "$guest_check_call")"
+assert_eq "the guest shell check never names a token value" 0 "$(grep -c 'sk-ant-' "$STATE/calls/$guest_check_call.argv" || true)"
 assert_contains "new installs the Codex login with the root-owned setup-secrets" \
     "shell t1 $GUEST_LIB/setup-secrets CODEX_AUTH" "$(<"$STATE/limactl.log")"
 assert_eq "new refers to nothing in the home directory's bin" 0 "$(grep -cE '/bin/setup-|HOME/bin|/home/guest/bin' "$STATE/limactl.log" || true)"
@@ -1339,6 +1347,7 @@ assert_eq "new without a repository sends no GitHub secret" 0 "$(count_in_log GI
 assert_eq "--no-claude-token skips the Claude secret" 0 "$(count_in_log CLAUDE_CODE_OAUTH_TOKEN)"
 assert_eq "--no-claude-token skips the model wiring" 0 "$(count_in_log setup-model-gateway)"
 assert_eq "--no-claude-token skips the Anthropic probe" 0 "$(count_in_log api.anthropic.com)"
+assert_eq "--no-claude-token skips the guest shell check" 0 "$(count_in_log 'exec zsh -i -c')"
 assert_contains "--no-claude-token says to log in" "run claude auth login in the VM" "$OUT"
 assert_eq "--no-codex-auth skips the Codex login" 0 "$(count_in_log CODEX_AUTH)"
 assert_eq "no Fireworks key file means no Fireworks secret" 0 "$(count_in_log FIREWORKS_API_KEY)"
@@ -1385,6 +1394,18 @@ assert_eq "a failed Fireworks probe disables gateway access" '{"disabled":true,"
 assert_contains "a failed Fireworks probe deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 assert_eq "a failed Fireworks probe installs no secret" 0 "$(count_in_log setup-secrets)"
 assert_no_secret_leak "a failed Fireworks probe"
+
+new_gateway_case test-base
+mkdir -p "$HOME_DIR/.config/secrets"
+print -r -- "$FAKE_FIREWORKS" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
+EXTRA_ENV+=($'LIMA_STUB_GUEST_CHECK=ca\ndone' LIMA_STUB_SNAPSHOT=delete)
+run_cog new t1 --no-repo --no-claude-token --no-codex-auth
+assert_eq "a guest shell without the CA export stops a Fireworks-only new" 1 "$RC"
+assert_contains "a Fireworks-only guest shell check names Fireworks" \
+    "t1's shell is not set up for Fireworks through the gateway: NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle" "$OUT"
+assert_eq "a Fireworks-only guest shell check does not look at the Claude token" 0 "$(count_in_log 'CLAUDE_CODE_OAUTH_TOKEN')"
+assert_contains "a Fireworks-only guest shell check deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+assert_no_secret_leak "a Fireworks-only guest shell check"
 
 new_gateway_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
@@ -1551,6 +1572,31 @@ assert_eq "a failed Anthropic probe disables access before it deletes the VM" tr
     "$(jq -r '.instances[0].disabled' "$STATE/snapshots/$delete_call.json")"
 assert_eq "a failed Anthropic probe installs no secret" 0 "$(count_in_log setup-secrets)"
 assert_no_secret_leak "a failed Anthropic probe"
+
+for guest_case in "ca|NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle" \
+    "token|CLAUDE_CODE_OAUTH_TOKEN is not exported as the placeholder cog" \
+    "|zsh did not run to the end of the check"; do
+    new_gateway_case test-base
+    guest_words=${guest_case%%|*}
+    [[ -z $guest_words ]] || guest_words+=$'\ndone'
+    EXTRA_ENV+=("LIMA_STUB_GUEST_CHECK=$guest_words" LIMA_STUB_SNAPSHOT=delete)
+    run_cog new t1 --repo shields/dotfiles
+    assert_eq "a guest shell that fails '${guest_case%%|*}' stops new" 1 "$RC"
+    assert_contains "a guest shell that fails '${guest_case%%|*}' says what is missing" "${guest_case#*|}" "$OUT"
+    assert_contains "a guest shell that fails '${guest_case%%|*}' says to update the dotfiles and run cog base" \
+        "update the dotfiles checkout and run cog base again" "$OUT"
+    assert_eq "a guest shell that fails '${guest_case%%|*}' disables gateway access" '{"disabled":true,"grants":{}}' "$(instance_query t1 '{disabled, grants}')"
+    assert_contains "a guest shell that fails '${guest_case%%|*}' deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+    assert_eq "a guest shell that fails '${guest_case%%|*}' opens no shell" 0 "$(count_in_log 'shell --workdir')"
+    assert_no_secret_leak "a guest shell that fails '${guest_case%%|*}'"
+done
+
+new_gateway_case test-base
+EXTRA_ENV+=(LIMA_STUB_FAIL="exec zsh -i -c" LIMA_STUB_SNAPSHOT=delete)
+run_cog new t1 --repo shields/dotfiles
+assert_eq "a failing guest shell check stops new" 1 "$RC"
+assert_contains "a failing guest shell check says to run cog base again" "run cog base again" "$OUT"
+assert_contains "a failing guest shell check deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 
 new_gateway_case test-base
 EXTRA_ENV+=(LIMA_STUB_FAIL="brew upgrade")
@@ -1733,6 +1779,7 @@ for entry in HUP:129 INT:130 TERM:143; do
     new_signal_stage "$signal" "$expected" "during the repository clone" "git clone" 1 --repo shields/other
     new_signal_stage "$signal" "$expected" "during the Claude placeholder install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" 1 --repo shields/other
     new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" 1 --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the guest shell check" "exec zsh -i -c" 1 --repo shields/other
 done
 
 new_gateway_case test-base

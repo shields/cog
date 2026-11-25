@@ -397,6 +397,16 @@ before `cog new`; `new` fails and deletes the VM when the script is missing or
 the probe fails. VMs that exist already keep the token they have and are not
 affected.
 
+At the end of setup, when Claude or Fireworks is wired, `cog new` runs the guest
+user's interactive zsh and checks that it exports `NODE_EXTRA_CA_CERTS` as the
+system bundle (`/etc/ssl/certs/ca-certificates.crt`), which holds the gateway's
+CA, and, unless `--no-claude-token`, `CLAUDE_CODE_OAUTH_TOKEN` as the
+placeholder `cog`. Only the words `ca`, `token` and `done` leave the guest,
+never a value. If it fails, the VM is deleted and its registration disabled,
+with a message of the form `NAME's shell is not set up for Claude through the
+gateway: PROBLEMS; the base was built from dotfiles that lack this, so update
+the dotfiles checkout and run cog base again`.
+
 ### The Claude pool
 
 The gateway can hold several Claude accounts, and their tokens stay on the Mac.
@@ -628,6 +638,9 @@ deploy or an agent image build. After installing, run `cog base` and
   `cog gateway disable t1` makes `claude -p hi` fail. `codex` runs without a
   login too (with the Mac's `codex login`; `codex login status` says so).
 - `emacs -nw` starts and exits.
+- `cog new` passes its shell check with the real dotfiles. In the VM, a Python
+  program that opens `https://api.anthropic.com/__cog__/health` with
+  `ssl.create_default_context()` verifies the gateway's certificate.
 - With a Fireworks key on the Mac, `cg -p hi` answers on the Mac and in a fresh
   cog whose `~/.config/secrets/FIREWORKS_API_KEY` holds only `cog`, `/status`
   in `cg` names the Fireworks URL and the drop-in among the setting sources, and
@@ -762,6 +775,12 @@ so Claude Code sends `Authorization: Bearer cog` and stays in direct mode. `cg`
 sends the content of `~/.config/secrets/FIREWORKS_API_KEY`, the placeholder
 again, as the bearer token to `https://api.fireworks.ai/inference` and no other
 credential.
+
+`cog new` checks the first two of these at its end (see "Claude Code"), so
+`.zshenv` must export `NODE_EXTRA_CA_CERTS` as
+`/etc/ssl/certs/ca-certificates.crt` and `.zshrc` must export
+`CLAUDE_CODE_OAUTH_TOKEN` from its secrets file. It does not check
+`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` or `cg`.
 
 ## History
 

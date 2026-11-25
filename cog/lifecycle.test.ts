@@ -18,6 +18,7 @@ import {
   mkdtempSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -66,6 +67,7 @@ function fixture() {
     fireworks: "missing" as "missing" | "usable" | "old" | { reason: string },
     pool: "usable" as "unconfigured" | "unusable" | "usable" | "old",
     probeFails: "",
+    guestCheck: "done" as string | Error,
     syncFails: false,
   };
   const boundary = (stage: string): void => {
@@ -115,7 +117,12 @@ function fixture() {
         signals.check();
         return Promise.resolve();
       },
-      shellOutput: () => Promise.reject(new Error("unexpected shell query")),
+      shellOutput: (name, argv) => {
+        mark("shellOutput", name, argv);
+        return typeof failures.guestCheck === "string"
+          ? Promise.resolve(failures.guestCheck)
+          : Promise.reject(failures.guestCheck);
+      },
       enter: (name, workdir) => {
         mark("enter", name, workdir);
         return Promise.resolve(17);
@@ -365,6 +372,7 @@ test("new authorizes a private repository before cloning and grants only reads",
       ["/usr/local/lib/cog/setup-secrets", key],
       new TextEncoder().encode(value),
     ]),
+    ["shellOutput", "vm", calls.find(([m]) => m === "shellOutput")?.[2]],
     ["close"],
     ["enter", "vm", guest],
   ]);
@@ -410,6 +418,21 @@ test("new wires only Fireworks when --no-claude-token is given with a key file",
     ]),
     [["FIREWORKS_API_KEY", "cog\n"]],
   );
+});
+
+test("new checks only the CA export in the guest's shell when only Fireworks is wired", async () => {
+  const { calls, context, failures } = fireworksFixture("usable");
+  await newVM(noSecrets, context);
+  const checks = guestCheckCalls(calls);
+  assert.equal(checks.length, 1);
+  const script = (checks[0]?.[2] as string[])[4] ?? "";
+  assert.match(script, /NODE_EXTRA_CA_CERTS/);
+  assert.doesNotMatch(script, /CLAUDE_CODE_OAUTH_TOKEN/);
+  failures.guestCheck = "ca\ndone";
+  await assert.rejects(newVM(noSecrets, context), {
+    message:
+      "vm's shell is not set up for Fireworks through the gateway: NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle (.zshenv); the base was built from dotfiles that lack this, so update the dotfiles checkout and run cog base again",
+  });
 });
 
 test("new wires nothing for Fireworks without a key file", async () => {
@@ -593,6 +616,182 @@ test.each([
   },
 );
 
+const guestCheckCalls = (calls: readonly unknown[][]): unknown[][] =>
+  calls.filter(([method]) => method === "shellOutput");
+
+test("new checks the guest's shell after the secrets and before it is ready", async () => {
+  const { calls, context } = fixture();
+  await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+  const checks = guestCheckCalls(calls);
+  assert.equal(checks.length, 1);
+  const argv = checks[0]?.[2] as string[];
+  assert.deepEqual(argv.slice(0, 4), [
+    "sh",
+    "-c",
+    'exec zsh -i -c "$1" 2>/dev/null',
+    "sh",
+  ]);
+  assert.match(argv[4] ?? "", /NODE_EXTRA_CA_CERTS/);
+  assert.match(argv[4] ?? "", /CLAUDE_CODE_OAUTH_TOKEN == cog/);
+  const index = calls.findIndex(([method]) => method === "shellOutput");
+  const secret = calls.findLastIndex(
+    ([method, , command]) =>
+      method === "shell" && (command as string[])[0]?.endsWith("setup-secrets"),
+  );
+  assert.ok(secret !== -1 && secret < index);
+  const enter = calls.findIndex(([method]) => method === "enter");
+  assert.ok(index < enter);
+});
+
+test.each([
+  [
+    "CA",
+    "ca\ndone",
+    "NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle (.zshenv)",
+  ],
+  [
+    "token",
+    "token\ndone",
+    "CLAUDE_CODE_OAUTH_TOKEN is not exported as the placeholder cog (.zshrc)",
+  ],
+  [
+    "both",
+    "ca\ntoken\ndone",
+    "NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle (.zshenv); CLAUDE_CODE_OAUTH_TOKEN is not exported as the placeholder cog (.zshrc)",
+  ],
+  [
+    "a check that did not finish",
+    "",
+    "zsh did not run to the end of the check",
+  ],
+  [
+    "a failing shell",
+    new CommandFailed("limactl shell", 1),
+    "zsh did not run to the end of the check",
+  ],
+] as const)(
+  "a guest shell with %s fails new and rolls back",
+  async (_, output, problem) => {
+    const { calls, context, failures } = fixture();
+    failures.guestCheck = output;
+    await assert.rejects(
+      newVM(["vm", "--no-repo", "--no-codex-auth"], context),
+      {
+        message: `vm's shell is not set up for Claude through the gateway: ${problem}; the base was built from dotfiles that lack this, so update the dotfiles checkout and run cog base again`,
+      },
+    );
+    assert.deepEqual(calls.slice(-2), [
+      ["disable", "lima:vm"],
+      ["remove", "vm"],
+    ]);
+  },
+);
+
+test.each([
+  ["cog", ["ca", "done"]],
+  ["sk-ant-made-up", ["ca", "token", "done"]],
+  ["", ["ca", "token", "done"]],
+] as const)(
+  "the guest check script reports a token of %p with fixed words only",
+  async (token, words) => {
+    const { calls, context } = fixture();
+    await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+    const script = (guestCheckCalls(calls)[0]?.[2] as string[])[4] ?? "";
+    const child = Bun.spawn(["zsh", "-f", "-c", script], {
+      env: { PATH: process.env.PATH ?? "", CLAUDE_CODE_OAUTH_TOKEN: token },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(child.stdout).text();
+    const err = await new Response(child.stderr).text();
+    assert.equal(await child.exited, 0);
+    assert.deepEqual(out.trim().split("\n"), words);
+    assert.equal((out + err).includes("sk-ant"), false);
+  },
+);
+
+test("the guest check script accepts the system bundle, or a link to it, as NODE_EXTRA_CA_CERTS and nothing else", async () => {
+  const { calls, context } = fixture();
+  await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+  const script = (guestCheckCalls(calls)[0]?.[2] as string[])[4] ?? "";
+  const directory = home();
+  const bundle = path.join(directory, "bundle.crt");
+  const copy = path.join(directory, "copy.crt");
+  const link = path.join(directory, "link.crt");
+  writeFileSync(bundle, "certificates\n");
+  writeFileSync(copy, "certificates\n");
+  symlinkSync(bundle, link);
+  const system = "/etc/ssl/certs/ca-certificates.crt";
+  assert.ok(script.includes(system));
+  for (const [value, words] of [
+    [bundle, ["done"]],
+    [link, ["done"]],
+    [copy, ["ca", "done"]],
+    [path.join(directory, "missing.crt"), ["ca", "done"]],
+    ["", ["ca", "done"]],
+  ] as const) {
+    const child = Bun.spawn(
+      ["zsh", "-f", "-c", script.replace(system, bundle)],
+      {
+        env: {
+          PATH: process.env.PATH ?? "",
+          CLAUDE_CODE_OAUTH_TOKEN: "cog",
+          NODE_EXTRA_CA_CERTS: value,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const out = await new Response(child.stdout).text();
+    assert.equal(await child.exited, 0);
+    assert.deepEqual(out.trim().split("\n"), words, value);
+  }
+});
+
+test("the guest check script wants the variables exported, not only set in the shell", async () => {
+  const { calls, context } = fixture();
+  await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+  const script = (guestCheckCalls(calls)[0]?.[2] as string[])[4] ?? "";
+  const directory = home();
+  const bundle = path.join(directory, "bundle.crt");
+  writeFileSync(bundle, "certificates\n");
+  const bundled = script.replace("/etc/ssl/certs/ca-certificates.crt", bundle);
+  for (const [setup, words] of [
+    [
+      `NODE_EXTRA_CA_CERTS=${bundle}; CLAUDE_CODE_OAUTH_TOKEN=cog`,
+      ["ca", "token", "done"],
+    ],
+    [
+      `export NODE_EXTRA_CA_CERTS=${bundle}; export CLAUDE_CODE_OAUTH_TOKEN=cog`,
+      ["done"],
+    ],
+    [
+      `typeset -x NODE_EXTRA_CA_CERTS=${bundle} CLAUDE_CODE_OAUTH_TOKEN=cog`,
+      ["done"],
+    ],
+  ] as const) {
+    const child = Bun.spawn(["zsh", "-f", "-c", `${setup}; ${bundled}`], {
+      env: { PATH: process.env.PATH ?? "" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(child.stdout).text();
+    assert.equal(await child.exited, 0);
+    assert.deepEqual(out.trim().split("\n"), words, setup);
+  }
+});
+
+test("an unexpected error from the guest check is not reworded", async () => {
+  const { context, failures } = fixture();
+  failures.guestCheck = new Error("boom");
+  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
+    message: "boom",
+  });
+});
+
 test("--no-claude-token skips the pool, the wiring and the placeholder", async () => {
   const { calls, context, failures } = fixture();
   failures.pool = "unconfigured";
@@ -602,6 +801,7 @@ test("--no-claude-token skips the pool, the wiring and the placeholder", async (
   assert.equal(text.includes("setup-model-gateway"), false);
   assert.equal(text.includes("api.anthropic.com"), false);
   assert.equal(text.includes("setup-secrets"), false);
+  assert.deepEqual(guestCheckCalls(calls), []);
 });
 
 const noSecrets = ["vm", "--no-repo", "--no-claude-token", "--no-codex-auth"];

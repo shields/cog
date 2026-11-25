@@ -258,6 +258,16 @@ reads `/dev/null` unless a pipe or file is meant for it, or it is the final
 shell, so that none swallows what was typed for the shell; `tests/test_cog.zsh`
 holds a line in cog's stdin and checks that only the final shell reads it.
 `cog base` never reads cog's stdin, including during staging.
+`cog new` ends, when Claude or Fireworks is wired, with `sh -c 'exec zsh -i -c
+"$1" 2>/dev/null' sh SCRIPT` through `lima.shellOutput`, with stdin from
+`/dev/null`. The one-line script prints only the words `ca`
+(`NODE_EXTRA_CA_CERTS` is not exported, or does not name a readable file that
+is the same inode as `/etc/ssl/certs/ca-certificates.crt`), `token`
+(`CLAUDE_CODE_OAUTH_TOKEN` is not exported, or is not `cog`; this clause is
+left out with `--no-claude-token`) and `done`; no value leaves the guest. A
+missing `done` or a failing `limactl` is a `CogError`, which the rollback
+handles by disabling and deleting the VM. The `2>/dev/null` belongs on the
+`exec`, since zsh's startup noise comes before the script runs.
 
 Tailscale enrollment uses a dedicated Mac OAuth client with `auth_keys` write
 access for `tag:cog` join keys and at least `devices:core:read` to verify SSH.
@@ -278,7 +288,11 @@ Model access in a Lima guest also relies on dotfiles' `.zshenv` (the CA bundle
 variables where the gateway marker exists), `.zshrc` (the export of
 `CLAUDE_CODE_OAUTH_TOKEN` from its secrets file) and `cg` (the bearer token
 from `FIREWORKS_API_KEY`), so a change to where cog writes the placeholder
-needs the same change there.
+needs the same change there. `cog new`'s shell check reads two of them: the
+`.zshenv` must export `NODE_EXTRA_CA_CERTS` as
+`/etc/ssl/certs/ca-certificates.crt` and the `.zshrc` must export
+`CLAUDE_CODE_OAUTH_TOKEN` as the placeholder `cog`, so a change to either
+needs the same change in `cog/commands/new.ts`.
 Renaming a marker, changing what a marker holds (`cog-github-gateway` is a VM
 UUID or `cloudflare`), or changing what `throwaway.sh` and
 `configure-github-access.sh` require of the settings file (a non-empty
@@ -299,7 +313,11 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   The stubs record argv, environment and stdin in isolated fixture environments.
   Tests cover umasks 000, 022 and 077, signals at the cleanup stages of `new` and
   `base`, redaction of parse errors, and the daemon's disabling of a
-  registration outside `STATE/sock` with `cog rm` still deleting that VM.
+  registration outside `STATE/sock` with `cog rm` still deleting that VM. The
+  limactl stub answers the guest shell check with `LIMA_STUB_GUEST_CHECK`;
+  the cases cover its success, each missing export, empty output and a failing
+  call, with rollback and no secret in any output. The daemon answers the
+  Fireworks key state for the existing Fireworks cases.
   `tests/test_setup_secrets.zsh` runs in temporary guest homes.
 - `tests/test_install.py` gives the installer a temporary home and substitutes
   launchctl, Bun, plutil and sandbox-exec. The sandbox-exec stub checks the
