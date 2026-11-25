@@ -176,7 +176,7 @@ function issueLeaf(directory: string, days: number): void {
   rmSync(request);
 }
 
-function issueLeafNamed(directory: string, names: string[]): void {
+function issueLeafNamed(directory: string, names: string[], days = 365): void {
   const request = path.join(directory, "named.csr");
   const extensions = path.join(directory, "named.ext");
   openssl(
@@ -206,7 +206,7 @@ function issueLeafNamed(directory: string, names: string[]): void {
     path.join(directory, "ca.srl"),
     "-CAcreateserial",
     "-days",
-    "365",
+    String(days),
     "-sha256",
     "-extfile",
     extensions,
@@ -278,10 +278,26 @@ test("a valid CA and leaf are reused without rewriting any file", () => {
   });
 });
 
+const everyName = [
+  "github.com",
+  "api.github.com",
+  "api.anthropic.com",
+  "api.fireworks.ai",
+];
+
+test("a leaf with more than half of its year left is reused", () => {
+  withIssued((directory) => {
+    issueLeafNamed(directory, everyName, 184);
+    const before = snapshot(directory);
+    assertConsistent(ensureCertificates(directory));
+    assert.deepEqual(snapshot(directory), before);
+  });
+});
+
 test("a leaf inside the renewal window is reissued under the same CA", () => {
   withIssued((directory) => {
-    issueLeaf(directory, 29);
-    assert.ok(daysLeft(directory) < 30);
+    issueLeafNamed(directory, everyName, 181);
+    assert.ok(daysLeft(directory) < 182);
     const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
     const certificates = ensureCertificates(directory);
     assert.deepEqual(snapshot(directory, ["ca.pem", "ca-key.pem"]), authority);

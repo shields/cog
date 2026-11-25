@@ -29,6 +29,12 @@ import { claudeHost, fireworksHost } from "./models.ts";
 
 const leafNames = ["github.com", "api.github.com", claudeHost, fireworksHost];
 
+// A running daemon keeps serving the leaf it loaded, so the leaf is replaced
+// with half of its life left: only a daemon that runs that long without a
+// restart serves an expired one.
+const leafDays = 365;
+const renewalSeconds = (leafDays / 2) * 24 * 60 * 60;
+
 export interface Certificates {
   ca: string;
   cert: string;
@@ -186,7 +192,14 @@ function validLeaf({ ca, cert, key }: Paths): Certificates | undefined {
   // a key that is not the leaf's fails when the first listener starts, so the
   // chain and the key pair are checked as well as the dates. A leaf that lacks
   // a name that guests connect to fails every handshake for it.
-  return succeeds("x509", "-checkend", "2592000", "-noout", "-in", cert) &&
+  return succeeds(
+    "x509",
+    "-checkend",
+    String(renewalSeconds),
+    "-noout",
+    "-in",
+    cert,
+  ) &&
     succeeds("verify", "-CAfile", ca, cert) &&
     hasAllNames(cert) &&
     paired(cert, leafKey)
@@ -233,7 +246,7 @@ function issueLeaf(scratch: string, paths: Paths): void {
     "-out",
     newCert,
     "-days",
-    "365",
+    String(leafDays),
     "-sha256",
     "-extfile",
     extensions,

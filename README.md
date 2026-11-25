@@ -217,12 +217,15 @@ The gateway is a daemon on the Mac, `cog gateway serve`.
 It holds the GitHub App access and refresh tokens under
 `~/.config/secrets/cog/` and its state and admin socket under
 `~/.local/state/cog/`. A Lima guest receives only a public CA certificate and an
-immutable VM ID, never a GitHub token. Its HTTPS requests for `github.com` and
-`api.github.com` go to a relay on `127.0.0.1:443` in the guest, which sends them
-through the per-VM Unix socket `/tmp/cog-github.sock` (a reverse forward, one
-per VM) to the Mac. The gateway chooses the repository's token after checking
-the current grant and request. It refreshes tokens on demand; a refresh failure
-denies the request. The guest's git credential helper
+immutable VM ID, never a GitHub token. The gateway's own certificate is valid
+for a year and is replaced, when the gateway starts or a VM is registered, once
+half of that is left; guests trust the CA, so they do not notice. A guest's
+HTTPS requests for `github.com` and `api.github.com` go to a relay on
+`127.0.0.1:443` in the guest, which sends them through the per-VM Unix socket
+`/tmp/cog-github.sock` (a reverse forward, one per VM) to the Mac. The gateway
+chooses the repository's token after checking the current grant and request.
+It refreshes tokens on demand; a refresh failure denies the request. The
+guest's git credential helper
 (`/usr/local/lib/cog/github-gateway-credential`) and `GH_TOKEN` use a fixed
 dummy value, `cog`, that the gateway discards.
 
