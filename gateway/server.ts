@@ -20,7 +20,6 @@ import http, {
   type ServerResponse,
 } from "node:http";
 import https from "node:https";
-import { once } from "node:events";
 import { AppAuth } from "./auth.ts";
 import {
   classifyModel,
@@ -186,23 +185,66 @@ async function drained(
   }
 }
 
-async function sendBody(
+// Bun emits no "drain" on a request once the response to it has ended, so a
+// write that is waiting for one at that point waits for ever. It resolves
+// false instead.
+function flushed(
+  upstream: http.ClientRequest,
+  upstreamDone: Promise<undefined>,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    const settle = (drained: boolean): void => {
+      upstream.off("drain", onDrain);
+      upstream.off("error", reject);
+      resolve(drained);
+    };
+    const onDrain = (): void => {
+      settle(true);
+    };
+    upstream.once("drain", onDrain);
+    upstream.once("error", reject);
+    void upstreamDone.then(() => {
+      settle(false);
+    });
+  });
+}
+
+// False once the upstream has answered or gone and does not take the chunk. It
+// is cut off then, and the rest of the upload is read and dropped, so that the
+// guest's connection carries its next request.
+async function send(
+  upstream: http.ClientRequest,
+  chunk: Buffer,
+  upstreamDone: Promise<undefined>,
+): Promise<boolean> {
+  if (upstream.write(chunk) || (await flushed(upstream, upstreamDone))) {
+    return true;
+  }
+  upstream.destroy();
+  return false;
+}
+
+export async function sendBody(
   upstream: http.ClientRequest,
   body: RequestBody,
+  upstreamDone: Promise<undefined>,
 ): Promise<void> {
-  if (body.buffered.length > 0 && !upstream.write(body.buffered)) {
-    await once(upstream, "drain");
+  let sending = true;
+  if (body.buffered.length > 0) {
+    sending = await send(upstream, body.buffered, upstreamDone);
   }
   for (;;) {
     const next = await body.remaining.next();
     if (next.done) {
       break;
     }
-    if (!upstream.write(next.value)) {
-      await once(upstream, "drain");
+    if (sending) {
+      sending = await send(upstream, next.value, upstreamDone);
     }
   }
-  upstream.end();
+  if (sending) {
+    upstream.end();
+  }
 }
 
 function requestHeaders(
@@ -749,6 +791,13 @@ export class Gateway {
       }
       const reason = refusal?.message ?? "gateway request failed";
       const respond = (status: number, message: string): void => {
+        // A keep-alive client that reuses a connection with an unread upload
+        // on it waits out its timeout. Bun sets `complete` only after the
+        // parser has delivered the body, so a body that has already arrived
+        // can count as unread here, which costs that client a new connection.
+        if (!request.complete && !hasNoBody(request.rawHeaders)) {
+          response.setHeader("connection", "close");
+        }
         if (modelHost) {
           const answer = modelRefusal(
             status === 403 ? 403 : 503,
@@ -1036,6 +1085,8 @@ export class Gateway {
           }
         });
         let answered = false;
+        const upstreamDone = Promise.withResolvers<undefined>();
+        current.once("close", upstreamDone.resolve);
         const fail = (error: Error): void => {
           reject(error);
           current.destroy();
@@ -1070,6 +1121,7 @@ export class Gateway {
             fail(error instanceof Error ? error : new Error("response failed"));
             return;
           }
+          upstreamResponse.once("end", upstreamDone.resolve);
           upstreamResponse.pipe(response);
           // An upstream that closes mid-body never ends the pipe, and Node
           // reports that on the response only while an "error" listener
@@ -1110,11 +1162,15 @@ export class Gateway {
         if (replay) {
           current.end();
         } else {
-          void sendBody(current, body).catch((error: unknown) => {
-            current.destroy(
-              error instanceof Error ? error : new Error("request body failed"),
-            );
-          });
+          void sendBody(current, body, upstreamDone.promise).catch(
+            (error: unknown) => {
+              current.destroy(
+                error instanceof Error
+                  ? error
+                  : new Error("request body failed"),
+              );
+            },
+          );
         }
       };
       // open() can throw before an upstream request exists to take the

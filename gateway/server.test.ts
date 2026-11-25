@@ -24,7 +24,7 @@ import http, {
   type RequestListener,
   type ServerResponse,
 } from "node:http";
-import { once, type EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import https from "node:https";
 import {
   connect,
@@ -63,7 +63,7 @@ import { promisify } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { AppAuth } from "./auth.ts";
 import { compareCodeUnits } from "./policy.ts";
-import { Gateway } from "./server.ts";
+import { Gateway, sendBody } from "./server.ts";
 import { State, type Instance } from "./state.ts";
 
 afterEach(() => {
@@ -2283,7 +2283,7 @@ test("uploads in sequence on one connection leave no listeners behind on its soc
   assert.equal(new Set(watched.counts).size, 1);
 });
 
-test("uploads that fail in sequence on one connection leave no listeners behind on its socket", async () => {
+test("uploads that fail in sequence each close their connection and leave no listeners behind on its socket", async () => {
   const { socket, listener } = await startGateway({
     handler: (request) => {
       request.socket.destroy();
@@ -2322,7 +2322,7 @@ test("uploads that fail in sequence on one connection leave no listeners behind 
     request.end("0000");
     assert.equal(await within("the response to end", answered), 503);
   }
-  assert.equal(watched.connections.size, 1);
+  assert.equal(watched.connections.size, 8);
   assert.equal(new Set(watched.counts).size, 1, watched.counts.join(","));
 });
 
@@ -3229,6 +3229,7 @@ async function startModelStub(
     requests.push(entry);
     respond(request, response, entry);
   });
+  server.keepAliveTimeout = 600_000;
   server.on("connection", (socket: Socket) => {
     const closed = signal();
     const id = connections.length + 1;
@@ -3392,7 +3393,7 @@ function tokenSeen(entry: ModelRequest): string | undefined {
 }
 
 interface KeepAliveAgent {
-  options: { keepAlive?: boolean };
+  options: { keepAlive?: boolean; timeout?: number };
 }
 
 const bothAccounts = { alpha: tokens.alpha, bravo: tokens.bravo };
@@ -3649,6 +3650,8 @@ test("a VM's upstream agent is its own, keeps connections alive, and is destroye
   assert.notEqual(first, second);
   assert.equal((first as unknown as KeepAliveAgent).options.keepAlive, true);
   assert.equal((second as unknown as KeepAliveAgent).options.keepAlive, true);
+  assert.equal((first as unknown as KeepAliveAgent).options.timeout, 30_000);
+  assert.equal((second as unknown as KeepAliveAgent).options.timeout, 30_000);
   assert.equal(stub.connections.length, 2);
   const [one, two] = stub.connections;
   assert.ok(one && two);
@@ -4662,6 +4665,41 @@ test("a body-less request that is not safe is not sent again after a reset on a 
   }
 });
 
+test("a request whose guest left is not sent again after the reset that its own abort causes on a reused connection", async () => {
+  const slowArrived = signal();
+  const stub = await startModelStub((request, response, entry) => {
+    if (entry.url === "/slow") {
+      slowArrived.resolve();
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  captureStderr();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  const { request, response } = modelClient(
+    socket,
+    "GET",
+    "/slow",
+    poolHeaders,
+  );
+  const answered = (async (): Promise<void> => {
+    try {
+      await response;
+    } catch {
+      return;
+    }
+  })();
+  await within("the slow request at the provider", slowArrived.promise);
+  request.destroy();
+  await within("the client's request to end", answered);
+  await delay(500);
+  assert.equal(stub.requests.filter(({ url }) => url === "/slow").length, 1);
+});
+
 test("a request with no body is sent again once after a reset on a reused connection, and not after a reset on the fresh one", async () => {
   const stub = await startModelStub((request, response, entry) => {
     if (stub.requests.length === 1) {
@@ -5202,7 +5240,7 @@ test("a model request that is dispatched once stop() has begun is served with Co
   await within("stop()", stopping);
 });
 
-test("uploads whose upstream request cannot be created, in sequence on one connection, leave no listeners behind on its socket", async () => {
+test("uploads whose upstream request cannot be created each close their connection and leave no listeners behind on its socket", async () => {
   const stub = await startModelStub();
   const { socket, listener } = await startGateway({
     models: { anthropic: stub.origin },
@@ -5243,7 +5281,7 @@ test("uploads whose upstream request cannot be created, in sequence on one conne
     assert.equal(await within("the response to end", answered), 503);
   }
   assert.equal(stub.requests.length, 0);
-  assert.equal(watched.connections.size, 1);
+  assert.equal(watched.connections.size, 8);
   assert.equal(new Set(watched.counts).size, 1, watched.counts.join(","));
 });
 
@@ -6272,4 +6310,295 @@ test("an http upstream for one model host and a TLS upstream for the other are e
     "/inference/v1/messages",
     "/inference/v1/messages",
   ]);
+});
+
+function sendModel(
+  socket: string,
+  method: string,
+  target: string,
+  body: Buffer | Buffer[],
+  agent: https.Agent,
+  headers: Record<string, string> = {},
+): ReturnType<typeof send> {
+  return send(
+    socket,
+    method,
+    target,
+    body,
+    claudeName,
+    {
+      authorization: "Bearer cog",
+      ...headers,
+    },
+    agent,
+  );
+}
+
+function keepAliveAgent(): https.Agent {
+  const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+  defer(() => {
+    agent.destroy();
+  });
+  return agent;
+}
+
+function countConnections(listener: https.Server): { count: () => number } {
+  let total = 0;
+  listener.on("secureConnection", () => {
+    total += 1;
+  });
+  return { count: () => total };
+}
+
+const largeBody = Buffer.alloc(3_000_000, 0x61);
+
+test("a provider that resets the connection after the upload began is a 503 that closes the guest's connection, so a retry on the same keep-alive agent opens another and succeeds", async () => {
+  let seen = 0;
+  const stub = await startModelStub((request, response, entry) => {
+    seen += 1;
+    if (seen === 1) {
+      request.once("data", () => {
+        request.socket.resetAndDestroy();
+      });
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  const stderr = captureStderr();
+  const { socket, listener } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const connections = countConnections(listener);
+  const agent = keepAliveAgent();
+  const started = Date.now();
+  const first = await within(
+    "the 503",
+    sendModel(socket, "POST", "/v1/messages", largeBody, agent),
+  );
+  assert.equal(first.status, 503);
+  assert.equal(first.headers.connection, "close");
+  const retry = await within(
+    "the retry",
+    sendModel(socket, "POST", "/v1/messages", Buffer.from("{}"), agent),
+  );
+  assert.equal(retry.status, 200);
+  assert.ok(Date.now() - started < 2000, "the retry must not wait");
+  assert.equal(connections.count(), 2);
+  assert.match(stderr.join(""), /gateway request failed/);
+});
+
+test("a refusal that leaves the upload unread closes the guest's connection, and the next request on the agent opens another", async () => {
+  const stub = await startModelStub();
+  const { socket, listener } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const connections = countConnections(listener);
+  const agent = keepAliveAgent();
+  const started = Date.now();
+  const refused = await within(
+    "the refusal",
+    sendModel(socket, "POST", "/v1/messages", largeBody, agent, {
+      authorization: "Bearer not-cog",
+    }),
+  );
+  assert.equal(refused.status, 403);
+  assert.equal(refused.headers.connection, "close");
+  const next = await within(
+    "the next request",
+    sendModel(socket, "POST", "/v1/messages", Buffer.from("{}"), agent),
+  );
+  assert.equal(next.status, 200);
+  assert.ok(Date.now() - started < 2000, "the next request must not wait");
+  assert.equal(connections.count(), 2);
+});
+
+// eslint-disable-next-line unicorn/prefer-event-target -- A ClientRequest is an EventEmitter.
+class FakeUpstream extends EventEmitter {
+  readonly written: string[] = [];
+  ended = false;
+  destroyed = 0;
+  private readonly accepts: boolean;
+
+  constructor(accepts: boolean) {
+    super();
+    this.accepts = accepts;
+  }
+
+  write(chunk: Buffer): boolean {
+    this.written.push(chunk.toString());
+    return this.accepts;
+  }
+
+  end(): void {
+    this.ended = true;
+  }
+
+  destroy(): void {
+    this.destroyed += 1;
+  }
+}
+
+function guestBody(chunks: string[]): {
+  body: Parameters<typeof sendBody>[1];
+  unread: () => number;
+} {
+  const pending = [...chunks];
+  const remaining: AsyncIterator<Buffer> = {
+    next: () =>
+      Promise.resolve(
+        pending.length === 0
+          ? { done: true, value: undefined }
+          : { done: false, value: Buffer.from(pending.shift() ?? "") },
+      ),
+  };
+  return {
+    body: { buffered: Buffer.from("a"), remaining },
+    unread: () => pending.length,
+  };
+}
+
+test("a body is sent to an upstream that takes every write", async () => {
+  const upstream = new FakeUpstream(true);
+  const { body, unread } = guestBody(["b", "c"]);
+  await sendBody(upstream as unknown as ClientRequest, body, signal().promise);
+  assert.deepEqual(upstream.written, ["a", "b", "c"]);
+  assert.equal(upstream.ended, true);
+  assert.equal(upstream.destroyed, 0);
+  assert.equal(unread(), 0);
+});
+
+test("a body waits for the upstream to drain, and goes on", async () => {
+  const upstream = new FakeUpstream(false);
+  upstream.on("newListener", (event) => {
+    if (event === "drain") {
+      queueMicrotask(() => {
+        upstream.emit("drain");
+      });
+    }
+  });
+  const { body, unread } = guestBody(["b", "c"]);
+  await sendBody(upstream as unknown as ClientRequest, body, signal().promise);
+  assert.deepEqual(upstream.written, ["a", "b", "c"]);
+  assert.equal(upstream.ended, true);
+  assert.equal(upstream.destroyed, 0);
+  assert.equal(unread(), 0);
+});
+
+test("an upstream that is done while a write waits to drain is cut off, and the rest of the body is read and dropped", async () => {
+  const upstream = new FakeUpstream(false);
+  const { body, unread } = guestBody(["b", "c", "d"]);
+  const done = signal();
+  done.resolve();
+  await within(
+    "the body to be read",
+    sendBody(upstream as unknown as ClientRequest, body, done.promise),
+  );
+  assert.deepEqual(upstream.written, ["a"]);
+  assert.equal(upstream.ended, false);
+  assert.equal(upstream.destroyed, 1);
+  assert.equal(unread(), 0);
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("an upstream that fails while a write waits to drain fails the body", async () => {
+  const upstream = new FakeUpstream(false);
+  const { body } = guestBody(["b"]);
+  const sending = sendBody(
+    upstream as unknown as ClientRequest,
+    body,
+    signal().promise,
+  );
+  await delay(1);
+  upstream.emit("error", new Error("reset"));
+  await assert.rejects(within("the failure", sending), /reset/);
+});
+
+test("a GitHub refusal that leaves the upload unread closes the guest's connection", async () => {
+  const { socket, listener } = await startGateway();
+  const connections = countConnections(listener);
+  const agent = keepAliveAgent();
+  const refused = await within(
+    "the refusal",
+    send(
+      socket,
+      "POST",
+      "/shields/dotfiles.git/git-receive-pack?x=1",
+      largeBody,
+      "github.com",
+      {},
+      agent,
+    ),
+  );
+  assert.equal(refused.status, 403);
+  assert.equal(refused.headers.connection, "close");
+  const next = await within(
+    "the next request",
+    send(
+      socket,
+      "GET",
+      "/shields/dotfiles.git/info/refs?service=git-upload-pack",
+      Buffer.alloc(0),
+      "github.com",
+      {},
+      agent,
+    ),
+  );
+  assert.equal(next.status, 200);
+  assert.equal(connections.count(), 2);
+});
+
+test("a refusal answers a request that announced a body it never sent, with or without Expect: 100-continue, and closes the connection", async () => {
+  const { socket } = await startGateway();
+  for (const extra of ["", "expect: 100-continue\r\n"]) {
+    const reply = await exchange(
+      socket,
+      claudeName,
+      `POST /v1/messages HTTP/1.1\r\nhost: ${claudeName}\r\nauthorization: Bearer not-cog\r\ncontent-length: 1000000\r\n${extra}\r\n`,
+    );
+    assert.match(reply, /HTTP\/1\.1 403 /, extra);
+    assert.match(reply, /\r\nconnection: close\r\n/i, extra);
+  }
+});
+
+test("a refusal of a request with no body, or of one whose body was read to its end, keeps the connection", async () => {
+  const { socket, listener } = await startGateway();
+  const connections = countConnections(listener);
+  for (const [name, host, method, target, body] of [
+    ["a GET", claudeName, "GET", "/v1/messages", ""],
+    ["a query", "api.github.com", "POST", "/graphql", "not json"],
+  ] as const) {
+    const agent = keepAliveAgent();
+    for (let round = 0; round < 2; round += 1) {
+      const refused = await within(
+        `the refusal of ${name}`,
+        send(
+          socket,
+          method,
+          target,
+          Buffer.from(body),
+          host,
+          {
+            authorization: "Bearer not-cog",
+          },
+          agent,
+        ),
+      );
+      assert.equal(refused.status, 403, name);
+      assert.notEqual(refused.headers.connection, "close", name);
+    }
+  }
+  assert.equal(connections.count(), 2);
+});
+
+test("a refusal that leaves a pipelined request behind answers only the refused one, and closes the connection", async () => {
+  const { socket } = await startGateway();
+  const second = `GET /v1/models HTTP/1.1\r\nhost: ${claudeName}\r\nconnection: close\r\n\r\n`;
+  const reply = await exchange(
+    socket,
+    claudeName,
+    `POST /v1/messages HTTP/1.1\r\nhost: ${claudeName}\r\nauthorization: Bearer not-cog\r\ncontent-length: 2\r\n\r\n{}${second}`,
+  );
+  assert.match(reply, /^HTTP\/1\.1 403 /);
+  assert.equal(reply.match(/^HTTP\/1\.1 /gm)?.length, 1);
 });

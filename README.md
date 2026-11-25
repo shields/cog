@@ -359,6 +359,13 @@ one year; requests fail closed if the audit database cannot be written.
 `cog logs NAME --follow` streams recent entries, and `--all` prints
 the retained history.
 
+When the gateway answers a request with a refusal or a failure before it has
+received the whole body, it closes that connection after the answer, so a
+client that keeps connections alive opens a new one for its next request. A
+request with no body, or whose body the gateway read to the end, keeps its
+connection. A request pipelined behind a refused one is not answered; the
+client sends it again.
+
 ## Other secrets
 
 Every secret that goes to a guest travels over stdin to

@@ -100,6 +100,19 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   a damaged CA is never mistaken for one with no identifier and replaced; strict
   verification is real only on OpenSSL 3, as in CI. The Seatbelt profile needs
   nothing more, since only `req`, `x509` and `verify` run.
+  When `handle()` answers an error (the relay 503, a model-host 403, a pool or
+  key 503, a GitHub-route 403, audit unavailable) while the request is not
+  `complete` and has a body, `respond` sets `Connection: close` and Bun closes
+  the connection after the flush; the body is not drained. Bun sets `complete`
+  only after the parser delivers the body, so a refusal before any await closes
+  even for a small body. A bodiless request or one read to its end keeps the
+  connection, the `PushDenied` path still drains up to 64 MB and answers 200,
+  and a pipelined request behind a refused unread one is not answered. Bun
+  emits no `drain` on an upstream request once its response has ended, so
+  `sendBody` stops waiting for one then: it destroys the upstream request and
+  reads and drops the rest of the guest's upload, which keeps that connection
+  usable. An upstream that answers early and still takes the writes keeps
+  receiving the rest.
   The same server answers `api.anthropic.com` and `api.fireworks.ai`, the
   third and fourth names on the leaf, for a guest whose `/etc/hosts` points
   those names at the relay. `guest/setup-github-gateway` maps the two GitHub
@@ -299,6 +312,8 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   no-echo prompt runs under a pseudo-terminal and needs `stty`.
 - `gateway/cert.test.ts` checks strict verification and the identifiers on
   both OpenSSL 3 and LibreSSL; a real TLS handshake from Python is not tested.
+  `gateway/server.test.ts` counts connections per keep-alive agent, one host
+  for each, since Bun's `https.Agent` keys sockets by servername.
 - No automated test runs the real profile, which needs macOS.
 - No automated test covers a live launchd install, real GitHub authorization,
   network isolation and the relay in a VM, live Tailscale enrollment or a
