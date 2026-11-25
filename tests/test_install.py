@@ -197,7 +197,7 @@ class Installation:
             capture_output=True,
             text=True,
             check=False,
-            timeout=30,
+            timeout=120,
         )
 
 
@@ -289,7 +289,7 @@ def test_first_install(installation: Installation) -> None:
             "EnvironmentVariables": {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
             "RunAtLoad": True,
             "KeepAlive": True,
-            "ExitTimeOut": 5,
+            "ExitTimeOut": 60,
             "StandardOutPath": str(installation.logs / f"{LABEL}.out"),
             "StandardErrorPath": str(installation.logs / f"{LABEL}.err"),
         }
@@ -347,10 +347,10 @@ def test_reinstall_gives_up_on_a_gateway_that_outlives_exit_timeout(
     assert first.returncode == 0, first.stderr
     inode = installation.binary.stat().st_ino
     offset = len(installation.calls)
-    second = installation.run(TEST_UNLOAD_DELAY="500")
+    second = installation.run(TEST_UNLOAD_DELAY="800")
     assert second.returncode == 1
     assert "timed out waiting for" in second.stderr
-    assert installation.calls[offset:].count("sleep 0.1") == 150
+    assert installation.calls[offset:].count("sleep 0.1") == 700
     assert installation.binary.stat().st_ino == inode
     assert not any(call.startswith("bootstrap") for call in installation.calls[offset:])
 

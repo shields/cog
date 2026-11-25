@@ -142,7 +142,7 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so that `openssl` is
   `/usr/bin/openssl`, the only other program the profile lets it run. The
   gateway finishes its requests in flight on SIGTERM, and a model response can
-  stream for minutes, so the plist sets `ExitTimeOut` to 5 seconds, after which
+  stream for minutes, so the plist sets `ExitTimeOut` to 60 seconds, after which
   launchd kills it, and `install.sh` waits ten seconds longer than that for the
   label to go.
   `gateway/gateway.sb` takes exactly the parameters BINARY, STATE, SECRETS,

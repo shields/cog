@@ -49,9 +49,10 @@ under the profile and stops if that fails; that checks the profile and the
 executable, not what the gateway does.
 
 The installer stops the old agent first: the gateway finishes the requests in
-flight, such as a streaming model response, and launchd kills it after 5
-seconds, so the installer waits up to 15 seconds for it to go. Then it waits
-for `cog gateway health` to report readiness. If that fails, check
+flight, such as a streaming model response, and exits as soon as there are
+none; launchd kills it after 60 seconds, so the installer waits up to 70
+seconds for it to go. Then it waits for `cog gateway health` to report
+readiness. If that fails, check
 `~/Library/Logs/dev.msrl.cog.gateway.err`; standard output goes to the adjacent
 `.out` file. `./install.sh --uninstall` unloads the agent and removes
 its plist, binary, profile and link. It keeps logs, `~/.local/state/cog`,

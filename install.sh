@@ -94,7 +94,7 @@ esac
 command -v launchctl >/dev/null || die "macOS launchctl is required"
 
 label=dev.msrl.cog.gateway
-exit_timeout=5
+exit_timeout=60
 domain=gui/$UID
 service=$domain/$label
 share=$HOME/.local/share/cog
