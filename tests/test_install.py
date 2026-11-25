@@ -17,6 +17,7 @@ import os
 import plistlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -69,6 +70,7 @@ case ${0##*/} in
             printf '#!/bin/bash\nexport TEST_BUILD=%s\n' "$build" > "$7"
             printf 'exec "$TEST_STATE/bin/health" "$@"\n' >> "$7"
             chmod +x "$7"
+            signal_at build
         fi
         ;;
     sandbox-exec)
@@ -109,6 +111,11 @@ case ${0##*/} in
                 [[ $# == 2 && $2 == "$TEST_SERVICE" &&
                     -f $TEST_STATE/loaded ]] || exit 1
                 printf '%s\n' "${TEST_UNLOAD_DELAY:-0}" > "$TEST_STATE/unloading"
+                signal_at bootout
+                if [[ -f $TEST_STATE/bootout-fails-once ]]; then
+                    rm "$TEST_STATE/bootout-fails-once"
+                    exit 5
+                fi
                 ;;
             bootstrap)
                 [[ $# == 3 && $2 == "$TEST_DOMAIN" && -f $3 &&
@@ -142,6 +149,13 @@ sys.exit(not (
     *) exit 2 ;;
 esac
 """
+
+
+# A runner that was started in the background inherits ignored SIGINT and
+# SIGQUIT, which bash cannot trap, and the interrupt tests send one of them.
+def default_signals() -> None:
+    _ = signal.signal(signal.SIGINT, signal.SIG_DFL)
+    _ = signal.signal(signal.SIGQUIT, signal.SIG_DFL)
 
 
 @dataclass(frozen=True)
@@ -218,6 +232,7 @@ class Installation:
             text=True,
             check=False,
             timeout=120,
+            preexec_fn=default_signals,
         )
 
 
@@ -960,6 +975,45 @@ def test_interrupt_while_the_previous_gateway_stops_starts_it_again(
     assert not list(installation.plist.parent.glob(".cog.*"))
 
 
+def test_interrupt_while_the_previous_agent_is_booted_out_starts_it_again(
+    installation: Installation,
+) -> None:
+    previous = install_two_builds(installation)
+    offset = len(installation.calls)
+    second = installation.run(TEST_UNLOAD_DELAY="5", TEST_SIGNAL_AT="bootout:1")
+    assert second.returncode == 1
+    assert (
+        "the install was interrupted; restored the previous gateway, which is healthy"
+        in second.stderr
+    )
+    assert snapshot(installation) == previous
+    assert not any(path.exists() for path in kept_copies(installation))
+    assert (installation.root / "loaded").is_file()
+    calls = installation.calls[offset:]
+    assert calls.count(f"bootout {SERVICE}") == 2
+    assert calls[-2:] == [f"bootstrap {DOMAIN} {installation.plist}", "health"]
+
+
+def test_failed_bootout_of_the_previous_agent_starts_it_again(
+    installation: Installation,
+) -> None:
+    previous = install_two_builds(installation)
+    (installation.root / "bootout-fails-once").touch()
+    offset = len(installation.calls)
+    second = installation.run(TEST_UNLOAD_DELAY="5")
+    assert second.returncode == 1
+    assert (
+        "stopping the previous gateway failed; restored the previous gateway, "
+        "which is healthy"
+    ) in second.stderr
+    assert snapshot(installation) == previous
+    assert not any(path.exists() for path in kept_copies(installation))
+    assert (installation.root / "loaded").is_file()
+    calls = installation.calls[offset:]
+    assert calls.count(f"bootout {SERVICE}") == 2
+    assert calls[-2:] == [f"bootstrap {DOMAIN} {installation.plist}", "health"]
+
+
 def test_interrupt_while_waiting_for_the_new_build_is_not_blamed_on_the_build(
     installation: Installation,
 ) -> None:
@@ -1047,3 +1101,53 @@ def test_leftover_kept_copy_blocks_install_and_uninstall_removes_it(
     assert not leftover.exists()
     assert not plist_leftover.exists()
     assert not installation.binary.parent.exists()
+
+
+def staging_directories(installation: Installation) -> list[Path]:
+    return [
+        *installation.binary.parent.glob(".build.*"),
+        *installation.plist.parent.glob(".cog.*"),
+    ]
+
+
+KILLS = {
+    "during the build": {"TEST_SIGNAL_AT": "build:1", "TEST_SIGNAL": "KILL"},
+    "while the previous gateway stops": {
+        "TEST_SIGNAL_AT": "sleep:1",
+        "TEST_SIGNAL": "QUIT",
+        "TEST_UNLOAD_DELAY": "5",
+    },
+    "while the new agent starts": {
+        "TEST_SIGNAL_AT": "bootstrap:1",
+        "TEST_SIGNAL": "KILL",
+    },
+}
+
+
+@pytest.mark.parametrize("overrides", KILLS.values(), ids=KILLS.keys())
+def test_uninstall_removes_what_a_killed_install_left(
+    installation: Installation, overrides: dict[str, str]
+) -> None:
+    _ = install_two_builds(installation)
+    killed = installation.run(**overrides)
+    assert killed.returncode < 0
+    assert len(staging_directories(installation)) == 2
+    removed = installation.run("--uninstall")
+    assert removed.returncode == 0, removed.stderr
+    assert not installation.binary.parent.exists()
+    assert list(installation.plist.parent.iterdir()) == []
+    assert not installation.link.is_symlink()
+    assert str(installation.logs) in removed.stdout
+    again = installation.run("--uninstall")
+    assert again.returncode == 0, again.stderr
+
+
+def test_uninstall_keeps_a_file_it_did_not_create(installation: Installation) -> None:
+    first = installation.run()
+    assert first.returncode == 0, first.stderr
+    notes = installation.binary.parent / "notes"
+    _ = notes.write_text("not ours\n")
+    removed = installation.run("--uninstall")
+    assert removed.returncode == 1
+    assert "not empty" in removed.stderr
+    assert notes.read_text() == "not ours\n"

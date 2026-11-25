@@ -71,16 +71,16 @@ xml() {
 
 unload() {
     if launchctl print "$service" >/dev/null 2>&1; then
+        # A signal or a failure from here on can leave no agent loaded, so
+        # on_exit starts the previous one again. A successful unload leaves
+        # stopping set for the caller to hand over to swapping.
+        stopping=1
         launchctl bootout "$service"
         # bootout returns before launchd releases the label, which happens once
         # the gateway has finished its requests in flight, or ExitTimeOut later.
-        # A signal during the wait leaves no agent loaded, so on_exit starts the
-        # previous one again.
-        stopping=1
         local attempt
         for ((attempt = 0; attempt < (exit_timeout + 10) * 10; ++attempt)); do
             if ! launchctl print "$service" >/dev/null 2>&1; then
-                stopping=0
                 return 0
             fi
             sleep 0.1
@@ -189,6 +189,9 @@ if [[ ${1:-} == --uninstall ]]; then
         rm -f "$link"
     fi
     rm -f "$plist" "$binary" "$profile" "$plist.previous" "$binary.previous" "$profile.previous"
+    # SIGKILL and SIGQUIT end the installer without its EXIT trap, which leaves
+    # its staging directories.
+    rm -rf "$share"/.build.?????? "${plist%/*}"/.cog.??????
     if [[ -d $share ]]; then
         rmdir "$share"
     fi
@@ -306,8 +309,10 @@ for file in "$binary" "$profile" "$plist"; do
     fi
 done
 [[ ! -f $plist ]] || had_previous=1
+swap_failure="stopping the previous gateway failed"
 unload
 swapping=1
+stopping=0
 swap_failure="installing the new build failed"
 mv -f "$build_dir/cog" "$binary"
 mv -f "$build_dir/gateway.sb" "$profile"

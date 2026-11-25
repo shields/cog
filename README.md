@@ -76,13 +76,17 @@ finishes its requests, for example), the installer unloads the new agent, puts
 the kept files back, starts the previous agent, waits for it to report ready,
 and exits 1 with one line that says whether the previous gateway is healthy; if
 restoring fails, it says what failed and to run `./install.sh --uninstall` and
-install again. The installer ignores further interrupts while it restores. A
-first install has nothing to restore: it reports the failure and leaves the new
-files and agent in place. The rollback restores the program, the profile and
-the agent, not the state: a gateway that ran, even briefly, may already have
-disabled registrations or reissued its certificates. A run that was killed can
-leave `.previous` files, and the next install then refuses to start until
-`./install.sh --uninstall` removes them.
+install again. If launchd has not released the previous agent 70 seconds after
+the stop, the installer gives up with a timeout message and restores nothing.
+The installer ignores further interrupts while it restores. A first install has
+nothing to restore: it reports the failure and leaves the new files and agent in
+place. The rollback restores the program, the profile and the agent, not the
+state: a gateway that ran, even briefly, may already have disabled registrations
+or reissued its certificates. A run that was killed can leave `.previous` files,
+and the next install then refuses to start until `./install.sh --uninstall`
+removes them. SIGKILL and SIGQUIT also leave the `.build.*` directory in
+`~/.local/share/cog` and the `.cog.*` directory in `~/Library/LaunchAgents`;
+`--uninstall` removes those too.
 
 A VM made before the sockets moved to `~/.local/state/cog/sock` (its socket was
 in its Lima directory) loses gateway access. When the gateway starts it
