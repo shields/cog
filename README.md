@@ -533,7 +533,9 @@ mapping is installed, a program in the guest that sends its own Anthropic API
 key or login to `api.anthropic.com` is refused with 403, since the gateway
 accepts only the placeholder or no credential. The gateway attributes each
 request to the VM, and `cog logs NAME` shows it. A VM made with
-`--no-claude-token` has no mapping and keeps whatever login it makes.
+`--no-claude-token` has no mapping and keeps whatever login it makes. The
+gateway does not record which VMs were wired for a model, so a program with
+root in such a VM can still reach the pool by mapping the name itself.
 
 The same holds for Fireworks when the Mac has a key file: the VM holds only the
 placeholder `cog` for `api.fireworks.ai`, the gateway adds the key on the Mac,
@@ -620,8 +622,9 @@ their sandboxed, prompting behavior.
 Automated tests use stubs for launchd and Lima and do not deploy to Cloudflare.
 They do not verify real launchd startup, VM network isolation, the guest relay,
 agent behavior with managed settings, live GitHub authorizations, a Wrangler
-deploy or an agent image build. After installing, run `cog base` and
-`cog new t1 --repo OWNER/REPO` for a public repository. Then check:
+deploy or an agent image build. After installing, run `cog base`, add a Claude
+account with `cog pool add NAME` and run `cog new t1 --repo OWNER/REPO` for a
+public repository. Then check:
 
 - The installed gateway starts under its Seatbelt profile
   (`launchctl print gui/$UID/dev.msrl.cog.gateway` lists

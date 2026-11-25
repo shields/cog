@@ -14,7 +14,9 @@
 
 // The message of a CogError is a fixed text that never quotes the contents of
 // a file or the message of a parse or spawn error, since those can hold a
-// secret.
+// secret. The one exception is the message of the gateway's
+// RegistrationFailedHere, which says why a registration failed in this
+// process: a certificate, directory or database error that holds no secret.
 export class CogError extends Error {}
 
 export class CommandFailed extends Error {

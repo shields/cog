@@ -311,9 +311,10 @@ holds a line in cog's stdin and checks that only the final shell reads it.
 `cog base` never reads cog's stdin, including during staging.
 `cog new` ends, when Claude or Fireworks is wired, with `sh -c 'exec zsh -i -c
 "$1" 2>/dev/null' sh SCRIPT` through `lima.shellOutput`, with stdin from
-`/dev/null`. The one-line script prints only the words `ca`
-(`NODE_EXTRA_CA_CERTS` is not exported, or does not name a readable file that
-is the same inode as `/etc/ssl/certs/ca-certificates.crt`), `token`
+`/dev/null`. The one-line script starts with a bare `print`, which ends any
+partial line that the startup files left on stdout, and then prints only the
+words `ca` (`NODE_EXTRA_CA_CERTS` is not exported, or does not name a readable
+file that is the same inode as `/etc/ssl/certs/ca-certificates.crt`), `token`
 (`CLAUDE_CODE_OAUTH_TOKEN` is not exported, or is not `cog`; this clause is
 left out with `--no-claude-token`) and `done`; no value leaves the guest. A
 missing `done` or a failing `limactl` is a `CogError`, which the rollback

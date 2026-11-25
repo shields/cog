@@ -501,7 +501,7 @@ test("a failure of the Fireworks probe names Fireworks and rolls back", async ()
   failures.probeFails = "https://api.fireworks.ai/__cog__/health";
   await assert.rejects(newVM(noSecrets, context), {
     message:
-      "vm cannot reach Fireworks through the gateway; a base built by an older cog lacks this wiring, so run cog base again",
+      "vm cannot reach Fireworks through the gateway; if cog gateway health fails, start the gateway, and a base built by an older cog lacks this wiring, so run cog base again",
   });
   assert.deepEqual(calls.slice(-2), [
     ["disable", "lima:vm"],
@@ -514,7 +514,7 @@ test("a failure of the Fireworks probe with Claude wired names both models and b
   failures.probeFails = "https://api.fireworks.ai/__cog__/health";
   await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
     message:
-      "vm cannot reach Claude and Fireworks through the gateway; a base built by an older cog lacks this wiring, so run cog base again",
+      "vm cannot reach Claude and Fireworks through the gateway; if cog gateway health fails, start the gateway, and a base built by an older cog lacks this wiring, so run cog base again",
   });
   assert.deepEqual(calls.slice(-2), [
     ["disable", "lima:vm"],
@@ -602,7 +602,7 @@ test.each([
       newVM(["vm", "--no-repo", "--no-codex-auth"], context),
       {
         message:
-          "vm cannot reach Claude through the gateway; a base built by an older cog lacks this wiring, so run cog base again",
+          "vm cannot reach Claude through the gateway; if cog gateway health fails, start the gateway, and a base built by an older cog lacks this wiring, so run cog base again",
       },
     );
     assert.deepEqual(calls.slice(-2), [
@@ -635,6 +635,7 @@ test("new checks the guest's shell after the secrets and before it is ready", as
     'exec zsh -i -c "$1" 2>/dev/null',
     "sh",
   ]);
+  assert.match(argv[4] ?? "", /^print; /);
   assert.match(argv[4] ?? "", /NODE_EXTRA_CA_CERTS/);
   assert.match(argv[4] ?? "", /CLAUDE_CODE_OAUTH_TOKEN == cog/);
   const index = calls.findIndex(([method]) => method === "shellOutput");

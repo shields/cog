@@ -232,13 +232,16 @@ const probe = (seconds: string, url: string): string[] => [
 // token that the dotfiles' .zshenv and .zshrc export, so a variable that is
 // only set in the shell does not count. Only fixed words leave the guest, since
 // the token variable could hold a real credential. zsh's startup noise ("can't
-// change option: zle" without a terminal) goes to /dev/null.
+// change option: zle" without a terminal) goes to /dev/null. The startup files
+// may leave a partial line on stdout, which the first print ends so that no
+// word is glued to it.
 const guestExportsCheck = (claude: boolean): string[] => [
   "sh",
   "-c",
   'exec zsh -i -c "$1" 2>/dev/null',
   "sh",
   [
+    "print",
     `[[ \${(t)NODE_EXTRA_CA_CERTS} == *export* && -r $NODE_EXTRA_CA_CERTS && $NODE_EXTRA_CA_CERTS -ef /etc/ssl/certs/ca-certificates.crt ]] || print ca`,
     ...(claude
       ? [
@@ -407,7 +410,7 @@ export async function newVM(
           throw error;
         }
         throw new CogError(
-          `${name} cannot reach ${wired} through the gateway; a base built by an older cog lacks this wiring, so run cog base again`,
+          `${name} cannot reach ${wired} through the gateway; if cog gateway health fails, start the gateway, and a base built by an older cog lacks this wiring, so run cog base again`,
         );
       }
     }
