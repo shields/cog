@@ -93,6 +93,8 @@ const fireworksUnusable = "the Fireworks key is not usable on the Mac";
 // sets its own timeout once it has a socket.
 const upstreamIdleTimeout = 30_000;
 
+const drainTimeout = 60_000;
+
 const forwardedHeaders = [
   "accept",
   "content-type",
@@ -186,27 +188,52 @@ async function drained(
 }
 
 // Bun emits no "drain" on a request once the response to it has ended, so a
-// write that is waiting for one at that point waits for ever. It resolves
-// false instead.
-function flushed(
+// write that is waiting for one at that point waits for ever. Its wait
+// resolves false instead. A promise keeps each reaction added to it until it
+// settles, so every wait of a body shares the one reaction on upstreamDone: a
+// reaction for each wait would hold its closure and the request until the
+// upstream closes. Bun emits no "timeout" for a request whose upload the
+// upstream has stopped reading, and does not report a guest that leaves while
+// its upload is not being read, so a wait that outlasts limit fails.
+function drainWaiter(
   upstream: http.ClientRequest,
   upstreamDone: Promise<undefined>,
-): Promise<boolean> {
-  return new Promise<boolean>((resolve, reject) => {
-    const settle = (drained: boolean): void => {
-      upstream.off("drain", onDrain);
-      upstream.off("error", reject);
-      resolve(drained);
-    };
-    const onDrain = (): void => {
-      settle(true);
-    };
-    upstream.once("drain", onDrain);
-    upstream.once("error", reject);
-    void upstreamDone.then(() => {
-      settle(false);
-    });
+  limit: number,
+): () => Promise<boolean> {
+  let done = false;
+  let release: (() => void) | null = null;
+  void upstreamDone.then(() => {
+    done = true;
+    release?.();
   });
+  return () =>
+    done
+      ? Promise.resolve(false)
+      : new Promise<boolean>((resolve, reject) => {
+          const end = (): void => {
+            release = null;
+            clearTimeout(stalled);
+            upstream.off("drain", onDrain);
+            upstream.off("error", onError);
+          };
+          const onDrain = (): void => {
+            end();
+            resolve(true);
+          };
+          const onError = (error: Error): void => {
+            end();
+            reject(error);
+          };
+          const stalled = setTimeout(() => {
+            onError(new Error("upstream stopped reading the request body"));
+          }, limit);
+          release = (): void => {
+            end();
+            resolve(false);
+          };
+          upstream.once("drain", onDrain);
+          upstream.once("error", onError);
+        });
 }
 
 // False once the upstream has answered or gone and does not take the chunk. It
@@ -215,9 +242,9 @@ function flushed(
 async function send(
   upstream: http.ClientRequest,
   chunk: Buffer,
-  upstreamDone: Promise<undefined>,
+  flushed: () => Promise<boolean>,
 ): Promise<boolean> {
-  if (upstream.write(chunk) || (await flushed(upstream, upstreamDone))) {
+  if (upstream.write(chunk) || (await flushed())) {
     return true;
   }
   upstream.destroy();
@@ -228,10 +255,12 @@ export async function sendBody(
   upstream: http.ClientRequest,
   body: RequestBody,
   upstreamDone: Promise<undefined>,
+  limit = drainTimeout,
 ): Promise<void> {
+  const flushed = drainWaiter(upstream, upstreamDone, limit);
   let sending = true;
   if (body.buffered.length > 0) {
-    sending = await send(upstream, body.buffered, upstreamDone);
+    sending = await send(upstream, body.buffered, flushed);
   }
   for (;;) {
     const next = await body.remaining.next();
@@ -239,7 +268,7 @@ export async function sendBody(
       break;
     }
     if (sending) {
-      sending = await send(upstream, next.value, upstreamDone);
+      sending = await send(upstream, next.value, flushed);
     }
   }
   if (sending) {
@@ -1160,16 +1189,18 @@ export class Gateway {
             settle("completed");
           });
         });
-        // A kept-alive socket that the peer closed while it was idle resets
-        // the first request on it. Only a safe request with no body is sent
-        // again, and it is sent again until a fresh socket carries it, since
-        // every idle socket of the VM may have gone stale together.
+        // A kept-alive socket that the peer closed or reset while it was idle
+        // fails the first request on it: with ECONNRESET when the close is
+        // read after the request is written, and with EPIPE when a reset came
+        // in before the write. Only a safe request with no body is sent again,
+        // and it is sent again until a fresh socket carries it, since every
+        // idle socket of the VM may have gone stale together.
         current.once("error", (error: Error & { code?: string }) => {
           if (
             retryable &&
             !answered &&
             !settled &&
-            error.code === "ECONNRESET" &&
+            (error.code === "ECONNRESET" || error.code === "EPIPE") &&
             current.reusedSocket
           ) {
             try {

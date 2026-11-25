@@ -131,14 +131,17 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   could also use, and a list would break when a provider adds an endpoint. It
   refuses a target that is not origin-form printable ASCII, a duplicate Host,
   ambiguous framing, TRACE, a chunked body on a method that the runtime's client
-  sends unframed (DELETE, OPTIONS), a `Connection` header that names an
-  end-to-end header, `x-api-key` and any `Authorization` other than
-  `Bearer cog`. A request with no `Authorization` goes straight to Anthropic
-  with the client's headers, less the hop-by-hop ones and `Expect`. `Bearer cog`
-  is pooled: the gateway replaces that header's value in place with a token. It
-  adds no header except `Content-Length: 0` on a body-less request that would
-  otherwise go out chunked. The target is sent as written and bodies are
-  streamed unparsed. `gateway/pool.ts` reads `claude-pool/` in the secrets
+  sends unframed (GET, HEAD, DELETE, OPTIONS, CONNECT), a `Connection` header
+  that names an end-to-end header, `x-api-key` and any `Authorization` other
+  than `Bearer cog`. A request with no `Authorization` goes straight to
+  Anthropic with the client's headers, less the hop-by-hop ones and `Expect`.
+  `Bearer cog` is pooled: the gateway replaces that header's value in place
+  with a token. It adds no header except `Content-Length: 0` on a body-less
+  request that would otherwise go out chunked, and the runtime's client adds
+  `Connection: keep-alive`. The target is sent as written and bodies are
+  streamed unparsed. An upload that the upstream stops reading for 60 seconds
+  fails, since Bun reports neither that stall nor a guest that leaves during
+  it. `gateway/pool.ts` reads `claude-pool/` in the secrets
   directory, one file per account, at start and on `/sync`, which `register`,
   `disable` and `cog new`'s pool check request; a missing or empty directory
   means no pool, one bad entry disables the pool, and either way a `Bearer cog`

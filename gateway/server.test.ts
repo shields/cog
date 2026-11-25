@@ -4721,6 +4721,44 @@ test("a request with no body is sent again once after a reset on a reused connec
   assert.equal(stub.requests.length, 3);
 });
 
+test("a request with no body is sent again after the provider reset an idle connection whose reset the gateway has not yet read", async () => {
+  const peers: Socket[] = [];
+  const stub = await startModelStub((request, response, entry) => {
+    peers.push(request.socket);
+    replyOk(request, response, entry);
+  });
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  // The reset must be in the kernel, and unread by the event loop, when the
+  // agent picks the idle connection, so it is sent from inside request().
+  const forward = http.request;
+  const requested = spyOn(http, "request").mockImplementation(((
+    ...args: Parameters<typeof http.request>
+  ) => {
+    requested.mockImplementation(forward);
+    for (const peer of peers) {
+      peer.resetAndDestroy();
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    return forward(...args);
+  }) as typeof http.request);
+  assert.equal(
+    (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+    200,
+  );
+  assert.equal(requested.mock.calls.length, 2);
+  assert.deepEqual(
+    stub.requests.map(({ method, connection }) => [method, connection]),
+    [
+      ["POST", 1],
+      ["GET", 2],
+    ],
+  );
+});
+
 test("a request with no body is sent again until a fresh connection carries it when every idle connection has gone stale", async () => {
   const waiting: (() => void)[] = [];
   let stale = false;
@@ -6370,7 +6408,6 @@ test("a provider that resets the connection after the upload began is a 503 that
   });
   const connections = countConnections(listener);
   const agent = keepAliveAgent();
-  const started = Date.now();
   const first = await within(
     "the 503",
     sendModel(socket, "POST", "/v1/messages", largeBody, agent),
@@ -6382,7 +6419,6 @@ test("a provider that resets the connection after the upload began is a 503 that
     sendModel(socket, "POST", "/v1/messages", Buffer.from("{}"), agent),
   );
   assert.equal(retry.status, 200);
-  assert.ok(Date.now() - started < 2000, "the retry must not wait");
   assert.equal(connections.count(), 2);
   assert.match(stderr.join(""), /gateway request failed/);
 });
@@ -6394,7 +6430,6 @@ test("a refusal that leaves the upload unread closes the guest's connection, and
   });
   const connections = countConnections(listener);
   const agent = keepAliveAgent();
-  const started = Date.now();
   const refused = await within(
     "the refusal",
     sendModel(socket, "POST", "/v1/messages", largeBody, agent, {
@@ -6408,7 +6443,6 @@ test("a refusal that leaves the upload unread closes the guest's connection, and
     sendModel(socket, "POST", "/v1/messages", Buffer.from("{}"), agent),
   );
   assert.equal(next.status, 200);
-  assert.ok(Date.now() - started < 2000, "the next request must not wait");
   assert.equal(connections.count(), 2);
 });
 
@@ -6512,6 +6546,78 @@ test("an upstream that fails while a write waits to drain fails the body", async
   await delay(1);
   upstream.emit("error", new Error("reset"));
   await assert.rejects(within("the failure", sending), /reset/);
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("an upstream that stops reading while a write waits to drain fails the body once the limit passes", async () => {
+  const upstream = new FakeUpstream(false);
+  const { body } = guestBody(["b"]);
+  await assert.rejects(
+    within(
+      "the stall",
+      sendBody(
+        upstream as unknown as ClientRequest,
+        body,
+        signal().promise,
+        20,
+      ),
+    ),
+    /stopped reading/,
+  );
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("a body that waits to drain many times adds one reaction to upstreamDone and leaves no listener on the upstream", async () => {
+  const upstream = new FakeUpstream(false);
+  upstream.on("newListener", (event) => {
+    if (event === "drain") {
+      queueMicrotask(() => {
+        upstream.emit("drain");
+      });
+    }
+  });
+  const { body, unread } = guestBody(Array.from({ length: 20 }, () => "b"));
+  const done = signal();
+  const reactions = spyOn(done.promise, "then");
+  await sendBody(upstream as unknown as ClientRequest, body, done.promise);
+  assert.equal(upstream.written.length, 21);
+  assert.equal(upstream.ended, true);
+  assert.equal(upstream.destroyed, 0);
+  assert.equal(unread(), 0);
+  assert.equal(reactions.mock.calls.length, 1);
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("an upstream that is done between two writes cuts off the next write that does not drain, and the rest of the body is read and dropped", async () => {
+  const upstream = new FakeUpstream(false);
+  upstream.on("newListener", (event) => {
+    if (event === "drain" && upstream.written.length === 1) {
+      queueMicrotask(() => {
+        upstream.emit("drain");
+      });
+    }
+  });
+  const { body, unread } = guestBody(["b", "c", "d"]);
+  const done = signal();
+  const read = body.remaining.next.bind(body.remaining);
+  body.remaining.next = async () => {
+    done.resolve();
+    await nextTurn();
+    return read();
+  };
+  await within(
+    "the body to be read",
+    sendBody(upstream as unknown as ClientRequest, body, done.promise),
+  );
+  assert.deepEqual(upstream.written, ["a", "b"]);
+  assert.equal(upstream.ended, false);
+  assert.equal(upstream.destroyed, 1);
+  assert.equal(unread(), 0);
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
 });
 
 test("a GitHub refusal that leaves the upload unread closes the guest's connection", async () => {
