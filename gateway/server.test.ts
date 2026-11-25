@@ -6602,3 +6602,76 @@ test("a refusal that leaves a pipelined request behind answers only the refused 
   assert.match(reply, /^HTTP\/1\.1 403 /);
   assert.equal(reply.match(/^HTTP\/1\.1 /gm)?.length, 1);
 });
+
+function requestFireworksKey(
+  adminSocket: string,
+  method = "GET",
+): Promise<{ status: number; type: unknown; text: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        socketPath: adminSocket,
+        path: "/fireworks-key",
+        method,
+        agent: false,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.once("end", () => {
+          resolve({
+            status: response.statusCode ?? 0,
+            type: response.headers["content-type"],
+            text: Buffer.concat(chunks).toString(),
+          });
+        });
+      },
+    );
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+test("GET /fireworks-key answers for the key file as the daemon sees it at that moment, and never shows the key", async () => {
+  const stderr = captureStderr();
+  const { root, file } = await startFireworks(null);
+  const adminSocket = path.join(root, "admin.sock");
+  const ask = async (): Promise<unknown> => {
+    const answer = await requestFireworksKey(adminSocket);
+    assert.equal(answer.status, 200);
+    assert.equal(answer.type, "application/json");
+    noKeys(answer.text);
+    return JSON.parse(answer.text);
+  };
+  assert.deepEqual(await ask(), { state: "missing", reason: null });
+  symlinkSync(`${file}.nowhere`, file);
+  assert.deepEqual(await ask(), {
+    state: "unusable",
+    reason: "is not a regular file",
+  });
+  rmSync(file);
+  writeFileSync(file, `${keys.one} ${keys.two}\n`);
+  assert.deepEqual(await ask(), {
+    state: "unusable",
+    reason: "holds more than one word",
+  });
+  writeFileSync(file, `${keys.one}\r\n`);
+  assert.deepEqual(await ask(), { state: "usable", reason: null });
+  rmSync(file);
+  mkdirSync(file);
+  assert.deepEqual(await ask(), {
+    state: "unusable",
+    reason: "is not a regular file",
+  });
+  assert.deepEqual(stderr, []);
+});
+
+test("GET /fireworks-key answers missing when no key file is configured, and 404 to other methods", async () => {
+  const stub = await startModelStub();
+  const { root } = await startGateway({ models: { anthropic: stub.origin } });
+  const adminSocket = path.join(root, "admin.sock");
+  const answer = await requestFireworksKey(adminSocket);
+  assert.equal(answer.status, 200);
+  assert.deepEqual(JSON.parse(answer.text), { state: "missing", reason: null });
+  assert.equal((await requestFireworksKey(adminSocket, "POST")).status, 404);
+});

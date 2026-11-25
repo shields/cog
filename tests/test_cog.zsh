@@ -1392,6 +1392,7 @@ print -r -- "$FAKE_FIREWORKS other" > "$HOME_DIR/.config/secrets/FIREWORKS_API_K
 run_cog new t1 --no-repo --no-claude-token --no-codex-auth
 assert_eq "a Fireworks key file with two words fails" 1 "$RC"
 assert_contains "a Fireworks key file with two words says so" "more than one word" "$OUT"
+assert_contains "a Fireworks key file with two words names the file" "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY holds more than one word" "$OUT"
 assert_eq "a Fireworks key file with two words creates no VM" 0 "$(count_in_log clone)"
 assert_eq "a Fireworks key file with two words registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
 assert_eq "a Fireworks key file with two words never reaches limactl past the base check" 0 "$(count_in_log setup-)"
@@ -1728,6 +1729,8 @@ for entry in HUP:129 INT:130 TERM:143; do
     new_signal_stage "$signal" "$expected" "while the Lima config is edited" "edit --tty=false --set" 1 --repo shields/dotfiles
     new_signal_stage "$signal" "$expected" "after the registration" "start --tty=false t1" 1 --repo shields/dotfiles
     new_signal_stage "$signal" "$expected" "during the model gateway wiring" "setup-model-gateway" 1 --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the Anthropic probe" "https://api.anthropic.com/__cog__/health" 1 --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the repository clone" "git clone" 1 --repo shields/other
     new_signal_stage "$signal" "$expected" "during the Claude placeholder install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" 1 --repo shields/other
     new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" 1 --repo shields/other
 done

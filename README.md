@@ -447,14 +447,19 @@ over a minute old.
   When the file exists, `cog new` wires `api.fireworks.ai` to the gateway in
   the VM (`setup-model-gateway fireworks`), probes it, and writes only the
   placeholder `cog` to the same path in the VM, so `cg` sends `Bearer cog` and
-  the gateway replaces it with the key on the Mac. `cog new` never asks for the
-  file, and fails before it makes the VM when the file is not a regular file,
-  empty, unreadable, larger than 4096 bytes, or not one word of visible ASCII;
-  the message never quotes the content. The gateway reads the file for each
+  the gateway replaces it with the key on the Mac. `cog new` never opens or
+  asks for the file. It asks the gateway, which reads the file as it does for
+  a request, and fails before it makes the VM when the file is not a regular
+  file, empty, unreadable, larger than 4096 bytes, or not one word of visible
+  ASCII; the message names the file and never quotes the content. The gateway
+  can read only the path that `./install.sh` resolved, so when the file or the
+  link's target has moved since the install, the message says to run
+  `./install.sh` again. A gateway from an older install cannot answer, and
+  `cog new` then says to run `./install.sh`. The gateway reads the file for each
   request that carries the placeholder, so replacing the key on the Mac takes
   effect at the next request, with no restart and no sync. While the file is
-  missing or unusable, those requests get a 503 (the daemon writes the reason
-  to its stderr once for each change, and nothing for a missing file), and the
+  missing or unusable, those requests get a 503 (the daemon writes the reason to
+  its stderr once for each change, and nothing for a missing file), and the
   Claude pool and GitHub are unaffected. A request with no credential goes
   through as sent. A base built before `setup-model-gateway` knew `fireworks`
   makes `cog new` fail and delete the VM until `cog base` rebuilds the base.

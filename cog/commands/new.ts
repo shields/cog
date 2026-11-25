@@ -13,12 +13,12 @@
 // limitations under the License.
 
 import path from "node:path";
-import { readKeyFile } from "../../gateway/key-file.ts";
 import { placeholderCredential } from "../../gateway/models.ts";
 import { grantProfiles } from "../../gateway/policy.ts";
 import {
   socketName,
   type Control,
+  type FireworksKeyStatus,
   type PoolStatus,
 } from "../../gateway/control.ts";
 import type { Instance } from "../../gateway/state.ts";
@@ -32,7 +32,7 @@ import {
   tailscaleCredential,
 } from "../tailscale.ts";
 import { signals } from "../proc.ts";
-import { fireworksKeyPresent, readCodexAuth, toBytes } from "../secrets.ts";
+import { readCodexAuth, toBytes } from "../secrets.ts";
 import type { LifecycleContext } from "./context.ts";
 import { inferRepository } from "./lifecycle.ts";
 
@@ -55,6 +55,7 @@ type NewContext = LifecycleContext<
   | "location"
   | "pool"
   | "prepareRepository"
+  | "fireworksKey"
   | "state"
   | "sync"
   | "register"
@@ -122,15 +123,25 @@ async function requireUsablePool(
   gateway: Pick<Control, "pool" | "sync">,
 ): Promise<void> {
   const skip = "or pass --no-claude-token";
-  let status: PoolStatus;
+  const reason = (error: unknown): string =>
+    error instanceof Error ? error.message : "unknown error";
   try {
     // The gateway reads the pool directory when it starts and when it syncs,
-    // so a bad entry that was fixed by hand counts only after a sync.
+    // so a bad entry that was fixed by hand counts only after a sync. The
+    // registration syncs too, so skipping the pool does not get past a sync
+    // that fails.
     await gateway.sync();
+  } catch (error) {
+    throw new CogError(
+      `cannot make the gateway read the Claude pool again: ${reason(error)}`,
+    );
+  }
+  let status: PoolStatus;
+  try {
     status = await gateway.pool();
   } catch (error) {
     throw new CogError(
-      `cannot read the Claude pool state from the gateway: ${error instanceof Error ? error.message : "unknown error"}, ${skip}`,
+      `cannot read the Claude pool state from the gateway: ${reason(error)}, ${skip}`,
     );
   }
   if (status.state === "unconfigured") {
@@ -145,18 +156,29 @@ async function requireUsablePool(
   }
 }
 
-// The key stays on the Mac: the gateway reads the file for each request, and
-// the guest gets only the placeholder. The messages never quote the file.
-function requireUsableFireworksKey(file: string): void {
-  const result = readKeyFile(file);
-  if (result.kind === "key") {
-    return;
+// The gateway judges the file, since it runs under a profile that allows
+// reading only the path that the installer resolved.
+async function fireworksWired(
+  gateway: Pick<Control, "fireworksKey">,
+  file: string,
+): Promise<boolean> {
+  let status: FireworksKeyStatus;
+  try {
+    status = await gateway.fireworksKey();
+  } catch (error) {
+    throw new CogError(
+      `cannot read the Fireworks key state from the gateway: ${error instanceof Error ? error.message : "unknown error"}`,
+    );
   }
-  throw new CogError(
-    result.kind === "missing"
-      ? `${file} is not a regular file; remove it`
-      : `${file} ${result.reason}; fix it or remove it`,
-  );
+  if (status.state === "unusable") {
+    const reason = status.reason ?? "is not usable";
+    throw new CogError(
+      reason.startsWith("cannot be read")
+        ? `the gateway's ${file} ${reason}; if the file or link was moved since the install, run ./install.sh in the cog checkout again, otherwise fix it or remove it`
+        : `${file} ${reason}; fix it or remove it`,
+    );
+  }
+  return status.state === "usable";
 }
 
 // Lima expands "{{" in a host socket and passes the path to ssh, which expands
@@ -269,10 +291,7 @@ export async function newVM(
   }
   const credential = tailscaleCredential(context.config.tailscaleFile);
   const codex = noCodex ? undefined : readCodexAuth(codexAuthFile);
-  const fireworks = fireworksKeyPresent(fireworksKeyFile);
-  if (fireworks) {
-    requireUsableFireworksKey(fireworksKeyFile);
-  }
+  const fireworks = await fireworksWired(gateway, fireworksKeyFile);
   if (!noClaude) {
     await requireUsablePool(gateway);
   }
@@ -340,6 +359,10 @@ export async function newVM(
       ...(noClaude ? [] : ["claude"]),
       ...(fireworks ? ["fireworks"] : []),
     ];
+    const wired = [
+      ...(noClaude ? [] : ["Claude"]),
+      ...(fireworks ? ["Fireworks"] : []),
+    ].join(" and ");
     if (models.length > 0) {
       try {
         await lima.shell(name, [
@@ -363,11 +386,8 @@ export async function newVM(
         if (!(error instanceof CommandFailed)) {
           throw error;
         }
-        const gatewayAge = fireworks
-          ? ", or the running gateway is older than this cog, so run ./install.sh"
-          : "";
         throw new CogError(
-          `${name} cannot reach ${models.length > 1 ? "Claude and Fireworks" : noClaude ? "Fireworks" : "Claude"} through the gateway; a base built by an older cog lacks this wiring, so run cog base again${gatewayAge}`,
+          `${name} cannot reach ${wired} through the gateway; a base built by an older cog lacks this wiring, so run cog base again`,
         );
       }
     }

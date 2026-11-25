@@ -18,7 +18,6 @@ import {
   mkdtempSync,
   rmSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -64,6 +63,7 @@ function fixture() {
     signal: "SIGTERM" as "SIGHUP" | "SIGINT" | "SIGQUIT" | "SIGTERM",
     disableFails: false,
     interruptCleanup: false,
+    fireworks: "missing" as "missing" | "usable" | "old" | { reason: string },
     pool: "usable" as "unconfigured" | "unusable" | "usable" | "old",
     probeFails: "",
     syncFails: false,
@@ -133,6 +133,21 @@ function fixture() {
         return failures.syncFails
           ? Promise.reject(new Error("gateway administration failed"))
           : Promise.resolve();
+      },
+      fireworksKey: () => {
+        mark("fireworksKey");
+        if (failures.fireworks === "old") {
+          return Promise.reject(
+            new Error(
+              "the running gateway is older than this cog; run ./install.sh in the cog checkout",
+            ),
+          );
+        }
+        return Promise.resolve(
+          typeof failures.fireworks === "object"
+            ? { state: "unusable" as const, reason: failures.fireworks.reason }
+            : { state: failures.fireworks, reason: null },
+        );
       },
       pool: () => {
         mark("pool");
@@ -246,7 +261,8 @@ test("grant validates the VM and applies the selected profile", async () => {
 });
 
 test("new authorizes a private repository before cloning and grants only reads", async () => {
-  const { calls, context, socket, ca, id } = fixture();
+  const { calls, context, socket, ca, id, failures } = fixture();
+  failures.fireworks = "usable";
   const { codexAuthFile, fireworksKeyFile } = context.config;
   mkdirSync(path.dirname(codexAuthFile), { recursive: true });
   mkdirSync(path.dirname(fireworksKeyFile), { recursive: true });
@@ -262,6 +278,7 @@ test("new authorizes a private repository before cloning and grants only reads",
     ["health"],
     ["exists", "base"],
     ["exists", "vm"],
+    ["fireworksKey"],
     ["sync"],
     ["pool"],
     ["prepareRepository", "owner/repo"],
@@ -357,15 +374,9 @@ test("new authorizes a private repository before cloning and grants only reads",
   assert.equal(everything.includes("fake-fireworks"), false);
 });
 
-function fireworksFixture(content: string | null, link = false) {
+function fireworksFixture(fireworks: "missing" | "usable") {
   const made = fixture();
-  const file = made.context.config.fireworksKeyFile;
-  mkdirSync(path.dirname(file), { recursive: true });
-  if (link) {
-    symlinkSync(path.join(path.dirname(file), "missing"), file);
-  } else if (content !== null) {
-    writeFileSync(file, content);
-  }
+  made.failures.fireworks = fireworks;
   return made;
 }
 
@@ -381,7 +392,7 @@ const wiring = (calls: unknown[][]): string[][] =>
     .map((call) => (call[2] as string[]).filter((word) => word !== "sudo"));
 
 test("new wires only Fireworks when --no-claude-token is given with a key file", async () => {
-  const { calls, context } = fireworksFixture("fake-fireworks\n");
+  const { calls, context } = fireworksFixture("usable");
   await newVM(noSecrets, context);
   const lines = wiring(calls).map((argv) => argv.at(-1));
   assert.deepEqual(lines, [
@@ -402,54 +413,68 @@ test("new wires only Fireworks when --no-claude-token is given with a key file",
 });
 
 test("new wires nothing for Fireworks without a key file", async () => {
-  const { calls, context } = fireworksFixture(null);
+  const { calls, context } = fireworksFixture("missing");
   await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
-  const text = JSON.stringify(calls);
+  const text = JSON.stringify(
+    calls.filter(([method]) => method !== "fireworksKey"),
+  );
   assert.equal(text.includes("fireworks"), false);
   assert.equal(text.includes("FIREWORKS"), false);
 });
 
-test.each([
-  ["two words", "fake-fireworks other\n", "holds more than one word"],
-  ["empty", "\n", "is empty"],
-  [
-    "not ASCII",
-    "fake-fireworks\u{E9}\n",
-    "holds a character that is not visible ASCII",
-  ],
-  ["too large", "k".repeat(4097), "is larger than 4096 bytes"],
-] as const)(
-  "a Fireworks key file that is %s fails before any VM work without quoting it",
-  async (_, content, reason) => {
-    const { calls, context } = fireworksFixture(content);
-    const file = context.config.fireworksKeyFile;
+const gatewayCannotRead = "cannot be read (EPERM)";
+
+test.each(["is empty", "holds more than one word", "is not a regular file"])(
+  "a Fireworks key file that the gateway says %s fails before any VM work, naming the file and the reason",
+  async (reason) => {
+    const { calls, context, failures } = fixture();
+    failures.fireworks = { reason };
     await assert.rejects(
       newVM(["vm", "--repo", "owner/repo", "--no-codex-auth"], context),
       {
-        message: `${file} ${reason}; fix it or remove it`,
+        message: `${context.config.fireworksKeyFile} ${reason}; fix it or remove it`,
       },
     );
-    assert.deepEqual(calls, [["health"], ["exists", "base"], ["exists", "vm"]]);
+    assert.deepEqual(calls, [
+      ["health"],
+      ["exists", "base"],
+      ["exists", "vm"],
+      ["fireworksKey"],
+    ]);
   },
 );
 
-test("a dangling Fireworks key link fails before any VM work", async () => {
-  const { calls, context } = fireworksFixture(null, true);
+test("a Fireworks key file that the gateway cannot read says to run the installer again", async () => {
+  const { calls, context, failures } = fixture();
+  failures.fireworks = { reason: gatewayCannotRead };
   await assert.rejects(
     newVM(["vm", "--repo", "owner/repo", "--no-codex-auth"], context),
     {
-      message: `${context.config.fireworksKeyFile} is not a regular file; remove it`,
+      message: `the gateway's ${context.config.fireworksKeyFile} ${gatewayCannotRead}; if the file or link was moved since the install, run ./install.sh in the cog checkout again, otherwise fix it or remove it`,
     },
   );
-  assert.deepEqual(calls, [["health"], ["exists", "base"], ["exists", "vm"]]);
+  assert.deepEqual(calls.at(-1), ["fireworksKey"]);
+});
+
+test("new fails before any VM work when the gateway cannot answer about the Fireworks key", async () => {
+  const { calls, context, failures } = fixture();
+  failures.fireworks = "old";
+  await assert.rejects(
+    newVM(["vm", "--repo", "owner/repo", "--no-codex-auth"], context),
+    {
+      message:
+        "cannot read the Fireworks key state from the gateway: the running gateway is older than this cog; run ./install.sh in the cog checkout",
+    },
+  );
+  assert.deepEqual(calls.at(-1), ["fireworksKey"]);
 });
 
 test("a failure of the Fireworks probe names Fireworks and rolls back", async () => {
-  const { calls, context, failures } = fireworksFixture("fake-fireworks\n");
+  const { calls, context, failures } = fireworksFixture("usable");
   failures.probeFails = "https://api.fireworks.ai/__cog__/health";
   await assert.rejects(newVM(noSecrets, context), {
     message:
-      "vm cannot reach Fireworks through the gateway; a base built by an older cog lacks this wiring, so run cog base again, or the running gateway is older than this cog, so run ./install.sh",
+      "vm cannot reach Fireworks through the gateway; a base built by an older cog lacks this wiring, so run cog base again",
   });
   assert.deepEqual(calls.slice(-2), [
     ["disable", "lima:vm"],
@@ -458,11 +483,11 @@ test("a failure of the Fireworks probe names Fireworks and rolls back", async ()
 });
 
 test("a failure of the Fireworks probe with Claude wired names both models and both causes", async () => {
-  const { calls, context, failures } = fireworksFixture("fake-fireworks\n");
+  const { calls, context, failures } = fireworksFixture("usable");
   failures.probeFails = "https://api.fireworks.ai/__cog__/health";
   await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
     message:
-      "vm cannot reach Claude and Fireworks through the gateway; a base built by an older cog lacks this wiring, so run cog base again, or the running gateway is older than this cog, so run ./install.sh",
+      "vm cannot reach Claude and Fireworks through the gateway; a base built by an older cog lacks this wiring, so run cog base again",
   });
   assert.deepEqual(calls.slice(-2), [
     ["disable", "lima:vm"],
@@ -497,6 +522,7 @@ test("new asks no one for a Claude token and fails before any VM work when the p
       ["health"],
       ["exists", "base"],
       ["exists", "vm"],
+      ["fireworksKey"],
       ["sync"],
       ["pool"],
     ]);
@@ -508,12 +534,13 @@ test("new stops before any VM work when the gateway cannot read the pool again",
   failures.syncFails = true;
   await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
     message:
-      "cannot read the Claude pool state from the gateway: gateway administration failed, or pass --no-claude-token",
+      "cannot make the gateway read the Claude pool again: gateway administration failed",
   });
   assert.deepEqual(calls, [
     ["health"],
     ["exists", "base"],
     ["exists", "vm"],
+    ["fireworksKey"],
     ["sync"],
   ]);
 });
@@ -583,7 +610,12 @@ test("new does not delete a VM if the name is taken during clone", async () => {
   const { calls, context } = fixture();
   context.lima.clone = () => Promise.reject(new Error("name already taken"));
   await assert.rejects(newVM(noSecrets, context), /name already taken/);
-  assert.deepEqual(calls, [["health"], ["exists", "base"], ["exists", "vm"]]);
+  assert.deepEqual(calls, [
+    ["health"],
+    ["exists", "base"],
+    ["exists", "vm"],
+    ["fireworksKey"],
+  ]);
 });
 
 test.each([

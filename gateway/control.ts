@@ -147,6 +147,8 @@ export function parseEdit(
 }
 
 const poolAnswerLimit = 1_048_576;
+const fireworksKeyAnswerLimit = 4096;
+const acknowledgementLimit = 4096;
 
 async function adminRequest(
   socket: string,
@@ -163,7 +165,8 @@ async function adminRequest(
         response.on("data", (chunk: Buffer) => {
           size += chunk.length;
           if (size > limit) {
-            request.destroy(new Error("gateway administration answer too big"));
+            reject(new Error("gateway administration answer too big"));
+            request.destroy();
           } else {
             chunks.push(chunk);
           }
@@ -203,7 +206,7 @@ async function adminCall(
   route: string,
   method: string,
 ): Promise<void> {
-  await adminRequest(socket, route, method, Number.MAX_SAFE_INTEGER);
+  await adminRequest(socket, route, method, acknowledgementLimit);
 }
 
 export interface PoolStatus {
@@ -291,6 +294,44 @@ function parsePoolStatus(text: string): PoolStatus {
   };
 }
 
+export interface FireworksKeyStatus {
+  state: "missing" | "unusable" | "usable";
+  reason: string | null;
+}
+
+function parseFireworksKeyStatus(text: string): FireworksKeyStatus {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("the gateway answered with invalid JSON");
+  }
+  if (
+    !isRecord(raw) ||
+    (raw.state !== "missing" &&
+      raw.state !== "unusable" &&
+      raw.state !== "usable")
+  ) {
+    throw new Error("the gateway answered with an invalid Fireworks key state");
+  }
+  const { state } = raw;
+  const reason: unknown = raw.reason;
+  if (state === "unusable") {
+    if (typeof reason !== "string" || reason === "") {
+      throw new Error(
+        "the gateway answered with an invalid Fireworks key reason",
+      );
+    }
+    return { state, reason };
+  }
+  if (reason !== null) {
+    throw new Error(
+      "the gateway answered with an invalid Fireworks key reason",
+    );
+  }
+  return { state, reason: null };
+}
+
 export const socketName = /^github-[0-9a-f-]+\.sock$/;
 
 export type LogRow =
@@ -343,6 +384,17 @@ export class Control {
   async pool(): Promise<PoolStatus> {
     return parsePoolStatus(
       await adminRequest(this.location.admin, "/pool", "GET", poolAnswerLimit),
+    );
+  }
+
+  async fireworksKey(): Promise<FireworksKeyStatus> {
+    return parseFireworksKeyStatus(
+      await adminRequest(
+        this.location.admin,
+        "/fireworks-key",
+        "GET",
+        fireworksKeyAnswerLimit,
+      ),
     );
   }
 

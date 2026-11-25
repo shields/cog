@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import http, {
   type IncomingHttpHeaders,
   type IncomingMessage,
@@ -480,6 +480,10 @@ export class Gateway {
         response
           .writeHead(200, { "content-type": "application/json" })
           .end(JSON.stringify(this.poolStatus()));
+      } else if (request.method === "GET" && request.url === "/fireworks-key") {
+        response
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify(this.fireworksKeyStatus()));
       } else {
         response.writeHead(404).end();
       }
@@ -511,6 +515,31 @@ export class Gateway {
     return this.poolReason === unconfiguredReason
       ? { state: "unconfigured", reason: null, accounts: [] }
       : { state: "unusable", reason: this.poolReason, accounts: [] };
+  }
+
+  // A link to nothing is reported as unusable: the reader calls it missing,
+  // and a request would fail on it.
+  private fireworksKeyStatus(): {
+    state: "missing" | "unusable" | "usable";
+    reason: string | null;
+  } {
+    const file = this.options.fireworksKeyFile;
+    if (file === undefined) {
+      return { state: "missing", reason: null };
+    }
+    const result = readKeyFile(file);
+    if (result.kind === "key") {
+      return { state: "usable", reason: null };
+    }
+    if (result.kind === "unusable") {
+      return { state: "unusable", reason: result.reason };
+    }
+    try {
+      lstatSync(file);
+    } catch {
+      return { state: "missing", reason: null };
+    }
+    return { state: "unusable", reason: "is not a regular file" };
   }
 
   private async sync(response: ServerResponse): Promise<void> {

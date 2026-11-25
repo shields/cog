@@ -31,7 +31,6 @@ import { describe, onTestFinished, test } from "bun:test";
 import { compareCodeUnits } from "../gateway/policy.ts";
 import { CogError } from "./errors.ts";
 import {
-  fireworksKeyPresent,
   promptClaudeToken,
   readCodexAuth,
   setOneWord,
@@ -122,20 +121,6 @@ describe("setOneWord", () => {
       spaces,
     );
     assert.deepEqual(toBytes(word), bytes);
-  });
-});
-
-describe("the Fireworks key file", () => {
-  test("presence counts a dangling link and a regular file, not a missing path", () => {
-    const dir = directory();
-    const dangling = path.join(dir, "dangling");
-    symlinkSync(path.join(dir, "nothing"), dangling);
-    assert.equal(fireworksKeyPresent(dangling), true);
-    assert.equal(fireworksKeyPresent(path.join(dir, "missing")), false);
-    writeFileSync(path.join(dir, "real"), `${marker}\n`);
-    symlinkSync(path.join(dir, "real"), path.join(dir, "link"));
-    assert.equal(fireworksKeyPresent(path.join(dir, "link")), true);
-    assert.equal(fireworksKeyPresent(path.join(dir, "real")), true);
   });
 });
 

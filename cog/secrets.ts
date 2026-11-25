@@ -21,7 +21,6 @@ import {
   existsSync,
   fchmodSync,
   fsyncSync,
-  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -87,19 +86,6 @@ function readable(file: string): boolean {
 function regularFile(file: string): boolean {
   try {
     return statSync(file).isFile();
-  } catch {
-    return false;
-  }
-}
-
-// A dangling symbolic link counts as present, and then fails the read.
-export function fireworksKeyPresent(file: string): boolean {
-  if (existsSync(file)) {
-    return true;
-  }
-  try {
-    lstatSync(file);
-    return true;
   } catch {
     return false;
   }

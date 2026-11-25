@@ -188,6 +188,32 @@ test("health fails without a daemon", async () => {
   await assert.rejects(result.health());
 });
 
+test.each([
+  ["health", (result: Control) => result.health()],
+  ["sync", (result: Control) => result.sync()],
+] as const)(
+  "%s rejects an answer larger than it can ask for",
+  async (_, call) => {
+    const directory = root();
+    const result = control(directory);
+    mkdirSync(path.dirname(result.location.admin), { recursive: true });
+    const server = http.createServer((_request, response) => {
+      response.writeHead(200).end(" ".repeat(4097));
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(result.location.admin, resolve);
+    });
+    onTestFinished(async () => {
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      });
+    });
+    await assert.rejects(call(result), /answer too big/);
+  },
+);
+
 test("grant checks the repository and then the VM", async () => {
   const directory = root();
   const result = control(directory);
@@ -626,3 +652,97 @@ test("a disabled registration's socket counts as stale", () => {
   writeFileSync(file, "");
   assert.deepEqual(result.removeStaleSockets(), [file]);
 });
+
+async function answeringFireworksKey(
+  directory: string,
+  reply: { status?: number; body: string },
+): Promise<void> {
+  const result = control(directory);
+  mkdirSync(path.dirname(result.location.admin), { recursive: true });
+  const server = http.createServer((request, response) => {
+    response
+      .writeHead(request.url === "/fireworks-key" ? (reply.status ?? 200) : 404)
+      .end(reply.body);
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(result.location.admin, resolve);
+  });
+  onTestFinished(async () => {
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+  });
+}
+
+test("fireworksKey returns the three answers of the daemon", async () => {
+  for (const answer of [
+    { state: "missing", reason: null },
+    { state: "usable", reason: null },
+    { state: "unusable", reason: "is empty" },
+  ]) {
+    const directory = root();
+    await answeringFireworksKey(directory, { body: JSON.stringify(answer) });
+    assert.deepEqual(await control(directory).fireworksKey(), answer);
+  }
+});
+
+test("fireworksKey says that a daemon which does not know the route is older than this cog, and fails when the daemon refuses or is absent", async () => {
+  const directory = root();
+  await answeringFireworksKey(directory, { status: 404, body: "" });
+  await assert.rejects(
+    control(directory).fireworksKey(),
+    /the running gateway is older than this cog; run \.\/install\.sh/,
+  );
+  const refusing = root();
+  await answeringFireworksKey(refusing, { status: 503, body: "" });
+  await assert.rejects(
+    control(refusing).fireworksKey(),
+    /gateway administration failed/,
+  );
+  await assert.rejects(control(root()).fireworksKey());
+});
+
+test.each([
+  ["text", "not json", /invalid JSON/],
+  ["an array", "[]", /invalid Fireworks key state/],
+  ["null", "null", /invalid Fireworks key state/],
+  [
+    "an unknown state",
+    JSON.stringify({ state: "broken", reason: null }),
+    /invalid Fireworks key state/,
+  ],
+  [
+    "a reason with a usable key",
+    JSON.stringify({ state: "usable", reason: "is empty" }),
+    /invalid Fireworks key reason/,
+  ],
+  [
+    "a reason with a missing file",
+    JSON.stringify({ state: "missing", reason: "is empty" }),
+    /invalid Fireworks key reason/,
+  ],
+  [
+    "an unusable key without a reason",
+    JSON.stringify({ state: "unusable", reason: null }),
+    /invalid Fireworks key reason/,
+  ],
+  [
+    "an unusable key with an empty reason",
+    JSON.stringify({ state: "unusable", reason: "" }),
+    /invalid Fireworks key reason/,
+  ],
+  [
+    "an oversized answer",
+    JSON.stringify({ state: "unusable", reason: "x".repeat(5000) }),
+    /answer too big/,
+  ],
+] as const)(
+  "fireworksKey rejects an answer with %s",
+  async (_, body, message) => {
+    const directory = root();
+    await answeringFireworksKey(directory, { body });
+    await assert.rejects(control(directory).fireworksKey(), message);
+  },
+);

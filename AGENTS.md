@@ -158,12 +158,24 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   replacing it takes effect at the next request with no restart or sync. It
   must be a regular file (a link to one is followed) of at most 4096 bytes
   holding one word of visible ASCII once carriage returns and surrounding
-  whitespace go; `cog new` checks the same rule with the same reader. Anything
+  whitespace go. Anything
   else answers 503 with a fixed message, and the reason goes to stderr once per
   change, never for a missing file. A request with no credential goes through
   as sent. Rows are `model.fireworks`, reason `fireworks key` or
   `no credential`. Nothing reads Fireworks responses for rate limits, and any
   path on the host goes out with the key.
+  `GET /fireworks-key` on the admin socket (`Control.fireworksKey`) answers
+  `{state, reason}` from the same `readKeyFile`: `missing` (no file or none
+  configured), `usable`, or `unusable` with the reader's fixed reason, and a
+  dangling link is `unusable` (`is not a regular file`) though the request path
+  treats it as missing. It never returns key bytes, writes nothing to stderr and
+  needs no sync. `cog new` asks it through `fireworksWired`, after the VM-exists
+  check and before the pool check, because the profile lets only the daemon read
+  the path the installer resolved: `missing` leaves Fireworks unwired, `usable`
+  wires it, `unusable` fails before the clone, a reason that starts with
+  `cannot be read` says to run `./install.sh` again if the file or link moved,
+  and a 404 (an older daemon) says to run `./install.sh`. `adminRequest` rejects
+  an answer over its size limit rather than parsing a truncated one.
   `cog/commands/pool.ts` holds `cog pool`, whose `add` and `rm` change that
   directory and ask the daemon to reload (`rm` takes any plain file name there,
   so a stray entry that disables the pool can be removed); `GET /pool` on the
@@ -224,7 +236,7 @@ Codex login goes to `guest/setup-secrets NAME` on stdin, and so do the
 placeholder `cog` for Claude and, when the Mac has a Fireworks key file, for
 Fireworks; a Lima guest holds no real Claude token or Fireworks key. The
 gateway reads the Fireworks key on the Mac for each credentialed request, and
-`cog new` validates the file without keeping or sending it.
+`cog new` never opens the file and learns its state from the gateway.
 The CA goes to `setup-github-gateway`'s stdin. `cog new` needs a usable Claude
 pool, checked before the clone, unless `--no-claude-token`. `cog pool add`
 reads a pool token with the no-echo prompt and creates the file exclusively
