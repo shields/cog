@@ -32,9 +32,20 @@ SERVICE = f"{DOMAIN}/{LABEL}"
 
 STUB = r"""#!/bin/bash
 set -euo pipefail
+signal_at() {
+    local when=${TEST_SIGNAL_AT:-} count=0
+    [[ $when == "$1:"* ]] || return 0
+    [[ ! -e $TEST_STATE/count-$1 ]] || count=$(<"$TEST_STATE/count-$1")
+    printf '%s\n' "$((count + 1))" > "$TEST_STATE/count-$1"
+    [[ $((count + 1)) == "${when#*:}" ]] || return 0
+    kill -s "${TEST_SIGNAL:-INT}" "$PPID"
+}
 case ${0##*/} in
     uname) printf '%s\n' "${TEST_OS:-Darwin}" ;;
-    sleep) printf 'sleep %s\n' "$*" >> "$TEST_STATE/calls" ;;
+    sleep)
+        printf 'sleep %s\n' "$*" >> "$TEST_STATE/calls"
+        signal_at sleep
+        ;;
     plutil)
         [[ $# == 2 && $1 == -lint ]] || exit 1
         printf 'lint\n' >> "$TEST_STATE/calls"
@@ -53,7 +64,10 @@ case ${0##*/} in
                 $4 == --no-compile-autoload-bunfig &&
                 $5 == cog/main.ts && $6 == --outfile ]] || exit 1
             printf 'build\n' >> "$TEST_STATE/calls"
-            printf '#!/bin/bash\nexec "$TEST_STATE/bin/health" "$@"\n' > "$7"
+            build=new
+            [[ ! -f $TEST_STATE/build ]] || build=$(<"$TEST_STATE/build")
+            printf '#!/bin/bash\nexport TEST_BUILD=%s\n' "$build" > "$7"
+            printf 'exec "$TEST_STATE/bin/health" "$@"\n' >> "$7"
             chmod +x "$7"
         fi
         ;;
@@ -99,13 +113,18 @@ case ${0##*/} in
             bootstrap)
                 [[ $# == 3 && $2 == "$TEST_DOMAIN" && -f $3 &&
                     ! -e $TEST_STATE/loaded ]] || exit 1
+                if [[ -f $TEST_STATE/bootstrap-fails-once ]]; then
+                    rm "$TEST_STATE/bootstrap-fails-once"
+                    exit 5
+                fi
+                signal_at bootstrap
                 python3 -I -c '
 import os, plistlib, sys
 arguments = plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"]
 sys.exit(not (
     arguments[:2] == ["/usr/bin/sandbox-exec", "-f"]
     and os.path.isfile(arguments[2])
-    and open(arguments[2], "rb").read() == open(sys.argv[2], "rb").read()
+    and open(arguments[2], "rb").read().startswith(open(sys.argv[2], "rb").read())
     and os.access(arguments[-3], os.X_OK)
 ))' "$3" "$TEST_REPO/gateway/gateway.sb" || exit 1
                 : > "$TEST_STATE/loaded"
@@ -117,7 +136,8 @@ sys.exit(not (
         [[ $# == 2 && $* == 'gateway health' &&
             -z ${COG_ROOT+x}${COG_BASE+x} ]] || exit 1
         printf 'health\n' >> "$TEST_STATE/calls"
-        [[ -f $TEST_STATE/loaded && ! -f $TEST_STATE/unhealthy ]] || exit 1
+        [[ -f $TEST_STATE/loaded && ! -f $TEST_STATE/unhealthy &&
+            ! -f $TEST_STATE/unhealthy-${TEST_BUILD:-none} ]] || exit 1
         ;;
     *) exit 2 ;;
 esac
@@ -351,6 +371,7 @@ def test_reinstall_gives_up_on_a_gateway_that_outlives_exit_timeout(
     assert installation.calls[offset:].count("sleep 0.1") == 700
     assert installation.binary.stat().st_ino == inode
     assert not any(call.startswith("bootstrap") for call in installation.calls[offset:])
+    assert not any(path.exists() for path in kept_copies(installation))
 
 
 def test_health_timeout_names_the_error_log(installation: Installation) -> None:
@@ -367,7 +388,8 @@ def test_bad_plist_leaves_the_running_install_alone(installation: Installation) 
     inode = installation.binary.stat().st_ino
     (installation.root / "invalid-plist").touch()
     second = installation.run()
-    assert second.returncode != 0
+    assert second.returncode == 1
+    assert "the generated LaunchAgent plist is invalid" in second.stderr
     assert installation.binary.stat().st_ino == inode
     assert (installation.root / "loaded").is_file()
     assert f"bootout {SERVICE}" not in installation.calls
@@ -663,3 +685,191 @@ def test_unrelated_command_is_not_replaced_or_removed(
     removed = installation.run("--uninstall")
     assert removed.returncode == 0, removed.stderr
     assert installation.link.read_text() == "unrelated\n"
+
+
+KEPT = ("cog.previous", "gateway.sb.previous")
+
+
+def kept_copies(installation: Installation) -> list[Path]:
+    return [
+        *(installation.binary.parent / name for name in KEPT),
+        installation.plist.with_name(f"{LABEL}.plist.previous"),
+    ]
+
+
+def snapshot(installation: Installation) -> tuple[bytes, bytes, bytes]:
+    return (
+        installation.binary.read_bytes(),
+        installation.profile.read_bytes(),
+        installation.plist.read_bytes(),
+    )
+
+
+def install_two_builds(installation: Installation) -> tuple[bytes, bytes, bytes]:
+    _ = (installation.root / "build").write_text("one")
+    first = installation.run()
+    assert first.returncode == 0, first.stderr
+    with installation.profile.open("a") as stream:
+        _ = stream.write("; previous\n")
+    with installation.plist.open("a") as stream:
+        _ = stream.write("<!-- previous -->\n")
+    previous = snapshot(installation)
+    _ = (installation.root / "build").write_text("two")
+    return previous
+
+
+def test_healthy_install_leaves_no_kept_copies(installation: Installation) -> None:
+    _ = install_two_builds(installation)
+    second = installation.run()
+    assert second.returncode == 0, second.stderr
+    assert not any(path.exists() for path in kept_copies(installation))
+    assert installed(installation) == [installation.binary, installation.profile]
+    assert list(installation.plist.parent.iterdir()) == [installation.plist]
+
+
+def test_unhealthy_new_build_restores_the_previous_gateway(
+    installation: Installation,
+) -> None:
+    previous = install_two_builds(installation)
+    (installation.root / "unhealthy-two").touch()
+    offset = len(installation.calls)
+    second = installation.run()
+    assert second.returncode == 1
+    assert "the new build did not become healthy" in second.stderr
+    assert "restored the previous gateway, which is healthy" in second.stderr
+    assert str(installation.logs / f"{LABEL}.err") in second.stderr
+    assert snapshot(installation) == previous
+    assert not any(path.exists() for path in kept_copies(installation))
+    assert (installation.root / "loaded").is_file()
+    calls = installation.calls[offset:]
+    bootstraps = [c for c in calls if c.startswith("bootstrap")]
+    assert bootstraps == [f"bootstrap {DOMAIN} {installation.plist}"] * 2
+    assert calls.count(f"bootout {SERVICE}") == 2
+    assert calls.count("health") == 101
+    assert calls[-1] == "health"
+    assert os.access(installation.binary, os.X_OK)
+    assert installation.link.readlink() == installation.binary
+
+
+def test_failed_bootstrap_of_the_new_agent_restores_the_previous_gateway(
+    installation: Installation,
+) -> None:
+    previous = install_two_builds(installation)
+    (installation.root / "bootstrap-fails-once").touch()
+    second = installation.run()
+    assert second.returncode == 1
+    assert "installing the new build failed" in second.stderr
+    assert "restored the previous gateway, which is healthy" in second.stderr
+    assert snapshot(installation) == previous
+    assert not any(path.exists() for path in kept_copies(installation))
+    assert (installation.root / "loaded").is_file()
+
+
+def test_interrupt_while_the_previous_gateway_stops_starts_it_again(
+    installation: Installation,
+) -> None:
+    previous = install_two_builds(installation)
+    offset = len(installation.calls)
+    second = installation.run(TEST_UNLOAD_DELAY="5", TEST_SIGNAL_AT="sleep:1")
+    assert second.returncode == 1
+    assert (
+        "the install was interrupted; restored the previous gateway, which is healthy"
+        in second.stderr
+    )
+    assert snapshot(installation) == previous
+    assert not any(path.exists() for path in kept_copies(installation))
+    assert (installation.root / "loaded").is_file()
+    calls = installation.calls[offset:]
+    assert calls.count(f"bootout {SERVICE}") == 2
+    assert calls[-2:] == [f"bootstrap {DOMAIN} {installation.plist}", "health"]
+    assert not list(installation.binary.parent.glob(".build.*"))
+    assert not list(installation.plist.parent.glob(".cog.*"))
+
+
+def test_interrupt_while_waiting_for_the_new_build_is_not_blamed_on_the_build(
+    installation: Installation,
+) -> None:
+    previous = install_two_builds(installation)
+    (installation.root / "unhealthy-two").touch()
+    second = installation.run(TEST_SIGNAL_AT="sleep:1")
+    assert second.returncode == 1
+    assert "the install was interrupted; restored the previous gateway" in second.stderr
+    assert "did not become healthy" not in second.stderr
+    assert snapshot(installation) == previous
+    assert not any(path.exists() for path in kept_copies(installation))
+
+
+def test_a_second_interrupt_does_not_stop_the_rollback(
+    installation: Installation,
+) -> None:
+    previous = install_two_builds(installation)
+    (installation.root / "unhealthy-two").touch()
+    second = installation.run(TEST_SIGNAL_AT="bootstrap:2", TEST_SIGNAL="TERM")
+    assert second.returncode == 1
+    assert "restored the previous gateway, which is healthy" in second.stderr
+    assert snapshot(installation) == previous
+    assert not any(path.exists() for path in kept_copies(installation))
+    assert (installation.root / "loaded").is_file()
+    assert not list(installation.binary.parent.glob(".build.*"))
+    assert not list(installation.plist.parent.glob(".cog.*"))
+
+
+def test_unhealthy_first_install_restores_nothing(installation: Installation) -> None:
+    (installation.root / "unhealthy").touch()
+    result = installation.run()
+    assert result.returncode == 1
+    assert "did not become healthy" in result.stderr
+    assert "restored" not in result.stderr
+    assert str(installation.logs / f"{LABEL}.err") in result.stderr
+    assert installation.calls.count("health") == 100
+    assert installation.calls.count(f"bootout {SERVICE}") == 0
+    assert installation.binary.is_file()
+    assert not any(path.exists() for path in kept_copies(installation))
+
+
+def test_unhealthy_install_over_files_without_a_plist_leaves_no_kept_copies(
+    installation: Installation,
+) -> None:
+    first = installation.run()
+    assert first.returncode == 0, first.stderr
+    installation.plist.unlink()
+    (installation.root / "loaded").unlink()
+    (installation.root / "unhealthy").touch()
+    second = installation.run()
+    assert second.returncode == 1
+    assert "the new build did not become healthy" in second.stderr
+    assert "restored" not in second.stderr
+    assert not any(path.exists() for path in kept_copies(installation))
+
+
+def test_unhealthy_predecessor_is_reported(installation: Installation) -> None:
+    previous = install_two_builds(installation)
+    (installation.root / "unhealthy-one").touch()
+    (installation.root / "unhealthy-two").touch()
+    second = installation.run()
+    assert second.returncode == 1
+    assert "the new build did not become healthy" in second.stderr
+    assert "restoring the previous gateway also failed" in second.stderr
+    assert "the previous gateway did not become healthy" in second.stderr
+    assert "install.sh --uninstall" in second.stderr
+    assert str(installation.logs / f"{LABEL}.err") in second.stderr
+    assert snapshot(installation) == previous
+
+
+def test_leftover_kept_copy_blocks_install_and_uninstall_removes_it(
+    installation: Installation,
+) -> None:
+    first = installation.run()
+    assert first.returncode == 0, first.stderr
+    leftover = installation.binary.with_name("cog.previous")
+    _ = leftover.write_text("left by a killed run\n")
+    plist_leftover = installation.plist.with_name(f"{LABEL}.plist.previous")
+    _ = plist_leftover.write_text("left\n")
+    blocked = installation.run()
+    assert blocked.returncode == 1
+    assert "interrupted" in blocked.stderr
+    removed = installation.run("--uninstall")
+    assert removed.returncode == 0, removed.stderr
+    assert not leftover.exists()
+    assert not plist_leftover.exists()
+    assert not installation.binary.parent.exists()

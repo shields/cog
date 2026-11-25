@@ -52,6 +52,22 @@ replaces the running gateway, the installer runs the new executable's `help`
 under the profile and stops if that fails; that checks the profile and the
 executable, not what the gateway does.
 
+Before the installer replaces the running gateway, it keeps the installed
+binary, profile and plist as `.previous` files beside them. If the new gateway
+does not report ready within 10 seconds, or any step from stopping the previous
+agent to that report fails or is interrupted (Ctrl-C while the previous gateway
+finishes its requests, for example), the installer unloads the new agent, puts
+the kept files back, starts the previous agent, waits for it to report ready,
+and exits 1 with one line that says whether the previous gateway is healthy; if
+restoring fails, it says what failed and to run `./install.sh --uninstall` and
+install again. The installer ignores further interrupts while it restores. A
+first install has nothing to restore: it reports the failure and leaves the new
+files and agent in place. The rollback restores the program, the profile and
+the agent, not the state: a gateway that ran, even briefly, may already have
+disabled registrations or reissued its certificates. A run that was killed can
+leave `.previous` files, and the next install then refuses to start until
+`./install.sh --uninstall` removes them.
+
 A VM made before the sockets moved to `~/.local/state/cog/sock` (its socket was
 in its Lima directory) loses gateway access. When the gateway starts it
 disables each such registration and writes one line to

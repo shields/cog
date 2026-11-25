@@ -74,15 +74,88 @@ unload() {
         launchctl bootout "$service"
         # bootout returns before launchd releases the label, which happens once
         # the gateway has finished its requests in flight, or ExitTimeOut later.
+        # A signal during the wait leaves no agent loaded, so on_exit starts the
+        # previous one again.
+        stopping=1
         local attempt
         for ((attempt = 0; attempt < (exit_timeout + 10) * 10; ++attempt)); do
             if ! launchctl print "$service" >/dev/null 2>&1; then
+                stopping=0
                 return 0
             fi
             sleep 0.1
         done
+        stopping=0
         die "timed out waiting for $label to unload"
     fi
+}
+
+wait_healthy() {
+    local attempt
+    for ((attempt = 0; attempt < 100; ++attempt)); do
+        if "$binary" gateway health >/dev/null 2>&1 </dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+# The state is not restored: a daemon that ran may already have changed it.
+# shellcheck disable=SC2329
+roll_back() {
+    set +e
+    local problem='' file unloaded=1
+    if [[ $had_previous == 0 ]]; then
+        rm -f "$binary.previous" "$profile.previous" "$plist.previous"
+        printf 'install.sh: %s; see %s\n' "$swap_failure" "$logs/$label.err" >&2
+        return
+    fi
+    (unload) || unloaded=0
+    [[ $unloaded == 1 ]] || problem="could not unload the agent"
+    for file in "$binary" "$profile" "$plist"; do
+        [[ -f $file.previous ]] || continue
+        # A file that was not replaced is still the kept file, and mv leaves
+        # both names in place when they are one file.
+        if [[ $file -ef $file.previous ]]; then
+            rm -f "$file.previous"
+        elif ! mv -f "$file.previous" "$file"; then
+            problem="${problem:+$problem; }could not restore $file"
+        fi
+    done
+    if [[ $unloaded == 1 ]]; then
+        unset COG_ROOT COG_BASE
+        if ! launchctl bootstrap "$domain" "$plist"; then
+            problem="${problem:+$problem; }could not bootstrap the previous agent"
+        elif ! wait_healthy; then
+            problem="${problem:+$problem; }the previous gateway did not become healthy"
+        fi
+    fi
+    if [[ -z $problem ]]; then
+        printf 'install.sh: %s; restored the previous gateway, which is healthy; see %s\n' \
+            "$swap_failure" "$logs/$label.err" >&2
+    else
+        printf 'install.sh: %s; restoring the previous gateway also failed (%s); check %s, then run install.sh --uninstall and install again\n' \
+            "$swap_failure" "$problem" "$logs/$label.err" >&2
+    fi
+}
+
+# shellcheck disable=SC2329
+on_exit() {
+    local status=$?
+    set +e
+    trap '' HUP INT TERM
+    if [[ $swapping == 1 || $stopping == 1 ]]; then
+        swapping=0
+        stopping=0
+        roll_back
+        status=1
+    else
+        rm -f "$binary.previous" "$profile.previous" "$plist.previous"
+    fi
+    [[ -z $build_dir ]] || rm -rf "$build_dir"
+    [[ -z $plist_dir ]] || rm -rf "$plist_dir"
+    exit "$status"
 }
 
 case $#:${1:-} in
@@ -115,7 +188,7 @@ if [[ ${1:-} == --uninstall ]]; then
     if [[ $link_is_ours == 1 ]]; then
         rm -f "$link"
     fi
-    rm -f "$plist" "$binary" "$profile"
+    rm -f "$plist" "$binary" "$profile" "$plist.previous" "$binary.previous" "$profile.previous"
     if [[ -d $share ]]; then
         rmdir "$share"
     fi
@@ -123,6 +196,8 @@ if [[ ${1:-} == --uninstall ]]; then
     exit 0
 fi
 
+[[ ! -e $binary.previous && ! -e $profile.previous && ! -e $plist.previous ]] ||
+    die "an earlier install was interrupted and left $binary.previous, $profile.previous or $plist.previous; run install.sh --uninstall, then install again"
 [[ $link_is_ours == 1 || (! -e $link && ! -L $link) ]] || die "refusing to replace $link"
 need bun bun
 need limactl lima
@@ -153,7 +228,12 @@ real_key=$(real_file "$HOME/.config/secrets/FIREWORKS_API_KEY")
 parameters=("STATE=$real_state" "SECRETS=$real_secrets" "FIREWORKS_KEY=$real_key")
 build_dir=
 plist_dir=
-trap '[[ -z $build_dir ]] || rm -rf "$build_dir"; [[ -z $plist_dir ]] || rm -rf "$plist_dir"' EXIT
+swapping=0
+stopping=0
+had_previous=0
+swap_failure=
+trap on_exit EXIT
+trap 'swap_failure="the install was interrupted"; exit 1' HUP INT TERM
 build_dir=$(mktemp -d "$share/.build.XXXXXX")
 plist_dir=$(mktemp -d "${plist%/*}/.cog.XXXXXX")
 bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig \
@@ -220,7 +300,15 @@ validation=$(
         "$sandbox_exec" "${validate_arguments[@]}" "$real_build/cog" help 2>&1 </dev/null
 ) || die "cog does not run under the sandbox profile (status $?): $validation"
 
+for file in "$binary" "$profile" "$plist"; do
+    if [[ -f $file ]]; then
+        ln -f "$file" "$file.previous"
+    fi
+done
+[[ ! -f $plist ]] || had_previous=1
 unload
+swapping=1
+swap_failure="installing the new build failed"
 mv -f "$build_dir/cog" "$binary"
 mv -f "$build_dir/gateway.sb" "$profile"
 mv -f "$plist_dir/$label.plist" "$plist"
@@ -230,11 +318,11 @@ fi
 launchctl bootstrap "$domain" "$plist"
 
 unset COG_ROOT COG_BASE
-for ((attempt = 0; attempt < 100; ++attempt)); do
-    if "$binary" gateway health >/dev/null 2>&1 </dev/null; then
-        printf 'Installed %s; the gateway is ready.\n' "$link"
-        exit 0
-    fi
-    sleep 0.1
-done
-die "the gateway did not become healthy; see $logs/$label.err"
+swap_failure="the new build did not become healthy"
+if wait_healthy; then
+    swapping=0
+    rm -f "$binary.previous" "$profile.previous" "$plist.previous"
+    printf 'Installed %s; the gateway is ready.\n' "$link"
+    exit 0
+fi
+exit 1

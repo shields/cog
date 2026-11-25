@@ -7,6 +7,17 @@
   `./install.sh --uninstall` keeps state, secrets, config, logs and VMs. Test
   only with a temporary HOME and stubs for `launchctl`, `sandbox-exec` and
   `plutil`.
+  The installer links each installed binary, profile and plist to
+  `NAME.previous` before it unloads the agent, and from the moment `bootout`
+  has succeeded (`stopping`, until the label is released) or the swap has begun
+  (`swapping`) an EXIT trap (also reached by HUP, INT and TERM, which it then
+  ignores) rolls back through `roll_back`: it unloads, renames the `.previous`
+  files back (one that is still the installed file is only removed, since `mv`
+  leaves two links to one file in place), bootstraps the old plist and waits for
+  `$binary gateway health`, with one message and exit 1. A timeout of the wait
+  for the label is a plain `die`, with no rollback. A first install restores
+  nothing. Success removes the `.previous` files. A leftover one makes a normal
+  install die and `--uninstall` removes it. State is not rolled back.
 - **Setup**: `make setup` installs the locked Bun and uv dependencies.
 - **Checks**: `make lint build test`. `COG_FAIL_ON_SKIP=1` makes any skipped
   pytest test fail the run, so a test that needs a tool needs it added to
@@ -262,7 +273,11 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   installation and its parameter set, link resolution (the Fireworks key, the
   parents of the share, state and secrets directories, and HOME), refusal of
   control characters and link loops, directory modes, a slow unload, a failing
-  validation and uninstall. The stub scripts run
+  validation and uninstall. Its rollback cases make one build unhealthy (the
+  `health` stub fails when `unhealthy-BUILD` exists, BUILD being the label the
+  `bun build` stub read from a `build` file) or make `bootstrap` fail once, and
+  check the restored files byte for byte, a first install, an unhealthy
+  predecessor and a leftover `.previous`. The stub scripts run
   under `/bin/bash` 3.2 on a Mac, where `set -e` ignores a failing `[[ ]]`, so
   each guard ends in `|| exit 1`.
 - `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
