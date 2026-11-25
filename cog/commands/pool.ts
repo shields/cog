@@ -21,6 +21,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   rmdirSync,
   type Stats,
   unlinkSync,
@@ -36,7 +37,7 @@ import {
   unconfiguredReason,
   type AccountSnapshot,
 } from "../../gateway/pool.ts";
-import { CogError } from "../errors.ts";
+import { CogError, Interrupted } from "../errors.ts";
 import { say, writeAll } from "../output.ts";
 import { toBytes } from "../secrets.ts";
 import type { Context } from "./context.ts";
@@ -149,10 +150,101 @@ function attempt(cleanup: () => void): void {
   }
 }
 
+const heldSignals = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 } as const;
+
+// The write is synchronous, so a signal handler cannot run inside it; the
+// handlers keep the default action from killing the process between the
+// temporary's creation and its unlink, and the signal takes effect afterwards.
+// A signal that arrives during the write is dispatched on a later turn of the
+// event loop, so the handlers stay until one has passed.
+async function holdingSignals(work: () => void): Promise<void> {
+  const received: { status: number | null } = { status: null };
+  const handlers = new Map<string, () => void>();
+  for (const [name, status] of Object.entries(heldSignals)) {
+    const handler = (): void => {
+      received.status ??= status;
+    };
+    handlers.set(name, handler);
+    process.on(name, handler);
+  }
+  let failure: { error: unknown } | undefined;
+  try {
+    try {
+      work();
+    } catch (error) {
+      failure = { error };
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  } finally {
+    for (const [name, handler] of handlers) {
+      process.off(name, handler);
+    }
+  }
+  if (received.status !== null) {
+    throw new Interrupted(received.status);
+  }
+  if (failure !== undefined) {
+    throw failure.error;
+  }
+}
+
+const strayTemporary = /^\.[a-z0-9-]+\.[0-9a-f]{12}$/;
+const strayAgeMs = 60_000;
+
+// A SIGKILL or a power loss can leave a temporary that holds a token. One
+// younger than a minute may belong to an add in progress. The entry that rm was
+// asked for is left to rm, which reports its removal.
+function removeStrayTemporaries(directory: string, keep = ""): void {
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch (error) {
+    if (code(error) === "ENOENT") {
+      return;
+    }
+    throw new CogError(`cannot read ${directory} (${code(error)})`);
+  }
+  const now = Date.now();
+  for (const name of names) {
+    if (name === keep || !strayTemporary.test(name)) {
+      continue;
+    }
+    const file = path.join(directory, name);
+    const status = lstatOrNull(file);
+    if (
+      status === null ||
+      !status.isFile() ||
+      now - status.mtimeMs < strayAgeMs
+    ) {
+      continue;
+    }
+    try {
+      unlinkSync(file);
+    } catch (error) {
+      if (code(error) !== "ENOENT") {
+        throw new CogError(
+          `cannot remove the stray temporary file ${file} (${code(error)})`,
+        );
+      }
+    }
+  }
+}
+
 // The entry appears complete and with mode 600, or not at all. The temporary
 // name starts with a dot, which the loader skips, so a crash cannot leave an
 // entry that disables the pool. The link fails rather than replace an entry.
-function writeAccount(
+async function writeAccount(
+  io: PoolIo,
+  directory: string,
+  name: string,
+  token: string,
+): Promise<void> {
+  await holdingSignals(() => {
+    writeEntry(io, directory, name, token);
+  });
+}
+
+function writeEntry(
   io: PoolIo,
   directory: string,
   name: string,
@@ -226,6 +318,9 @@ async function add(
   const name = validAccount(first, rest);
   const directory = context.gateway().location.pool;
   const missing = directoryIsMissing(directory);
+  if (!missing) {
+    removeStrayTemporaries(directory);
+  }
   const entry = path.join(directory, name);
   const present = lstatOrNull(entry);
   if (present !== null) {
@@ -240,7 +335,7 @@ async function add(
     createDirectory(directory);
   }
   try {
-    writeAccount(io, directory, name, token);
+    await writeAccount(io, directory, name, token);
   } catch (error) {
     if (missing) {
       try {
@@ -267,6 +362,10 @@ async function remove(
   const name = existingEntry(first, rest);
   const directory = context.gateway().location.pool;
   const entry = path.join(directory, name);
+  if (directoryIsMissing(directory)) {
+    throw new CogError(`there is no account ${name}`);
+  }
+  removeStrayTemporaries(directory, name);
   const status = lstatOrNull(entry);
   if (status === null) {
     throw new CogError(`there is no account ${name}`);

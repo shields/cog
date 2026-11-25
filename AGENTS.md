@@ -194,7 +194,14 @@ The CA goes to `setup-github-gateway`'s stdin. `cog new` needs a usable Claude
 pool, checked before the clone, unless `--no-claude-token`. `cog pool add`
 reads a pool token with the no-echo prompt and creates the file exclusively
 with mode 600 by a dot-named temporary and a link, so the loader never sees a
-partial entry.
+partial entry. `writeAccount` runs that write inside `holdingSignals`, which
+records SIGHUP, SIGINT and SIGTERM and removes its handlers in a `finally`; a
+signal that arrived ends the command with `Interrupted(129|130|143)` after the
+write, over any write error and without the gateway reload. `add` and `rm` call
+`removeStrayTemporaries`, which deletes regular files named
+`.NAME.<12 hex>` over 60 seconds old without reading them (`rm` skips the name
+it was given); the loader already skips every dot name. `rm`, like `add`,
+refuses a pool location that is not a real directory.
 `cog new` upgrades the agents before it installs any secret. Rollback starts
 after a successful clone and ends before opening the interactive shell. A setup
 failure or signal in that interval disables the registration and deletes the VM.
@@ -261,7 +268,8 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
 - `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
   refresh, live grants, audit and the HTTPS Unix socket. `cog/*.test.ts` cover
   the CLI and foundation modules, including a real `gateway serve` that
-  disables older registrations, clears stale sockets and removes its own; the
+  disables older registrations, clears stale sockets and removes its own, and
+  `cog/pool.test.ts` signals `cog pool add` through a hook in the write; the
   no-echo prompt runs under a pseudo-terminal and needs `stty`.
 - No automated test runs the real profile, which needs macOS.
 - No automated test covers a live launchd install, real GitHub authorization,

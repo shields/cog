@@ -398,6 +398,17 @@ every account is held and a request then succeeds on it. Use only the
 inference-only token that `claude setup-token` makes, because the gateway
 forwards any path with it.
 
+`cog pool add` holds SIGHUP, SIGINT and SIGTERM while it writes the entry, so
+the token file is either complete (mode 600) with no temporary beside it, or
+absent. A signal that arrives meanwhile takes effect afterwards: the command
+exits 129, 130 or 143 and prints `cog: interrupted`, without telling the gateway
+to reload even though the token is saved. `cog pool list` shows the account. The
+gateway reads it at its next reload (`cog new`, a VM's registration, or another
+`add` or `rm`), and only then does `cog pool status` list it; `add` again
+reports that the account exists. A SIGKILL or a power loss can leave a temporary
+named `.NAME.` and 12 hex digits; `add` and `rm` delete such a file once it is
+over a minute old.
+
 ### The rest
 
 - `~/.config/secrets/FIREWORKS_API_KEY`, the key `cg` uses, stays on the Mac.

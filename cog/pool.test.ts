@@ -26,6 +26,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -36,7 +37,7 @@ import { compareCodeUnits } from "../gateway/policy.ts";
 import { loadPool, unconfiguredReason } from "../gateway/pool.ts";
 import { poolCommand, type PoolContext, type PoolIo } from "./commands/pool.ts";
 import { loadConfig } from "./config.ts";
-import { CogError } from "./errors.ts";
+import { CogError, Interrupted } from "./errors.ts";
 
 const alpha = "sk-ant-oat01-made-up-alpha-part";
 const bravo = "sk-ant-oat01-made-up-bravo-part";
@@ -56,6 +57,7 @@ interface Captured extends PoolIo {
   linked: { names: string[]; usable: boolean }[];
   linkFails: boolean;
   closeFails: boolean;
+  onLink?: () => void;
 }
 
 function capture(pool = ""): Captured {
@@ -68,6 +70,7 @@ function capture(pool = ""): Captured {
       captured.out.push(`${text}\n`);
     },
     link: (existing, created) => {
+      captured.onLink?.();
       if (pool !== "") {
         captured.linked.push({
           names: readdirSync(pool).toSorted(compareCodeUnits),
@@ -367,6 +370,129 @@ test("add names its temporary file so that the loader skips it, and links rather
   ]);
 });
 
+const held = ["SIGHUP", "SIGINT", "SIGTERM"] as const;
+
+function listeners(): number[] {
+  return held.map((name) => process.listenerCount(name));
+}
+
+async function interrupted(work: Promise<void>): Promise<number> {
+  try {
+    await work;
+  } catch (error) {
+    assert.ok(error instanceof Interrupted, String(error));
+    return error.status;
+  }
+  throw new Error("the command succeeded");
+}
+
+for (const [signal, status] of [
+  ["SIGHUP", 129],
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+] as const) {
+  test(`add finishes the write when ${signal} arrives in the middle, then ends as interrupted`, async () => {
+    const { pool, context, io, calls } = fixture();
+    seed(pool, { alpha });
+    const before = listeners();
+    const index = held.indexOf(signal);
+    io.onLink = () => {
+      assert.ok(process.listenerCount(signal) > (before[index] ?? 0));
+      process.emit(signal, signal);
+    };
+    assert.equal(
+      await interrupted(poolCommand(["add", "work"], context, io)),
+      status,
+    );
+    assert.deepEqual(readdirSync(pool).toSorted(compareCodeUnits), [
+      "alpha",
+      "work",
+    ]);
+    assert.equal(readFileSync(path.join(pool, "work"), "utf8"), `${typed}\n`);
+    assert.equal(statSync(path.join(pool, "work")).mode & 0o777, 0o600);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(listeners(), before);
+  });
+}
+
+test("add ends as interrupted when a real SIGINT arrives during the write", async () => {
+  const { pool, context, io, calls } = fixture();
+  seed(pool, { alpha });
+  const before = listeners();
+  io.onLink = () => {
+    process.kill(process.pid, "SIGINT");
+    const end = Date.now() + 100;
+    while (Date.now() < end) {
+      // The signal is delivered while the write holds the event loop.
+    }
+  };
+  assert.equal(
+    await interrupted(poolCommand(["add", "work"], context, io)),
+    130,
+  );
+  assert.equal(readFileSync(path.join(pool, "work"), "utf8"), `${typed}\n`);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(listeners(), before);
+});
+
+test("add removes its signal handlers after a success and after a failure", async () => {
+  const before = listeners();
+  const ok = fixture();
+  seed(ok.pool, { alpha });
+  await poolCommand(["add", "work"], ok.context, ok.io);
+  assert.deepEqual(listeners(), before);
+  const bad = fixture();
+  seed(bad.pool, { alpha });
+  bad.io.linkFails = true;
+  await failure(poolCommand(["add", "work"], bad.context, bad.io));
+  assert.deepEqual(listeners(), before);
+});
+
+test("add that fails and is interrupted ends as interrupted and leaves no temporary", async () => {
+  const { pool, context, io } = fixture();
+  seed(pool, { alpha });
+  io.linkFails = true;
+  io.onLink = () => {
+    process.emit("SIGINT", "SIGINT");
+  };
+  const before = listeners();
+  assert.equal(
+    await interrupted(poolCommand(["add", "work"], context, io)),
+    130,
+  );
+  assert.deepEqual(readdirSync(pool), ["alpha"]);
+  assert.deepEqual(listeners(), before);
+});
+
+for (const verb of ["add", "rm"] as const) {
+  test(`${verb} removes an old stray temporary and leaves younger and unrelated files`, async () => {
+    const { pool, context, io } = fixture();
+    seed(pool, { alpha });
+    const old = ".gone.0123456789ab";
+    const young = ".fresh.0123456789ab";
+    const dot = ".other";
+    const odd = ".gone.0123456789abc";
+    for (const name of [old, young, dot, odd]) {
+      writeFileSync(path.join(pool, name), `${bravo}\n`, { mode: 0o600 });
+    }
+    const aged = (Date.now() - 90_000) / 1000;
+    for (const name of [old, dot, odd]) {
+      utimesSync(path.join(pool, name), aged, aged);
+    }
+    const recent = (Date.now() - 30_000) / 1000;
+    utimesSync(path.join(pool, young), recent, recent);
+    await poolCommand(
+      verb === "add" ? ["add", "work"] : ["rm", "alpha"],
+      context,
+      io,
+    );
+    assert.equal(existsSync(path.join(pool, old)), false);
+    for (const name of [young, dot, odd]) {
+      assert.equal(existsSync(path.join(pool, name)), true, name);
+    }
+  });
+}
+
 for (const [step, errno] of [
   ["link", "ENOSPC"],
   ["close", "EIO"],
@@ -540,6 +666,39 @@ test("rm removes a stray entry that the loader refuses, by its file name", async
   assert.deepEqual(readdirSync(pool), ["alpha"]);
   assert.deepEqual(calls, ["sync", "pool", "sync", "pool"]);
   noToken(...io.out);
+});
+
+test("rm removes an old stray temporary that it is asked for by name, as an account", async () => {
+  const { pool, calls, context, io } = fixture();
+  seed(pool, { alpha });
+  const stray = path.join(pool, ".gone.0123456789ab");
+  writeFileSync(stray, `${bravo}\n`, { mode: 0o600 });
+  const aged = (Date.now() - 120_000) / 1000;
+  utimesSync(stray, aged, aged);
+  await poolCommand(["rm", ".gone.0123456789ab"], context, io);
+  assert.deepEqual(readdirSync(pool), ["alpha"]);
+  assert.deepEqual(calls, ["sync", "pool"]);
+  noToken(...io.out);
+});
+
+test("rm refuses a location that is a link and touches nothing in its target", async () => {
+  const { root, pool, calls, context, io } = fixture();
+  mkdirSync(path.join(root, "secrets"));
+  const real = path.join(root, "real");
+  seed(real, { work: alpha });
+  const stray = path.join(real, ".work.0123456789ab");
+  writeFileSync(stray, `${bravo}\n`, { mode: 0o600 });
+  const aged = (Date.now() - 120_000) / 1000;
+  utimesSync(stray, aged, aged);
+  symlinkSync(real, pool);
+  const message = await failure(poolCommand(["rm", "work"], context, io));
+  assert.match(message, /not a real directory/);
+  assert.match(message, /nothing was changed/);
+  assert.deepEqual(readdirSync(real).toSorted(compareCodeUnits), [
+    ".work.0123456789ab",
+    "work",
+  ]);
+  assert.deepEqual(calls, []);
 });
 
 test.each(["", ".", "..", "a/b", "../alpha", "/alpha"])(
