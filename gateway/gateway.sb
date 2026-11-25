@@ -54,6 +54,8 @@
   (global-name "com.apple.dnssd.service")
   (global-name "com.apple.SystemConfiguration.DNSConfiguration"))
 
-;; A version 1 profile leaves link and clone allowed under (deny default), and
-;; nothing here needs them.
+;; A version 1 profile leaves some operations allowed under (deny default),
+;; among them process-info*, mach-task-name, iokit-open-service, nvram* and
+;; darwin-notification-post. Only link and clone are denied here, since nothing
+;; needs them.
 (deny file-link file-clone)

@@ -222,10 +222,13 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   missing state and secrets directories with mode 700, since the gateway cannot
   create parents. The profile ends with `(deny file-link file-clone)`, which a
   version 1 profile leaves allowed under `(deny default)` and the gateway never
-  uses. Before it unloads the running agent, `install.sh` runs the staged
-  binary's `help` under the staged profile from `/`. A change to the profile or
-  to the paths it names needs the matching change in `install.sh` and the
-  README.
+  uses. A version 1 profile leaves about 40 other operations allowed too
+  (`process-info*`, `mach-task-name`, `iokit-open-service`, `nvram*`,
+  `darwin-notification-post`); denying them needs a check on a Mac that the
+  gateway still starts and serves. Before it unloads the running agent,
+  `install.sh` runs the staged binary's `help` under the staged profile from
+  `/`. A change to the profile or to the paths it names needs the matching
+  change in `install.sh` and the README.
 - `guest/throwaway.sh` requires `--claude-settings FILE`, since cog has no
   `.claude/settings.json`; the tests use `tests/fixtures/claude-settings.json`.
 
