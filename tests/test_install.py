@@ -62,11 +62,11 @@ case ${0##*/} in
             -z ${COG_ROOT+x}${COG_BASE+x} ]] || exit 1
         printf 'sandbox-exec\n' >> "$TEST_STATE/calls"
         { printf '%s\n' "$@"; printf -- '--\n'; } >> "$TEST_STATE/sandbox-args"
-        [[ $1 == -f && -f $2 && $# == 14 && $3 == -D && $4 == BINARY=/* ]] || exit 1
+        [[ $1 == -f && -f $2 && $# == 12 && $3 == -D && $4 == BINARY=/* ]] || exit 1
         binary=${4#BINARY=}
         cmp -s "$2" "$TEST_REPO/gateway/gateway.sb"
         shift 2
-        for _ in 1 2 3 4 5; do
+        for _ in 1 2 3 4; do
             [[ $1 == -D && $2 =~ ^[A-Z_]+=/ ]] || exit 1
             shift 2
         done
@@ -278,8 +278,6 @@ def test_first_install(installation: Installation) -> None:
                 "-D",
                 f"SECRETS={real / '.config/secrets/cog'}",
                 "-D",
-                f"LIMA={real / '.lima'}",
-                "-D",
                 f"FIREWORKS_KEY={real / '.config/secrets/FIREWORKS_API_KEY'}",
                 str(real / ".local/share/cog/cog"),
                 "gateway",
@@ -427,6 +425,12 @@ def test_profile_parameters_match_the_plist(installation: Installation) -> None:
     } == used
 
 
+def test_profile_denies_the_operations_that_deny_default_leaves_open() -> None:
+    profile = (REPO / "gateway/gateway.sb").read_text()
+    assert "(version 1)" in profile
+    assert "(deny file-link file-clone)" in profile
+
+
 def test_validation_runs_the_staged_files(installation: Installation) -> None:
     result = installation.run()
     assert result.returncode == 0, result.stderr
@@ -437,29 +441,6 @@ def test_validation_runs_the_staged_files(installation: Installation) -> None:
     assert staged.parent.name.startswith(".build.")
     assert lines[2:4] == ["-D", f"BINARY={staged.parent.resolve() / 'cog'}"]
     assert lines[-3:-1] == [str(staged.parent.resolve() / "cog"), "help"]
-
-
-def test_lima_directory_link_is_resolved_from_lima_home(
-    installation: Installation,
-) -> None:
-    target = installation.root / "volume/lima"
-    target.mkdir(parents=True)
-    link = installation.root / "lima link"
-    link.symlink_to(target)
-    result = installation.run(LIMA_HOME=str(link))
-    assert result.returncode == 0, result.stderr
-    assert installation.parameters["LIMA"] == str(target.resolve())
-
-
-def test_lima_directory_link_is_resolved_from_the_default(
-    installation: Installation,
-) -> None:
-    target = installation.root / "volume/.lima"
-    target.mkdir(parents=True)
-    (installation.home / ".lima").symlink_to(target)
-    result = installation.run()
-    assert result.returncode == 0, result.stderr
-    assert installation.parameters["LIMA"] == str(target.resolve())
 
 
 def test_fireworks_key_link_is_resolved(installation: Installation) -> None:
@@ -501,10 +482,10 @@ def test_created_directories_are_private_and_existing_ones_keep_their_modes(
         ".config",
         ".config/secrets",
         ".config/secrets/cog",
-        ".lima",
     ):
         mode = (installation.home / relative).stat().st_mode & 0o777
         assert mode & 0o077 == 0, relative
+    assert not (installation.home / ".lima").exists()
 
 
 def test_linked_parents_and_home_are_resolved(installation: Installation) -> None:
@@ -523,7 +504,6 @@ def test_linked_parents_and_home_are_resolved(installation: Installation) -> Non
         "BINARY": str(local.resolve() / "share/cog/cog"),
         "STATE": str(local.resolve() / "state/cog"),
         "SECRETS": str(config.resolve() / "secrets/cog"),
-        "LIMA": str(installation.home.resolve() / ".lima"),
         "FIREWORKS_KEY": str(config.resolve() / "secrets/FIREWORKS_API_KEY"),
     }
     arguments = linked.program_arguments
@@ -535,15 +515,8 @@ def test_linked_parents_and_home_are_resolved(installation: Installation) -> Non
         for line in validation.splitlines()
         if line.startswith("/") or "=/" in line
     ]
-    assert len(paths) == 7
+    assert len(paths) == 6
     assert all(Path(path).resolve() == Path(path) for path in paths), paths
-
-
-def test_control_character_in_lima_home_is_refused(installation: Installation) -> None:
-    result = installation.run(LIMA_HOME=str(installation.root / "lima\nhome"))
-    assert result.returncode == 1
-    assert "without control characters" in result.stderr
-    assert not installation.calls
 
 
 def test_control_character_in_fireworks_key_target_is_refused(
@@ -609,19 +582,6 @@ def test_trailing_newline_in_the_fireworks_key_target_is_refused(
     assert not installation.profile.exists()
 
 
-def test_trailing_newline_in_the_lima_directory_is_refused(
-    installation: Installation,
-) -> None:
-    target = installation.root / "volume/lima\n"
-    target.mkdir(parents=True)
-    link = installation.root / "lima link"
-    link.symlink_to(target)
-    result = installation.run(LIMA_HOME=str(link))
-    assert result.returncode == 1
-    assert "without control characters" in result.stderr
-    assert not installation.profile.exists()
-
-
 def test_the_state_directory_is_private_when_it_is_created(
     installation: Installation,
 ) -> None:
@@ -647,13 +607,6 @@ def test_missing_sandbox_exec_fails_before_installing(
     result = installation.run()
     assert result.returncode == 1
     assert "macOS sandbox-exec is required" in result.stderr
-    assert not installation.calls
-
-
-def test_relative_lima_home_is_refused(installation: Installation) -> None:
-    result = installation.run(LIMA_HOME="lima")
-    assert result.returncode == 1
-    assert "LIMA_HOME must be an absolute path" in result.stderr
     assert not installation.calls
 
 

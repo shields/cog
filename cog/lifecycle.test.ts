@@ -24,6 +24,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { onTestFinished, spyOn, test } from "bun:test";
+import { Control, locations } from "../gateway/control.ts";
 import { State } from "../gateway/state.ts";
 import { grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
@@ -54,9 +55,9 @@ function fixture() {
   const mark = (method: string, ...args: unknown[]): void => {
     calls.push([method, ...args]);
   };
-  const directory = path.join(config.home, "lima", "vm");
+  const location = locations({ COG_ROOT: config.home });
   const id = "12345678-0000-4000-8000-123456789abc";
-  const socket = path.join(directory, "sock", `github-${id}.sock`);
+  const socket = path.join(location.sockets, `github-${id}.sock`);
   const ca = path.join(config.home, "ca.pem");
   const failures = {
     stopAt: "",
@@ -84,10 +85,6 @@ function fixture() {
       clone: (base, name, size) => {
         mark("clone", base, name, size);
         return Promise.resolve();
-      },
-      directory: (name) => {
-        mark("directory", name);
-        return Promise.resolve(directory);
       },
       edit: (name, rule) => {
         mark("edit", name, rule);
@@ -126,6 +123,7 @@ function fixture() {
     },
     gateway: () => ({
       state,
+      location,
       health: () => {
         mark("health");
         return Promise.resolve();
@@ -156,13 +154,8 @@ function fixture() {
         mark("prepareRepository", repository);
         return Promise.resolve("authenticated");
       },
-      register: (name, instanceDirectory) => {
-        mark(
-          "register",
-          name,
-          instanceDirectory,
-          statSync(path.dirname(socket)).mode & 0o777,
-        );
+      register: (name) => {
+        mark("register", name);
         boundary("register");
         return Promise.resolve({
           name,
@@ -194,7 +187,7 @@ function fixture() {
       },
     }),
   };
-  return { calls, mark, context, id, socket, directory, ca, failures };
+  return { calls, mark, context, id, socket, ca, failures };
 }
 
 test("list only calls Lima and rm disables the gateway before deleting", async () => {
@@ -253,7 +246,7 @@ test("grant validates the VM and applies the selected profile", async () => {
 });
 
 test("new authorizes a private repository before cloning and grants only reads", async () => {
-  const { calls, context, directory, ca, id } = fixture();
+  const { calls, context, socket, ca, id } = fixture();
   const { codexAuthFile, fireworksKeyFile } = context.config;
   mkdirSync(path.dirname(codexAuthFile), { recursive: true });
   mkdirSync(path.dirname(fireworksKeyFile), { recursive: true });
@@ -273,12 +266,11 @@ test("new authorizes a private repository before cloning and grants only reads",
     ["pool"],
     ["prepareRepository", "owner/repo"],
     ["clone", "base", "vm", ["--cpus", "2"]],
-    ["directory", "vm"],
-    ["register", "lima:vm", directory, 0o700],
+    ["register", "lima:vm"],
     [
       "edit",
       "vm",
-      `.portForwards = [{"guestSocket":"/tmp/cog-github.sock","hostSocket":"{{.Dir}}/sock/github-${id}.sock","reverse":true}] + .portForwards`,
+      `.portForwards = [{"guestSocket":"/tmp/cog-github.sock","hostSocket":${JSON.stringify(socket)},"reverse":true}] + .portForwards`,
     ],
     ["boot", "vm"],
     [
@@ -592,6 +584,172 @@ test("new does not delete a VM if the name is taken during clone", async () => {
   context.lima.clone = () => Promise.reject(new Error("name already taken"));
   await assert.rejects(newVM(noSecrets, context), /name already taken/);
   assert.deepEqual(calls, [["health"], ["exists", "base"], ["exists", "vm"]]);
+});
+
+test.each([
+  ["a socket outside the socket directory", "/elsewhere/github-ab-12.sock"],
+  ["a socket in a subdirectory", "SOCKETS/sub/github-ab-12.sock"],
+  ["a relative socket", "github-ab-12.sock"],
+  ["a socket with the wrong name", "SOCKETS/other.sock"],
+  ["a socket with an uppercase name", "SOCKETS/github-AB.sock"],
+] as const)(
+  "new refuses %s before it edits the Lima config",
+  async (_, bad) => {
+    const { calls, context } = fixture();
+    const { location } = context.gateway();
+    const socket = bad.replace("SOCKETS", location.sockets);
+    const gateway = context.gateway;
+    await assert.rejects(
+      newVM(noSecrets, {
+        ...context,
+        gateway: () => ({
+          ...gateway(),
+          register: (name: string) =>
+            Promise.resolve({
+              name,
+              id: "id",
+              socket,
+              revision: 0,
+              disabled: false,
+            }),
+        }),
+      }),
+      { message: "the GitHub gateway returned an invalid socket" },
+    );
+    assert.ok(calls.every(([method]) => method !== "edit"));
+    assert.deepEqual(calls.at(-2), ["disable", "lima:vm"]);
+    assert.deepEqual(calls.at(-1), ["remove", "vm"]);
+  },
+);
+
+test.each([
+  ["{{", "/state/{{.Home}}/sock"],
+  ["%", "/state/%h/sock"],
+  ["$", "/state/${HOME}/sock"],
+  [":", "/state/a:b/sock"],
+] as const)(
+  "new refuses a state directory with %s in it, before cloning",
+  async (character, sockets) => {
+    const { calls, context } = fixture();
+    const gateway = context.gateway;
+    await assert.rejects(
+      newVM(noSecrets, {
+        ...context,
+        gateway: () => ({
+          ...gateway(),
+          location: { ...gateway().location, sockets },
+        }),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(
+          error.message.includes(
+            `contains "${character}", which Lima or ssh would read as something else`,
+          ),
+          error.message,
+        );
+        return true;
+      },
+    );
+    assert.ok(calls.every(([method]) => method !== "clone"));
+  },
+);
+
+function registering(
+  context: ReturnType<typeof fixture>["context"],
+  register: Control["register"],
+): ReturnType<typeof fixture>["context"] {
+  const gateway = context.gateway;
+  return { ...context, gateway: () => ({ ...gateway(), register }) };
+}
+
+test("new says why the gateway refuses the registration when the reason is one of its own fixed messages", async () => {
+  const { calls, context } = fixture();
+  const { state, location } = context.gateway();
+  const socket = path.join(location.sockets, "github-ab-12.sock");
+  state.register("lima:vm", socket, "test");
+  await assert.rejects(
+    newVM(
+      noSecrets,
+      registering(context, (name) =>
+        Promise.resolve(state.register(name, socket, "test")),
+      ),
+    ),
+    {
+      message:
+        "cannot register vm with the GitHub gateway: VM is already registered",
+    },
+  );
+  assert.deepEqual(calls.at(-1), ["remove", "vm"]);
+  assert.ok(calls.every(([method]) => method !== "disable"));
+});
+
+test("new says that the socket path is too long, which only the registration finds", async () => {
+  const { context } = fixture();
+  const long = new Control(
+    locations({ COG_ROOT: path.join(context.config.home, "x".repeat(100)) }),
+    { actor: "test" },
+  );
+  await assert.rejects(
+    newVM(
+      noSecrets,
+      registering(context, (name) => long.register(name)),
+    ),
+    {
+      message:
+        "cannot register vm with the GitHub gateway: the state directory is too long for a Unix socket",
+    },
+  );
+});
+
+test("new names the gateway's log, and shows nothing of the reason, when the registration fails in any other way", async () => {
+  const { context } = fixture();
+  await assert.rejects(
+    newVM(
+      noSecrets,
+      registering(context, () =>
+        Promise.reject(new Error("EACCES: permission denied, mkdir '/place'")),
+      ),
+    ),
+    {
+      message:
+        "cannot register vm with the GitHub gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err",
+    },
+  );
+});
+
+test("rm deletes a VM whose registration is already disabled, when the VM still forwards to the registered socket", async () => {
+  const { context } = fixture();
+  const gateway = context.gateway();
+  const { state } = gateway;
+  const socket = "/old/lima/vm/sock/github-ab-12.sock";
+  state.register("lima:vm", socket, "test");
+  state.disable("lima:vm", "test");
+  state.register("lima:reused", "/old/lima/reused/sock/github-cd-34.sock", "t");
+  state.disable("lima:reused", "test");
+  const removed: string[] = [];
+  const retired = {
+    ...context,
+    lima: {
+      ...context.lima,
+      hasGatewaySocket: (name: string, saved: string) =>
+        Promise.resolve(name === "vm" && saved === socket),
+      remove: (name: string) => {
+        removed.push(name);
+        return Promise.resolve();
+      },
+    },
+    gateway: () => ({
+      ...gateway,
+      disable: (name: string, options?: { forRemoval?: boolean }) =>
+        Promise.resolve(state.disable(name, "test", options)),
+    }),
+  };
+  await remove(["vm"], retired);
+  assert.deepEqual(removed, ["vm"]);
+  await assert.rejects(remove(["reused"], retired), /VM is not active/);
+  await assert.rejects(remove(["never"], retired), /VM is not active/);
+  assert.deepEqual(removed, ["vm"]);
 });
 
 test("a shell handoff failure leaves the ready VM and registration intact", async () => {

@@ -260,6 +260,18 @@ export class State {
     });
   }
 
+  retiredSocket(name: string): string | null {
+    if (this.byName(name) || this.tailscaleNode(name)) {
+      return null;
+    }
+    const row = this.db
+      .prepare(
+        "SELECT socket FROM instances WHERE name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+      )
+      .get(name) as unknown as { socket: string } | undefined;
+    return row?.socket ?? null;
+  }
+
   tailscaleNode(name: string): TailscaleNode | null {
     const row = this.db
       .prepare(

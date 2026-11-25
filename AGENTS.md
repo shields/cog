@@ -61,7 +61,24 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   rollback, disable, grant, revoke and the policy document). It opens the
   state and the authorizations on first use, and
   `State` refuses to register `lima:cog-base` and the VM that `COG_BASE`
-  names. The same server answers `api.anthropic.com` and `api.fireworks.ai`, the
+  names. `register(name)` makes `STATE/sock` (mode 700) and registers
+  `STATE/sock/github-UUID.sock`; `cog new` refuses a state directory whose path
+  contains `{{`, `%`, `$` or `:`, which Lima or ssh would read as something
+  else, and a socket that is not directly in that directory or is not named
+  `github-[0-9a-f-]+.sock`, and writes the absolute path as the forward's
+  `hostSocket`. It names the registration's own refusals (a VM that is
+  registered already, a socket path over 100 bytes) in its error, and points at
+  the daemon's log for any other failure. `cog gateway serve` first makes the
+  directory, disables each enabled registration whose socket is not directly
+  inside it (through `State.disable`, as `cog gateway disable` does) with one
+  stderr line per VM, and removes files there named like a socket that no
+  enabled registration owns. Bun unlinks a listener's socket file when its
+  server closes, so retiring a VM and `stop()` need no removal of their own.
+  Such a VM stays removable: `cog rm` of a VM whose registration is already
+  disabled deletes it when the Lima VM still forwards to the socket that was
+  registered (`State.retiredSocket`, `lima.hasGatewaySocket`), and otherwise
+  answers `VM is not active`.
+  The same server answers `api.anthropic.com` and `api.fireworks.ai`, the
   third and fourth names on the leaf, for a guest whose `/etc/hosts` points
   those names at the relay. `guest/setup-github-gateway` maps the two GitHub
   names, and `guest/setup-model-gateway` (run by `cog new` after the GitHub
@@ -92,7 +109,9 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   account is held, so otherwise the hold lasts its ten minutes. Each VM has its
   own upstream keep-alive agent for each scheme in use (both model hosts share
   the https one, since Node keys connections by host and port) and none is
-  shared between VMs.
+  shared between VMs. An agent closes a socket that has been idle for 30
+  seconds, since one that the network dropped while the Mac slept would fail the
+  next request, which cannot be sent again when it has a body.
   `modelHosts` in `gateway/models.ts` is the table of model hosts (host,
   upstream, audit operation, where `Bearer cog` is resolved), and the server
   dispatches on the `Host` header through it. `api.fireworks.ai` follows the
@@ -129,7 +148,8 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   repositories anonymously and grants read-only access to a private checkout.
 - Names: the push namespace is `cog/VM-ID/*`; the markers are
   `/etc/cog-throwaway` and `/etc/cog-github-gateway`; the base is `cog-base`
-  (`COG_BASE`); the guest socket is `/tmp/cog-github.sock`; the health path is
+  (`COG_BASE`); the guest socket is `/tmp/cog-github.sock` and the host
+  sockets are in `STATE/sock`; the health path is
   `/__cog__/health`; the dummy credential is `cog`. State is
   `~/.local/state/cog` and secrets are `~/.config/secrets/cog`; `COG_ROOT` moves
   them in tests. `install.sh` installs `~/.local/share/cog/cog` by rename and
@@ -145,16 +165,20 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   stream for minutes, so the plist sets `ExitTimeOut` to 60 seconds, after which
   launchd kills it, and `install.sh` waits ten seconds longer than that for the
   label to go.
-  `gateway/gateway.sb` takes exactly the parameters BINARY, STATE, SECRETS,
-  LIMA and FIREWORKS_KEY through `(param "NAME")`, and the plist passes the
-  same set. Seatbelt matches resolved paths, so `install.sh` resolves each value
-  at install time (the Lima directory, `${LIMA_HOME:-~/.lima}`, may be a link;
-  the Fireworks key link's final target, or its default name under the resolved
-  directory when missing) and creates the missing state, secrets and Lima
-  directories with mode 700, since the gateway cannot create parents. Before it
-  unloads the running agent, it runs the staged binary's `help` under the
-  staged profile from `/`. A change to the profile or to the paths it names
-  needs the matching change in `install.sh` and the README.
+  `gateway/gateway.sb` takes exactly the parameters BINARY, STATE, SECRETS and
+  FIREWORKS_KEY through `(param "NAME")`, and the plist passes the same set. It
+  allows listening only on `STATE/sock/github-<hex and dashes>.sock` and
+  `STATE/admin.sock`, and the daemon never touches the Lima directory, which may
+  be on an external volume. Seatbelt matches resolved paths, so `install.sh`
+  resolves each value at install time (the Fireworks key link's final target, or
+  its default name under the resolved directory when missing) and creates the
+  missing state and secrets directories with mode 700, since the gateway cannot
+  create parents. The profile ends with `(deny file-link file-clone)`, which a
+  version 1 profile leaves allowed under `(deny default)` and the gateway never
+  uses. Before it unloads the running agent, `install.sh` runs the staged
+  binary's `help` under the staged profile from `/`. A change to the profile or
+  to the paths it names needs the matching change in `install.sh` and the
+  README.
 - `guest/throwaway.sh` requires `--claude-settings FILE`, since cog has no
   `.claude/settings.json`; the tests use `tests/fixtures/claude-settings.json`.
 
@@ -220,23 +244,25 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   seeds fake authorizations and reads gateway state via `tests/gateway_state.ts`.
   The stubs record argv, environment and stdin in isolated fixture environments.
   Tests cover umasks 000, 022 and 077, signals at the cleanup stages of `new` and
-  `base`, and redaction of parse errors. `tests/test_setup_secrets.zsh` runs
-  in temporary guest homes.
+  `base`, redaction of parse errors, and the daemon's disabling of a
+  registration outside `STATE/sock` with `cog rm` still deleting that VM.
+  `tests/test_setup_secrets.zsh` runs in temporary guest homes.
 - `tests/test_install.py` gives the installer a temporary home and substitutes
   launchctl, Bun, plutil and sandbox-exec. The sandbox-exec stub checks the
   working directory, the profile's content and the parameters, and the
   launchctl stub's `bootstrap` checks that the profile and executable that the
   plist names are in place. The tests cover the plist, the profile's
-  installation and its parameter set, link resolution (the Lima directory, the
-  Fireworks key, the parents of the share, state and secrets directories, and
-  HOME), refusal of control characters and link loops, directory modes, a slow
-  unload, a failing validation and uninstall. The stub scripts run
+  installation and its parameter set, link resolution (the Fireworks key, the
+  parents of the share, state and secrets directories, and HOME), refusal of
+  control characters and link loops, directory modes, a slow unload, a failing
+  validation and uninstall. The stub scripts run
   under `/bin/bash` 3.2 on a Mac, where `set -e` ignores a failing `[[ ]]`, so
   each guard ends in `|| exit 1`.
 - `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
   refresh, live grants, audit and the HTTPS Unix socket. `cog/*.test.ts` cover
-  the CLI and foundation modules; the no-echo prompt runs under a
-  pseudo-terminal and needs `stty`.
+  the CLI and foundation modules, including a real `gateway serve` that
+  disables older registrations, clears stale sockets and removes its own; the
+  no-echo prompt runs under a pseudo-terminal and needs `stty`.
 - No automated test runs the real profile, which needs macOS.
 - No automated test covers a live launchd install, real GitHub authorization,
   network isolation and the relay in a VM, live Tailscale enrollment or a

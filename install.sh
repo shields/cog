@@ -135,8 +135,6 @@ need openssl openssl@3
 command -v tar >/dev/null || die "macOS tar is required"
 command -v plutil >/dev/null || die "macOS plutil is required"
 sandbox_exec=$(command -v sandbox-exec) || die "macOS sandbox-exec is required"
-lima_dir=${LIMA_HOME:-$HOME/.lima}
-check_path "$lima_dir" "LIMA_HOME"
 
 checkout=$(
     unset CDPATH
@@ -148,13 +146,11 @@ bun install --frozen-lockfile </dev/null
 mkdir -p "$share" "${link%/*}" "${plist%/*}" "$logs"
 private_dir "$HOME/.local/state/cog"
 private_dir "$HOME/.config/secrets/cog"
-private_dir "$lima_dir"
 real_share=$(real_dir "$share")
 real_state=$(real_dir "$HOME/.local/state/cog")
 real_secrets=$(real_dir "$HOME/.config/secrets/cog")
-real_lima=$(real_dir "$lima_dir")
 real_key=$(real_file "$HOME/.config/secrets/FIREWORKS_API_KEY")
-parameters=("STATE=$real_state" "SECRETS=$real_secrets" "LIMA=$real_lima" "FIREWORKS_KEY=$real_key")
+parameters=("STATE=$real_state" "SECRETS=$real_secrets" "FIREWORKS_KEY=$real_key")
 build_dir=
 plist_dir=
 trap '[[ -z $build_dir ]] || rm -rf "$build_dir"; [[ -z $plist_dir ]] || rm -rf "$plist_dir"' EXIT

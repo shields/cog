@@ -115,13 +115,10 @@ test("the queries pass the formats and return the output without trailing newlin
   assert.equal(await lima.isProtected("b"), false);
   process.env.STUB_OUT = "0";
   assert.equal(await lima.mountCount("b"), "0");
-  process.env.STUB_OUT = "/home/x/.lima/t1";
-  assert.equal(await lima.directory("t1"), "/home/x/.lima/t1");
   assert.deepEqual(calls(), [
     ["list", "--format", "{{.Protected}}", "b"],
     ["list", "--format", "{{.Protected}}", "b"],
     ["list", "--format", "{{len .Config.Mounts}}", "b"],
-    ["list", "--format", "{{.Dir}}", "t1"],
   ]);
 });
 

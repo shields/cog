@@ -252,6 +252,27 @@ function withState(run: (state: State) => void): void {
   }
 }
 
+test("a retired socket is that of the newest registration of a name with no active one and no Tailscale cleanup pending", () => {
+  withState((state) => {
+    assert.equal(state.retiredSocket("lima:vm"), null);
+    state.register("lima:vm", "/sock/first.sock", "tester");
+    assert.equal(state.retiredSocket("lima:vm"), null);
+    state.disable("lima:vm", "tester");
+    assert.equal(state.retiredSocket("lima:vm"), "/sock/first.sock");
+    const second = state.register("lima:vm", "/sock/second.sock", "tester");
+    state.beginTailscale(second.id, "key");
+    state.disable("lima:vm", "tester");
+    assert.equal(state.retiredSocket("lima:vm"), null);
+    state.forgetTailscale(second.id);
+    assert.equal(state.retiredSocket("lima:vm"), "/sock/second.sock");
+    assert.equal(state.retiredSocket("lima:other"), null);
+    assert.throws(
+      () => state.disable("lima:vm", "tester", { forRemoval: true }),
+      /VM is not active/,
+    );
+  });
+});
+
 function insertLog(state: State, id: string, createdAt: number): void {
   state.db
     .prepare(

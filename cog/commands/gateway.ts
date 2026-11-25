@@ -15,7 +15,7 @@
 import { Gateway } from "../../gateway/server.ts";
 import { CogError } from "../errors.ts";
 import { gatewayName, validName } from "../names.ts";
-import { say } from "../output.ts";
+import { note, say } from "../output.ts";
 import type { Context } from "./context.ts";
 
 async function serve(args: string[], context: Context): Promise<void> {
@@ -26,6 +26,13 @@ async function serve(args: string[], context: Context): Promise<void> {
   // sets a umask, since limactl, git and tar run under the caller's.
   process.umask(0o077);
   const control = context.gateway();
+  control.ensureSocketDirectory();
+  for (const instance of control.disableOutsideSocketDirectory()) {
+    note(
+      `cog: ${instance.name.replace(/^lima:/, "")} (${instance.id}) was registered by an older cog; its gateway access is disabled; run cog rm ${instance.name.replace(/^lima:/, "")} and make it again with cog new`,
+    );
+  }
+  control.removeStaleSockets();
   const gateway = new Gateway(control.state, control.auth, {
     ...control.certificates(),
     adminSocket: control.location.admin,

@@ -35,6 +35,7 @@ import {
 import { connect as tlsConnect } from "node:tls";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -254,6 +255,7 @@ async function startGateway(
       anthropic?: string;
       fireworks?: string;
       fireworksKeyFile?: string;
+      upstreamIdleTimeout?: number;
     };
   } | null = null,
 ): Promise<{
@@ -384,6 +386,9 @@ async function startGateway(
     ...(models?.fireworksKeyFile === undefined
       ? {}
       : { fireworksKeyFile: models.fireworksKeyFile }),
+    ...(models?.upstreamIdleTimeout === undefined
+      ? {}
+      : { upstreamIdleTimeout: models.upstreamIdleTimeout }),
   });
   const created = spyOn(https, "createServer");
   const earlier = created.mock.results.length;
@@ -2870,6 +2875,21 @@ function holdEvent(
   };
 }
 
+test("the runtime removes a VM's socket file when its listener is retired and when the gateway stops", async () => {
+  const { socket, gateway, state } = await startGateway();
+  const added = path.join(path.dirname(socket), "added.sock");
+  state.register("lima:added", added, "tester");
+  await gateway.refresh();
+  assert.equal(existsSync(socket), true);
+  assert.equal(existsSync(added), true);
+  state.disable("lima:work", "tester");
+  await gateway.refresh();
+  assert.equal(existsSync(socket), false);
+  assert.equal(existsSync(added), true);
+  await gateway.stop();
+  assert.equal(existsSync(added), false);
+});
+
 test("stop() waits for the server of a VM that was disabled, and for its idle keep-alive connections to end", async () => {
   const { socket, gateway, state, auth, listener } = await startGateway();
   listener.keepAliveTimeout = 600_000;
@@ -3801,7 +3821,8 @@ test("a client's Content-Length: 0 is forwarded once, and a chunked body stays c
   assert.deepEqual(headerValues(seen.rawHeaders, "content-length"), []);
 });
 
-test("an error answer reaches the client untouched, headers and duplicate values kept, and its rate-limit headers steer the pool", async () => {
+test("an error answer reaches the client untouched, headers and duplicate values kept", async () => {
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
   const error = JSON.stringify({
     type: "error",
     error: { type: "rate_limit_error", message: "slow down" },
@@ -3819,7 +3840,7 @@ test("an error answer reaches the client untouched, headers and duplicate values
           "anthropic-ratelimit-unified-status",
           "rejected",
           "anthropic-ratelimit-unified-reset",
-          "1795500000",
+          reset,
           "request-id",
           "req_011",
           "x-other-request-id",
@@ -3855,7 +3876,7 @@ test("an error answer reaches the client untouched, headers and duplicate values
       "Retry-After: 10800",
       "x-should-retry: false",
       "anthropic-ratelimit-unified-status: rejected",
-      "anthropic-ratelimit-unified-reset: 1795500000",
+      `anthropic-ratelimit-unified-reset: ${reset}`,
       "request-id: req_011",
       "x-other-request-id: kept",
       "X-Dup: a=1",
@@ -5083,8 +5104,10 @@ test("an upstream request that times out is destroyed and the client gets 503", 
 });
 
 test("a VM disabled while a request with no body is in flight does not have it sent again", async () => {
+  const slowArrived = signal();
   const stub = await startModelStub((request, response, entry) => {
     if (entry.url === "/slow") {
+      slowArrived.resolve();
       return;
     }
     replyOk(request, response, entry);
@@ -5104,14 +5127,79 @@ test("a VM disabled while a request with no body is in flight does not have it s
       return;
     }
   })();
-  while (stub.requests.length < 2) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  await within("the slow request at the provider", slowArrived.promise);
   state.disable("lima:work", "tester");
   await gateway.refresh();
   await within("the answer", pending);
   assert.equal(stub.requests.length, 2);
   assert.equal(stub.connections.length, 1);
+});
+
+test("an upstream connection that has been idle for longer than the idle timeout is closed, and the next request opens another", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({
+    models: { anthropic: stub.origin, upstreamIdleTimeout: 100 },
+  });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  const [first] = stub.connections;
+  assert.ok(first);
+  await within("the idle upstream connection to close", first.closed);
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  assert.deepEqual(
+    stub.requests.map(({ connection }) => connection),
+    [1, 2],
+  );
+});
+
+test("the idle timeout does not cut a response that pauses for longer than it", async () => {
+  const stub = await startModelStub((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write("ab");
+    setTimeout(() => {
+      response.end("cd");
+    }, 400);
+  });
+  const { socket } = await startGateway({
+    models: { anthropic: stub.origin, upstreamIdleTimeout: 100 },
+  });
+  const reply = await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal(reply.status, 200);
+  assert.equal(reply.body.toString(), "abcd");
+});
+
+test("a model request that is dispatched once stop() has begun is served with Connection: close", async () => {
+  const stub = await startModelStub();
+  const { socket, gateway, listener } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const held = holdRequests(listener);
+  const agent = new https.Agent({ keepAlive: true });
+  defer(() => {
+    agent.destroy();
+  });
+  const answered = send(
+    socket,
+    "POST",
+    "/v1/messages",
+    Buffer.from("{}"),
+    claudeName,
+    poolHeaders,
+    agent,
+  );
+  await within("the request to be parsed", held.parsed);
+  const stopping = gateway.stop();
+  held.deliver();
+  const response = await within("the response", answered);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.connection, "close");
+  assert.equal(stub.requests.length, 1);
+  await within("stop()", stopping);
 });
 
 test("uploads whose upstream request cannot be created, in sequence on one connection, leave no listeners behind on its socket", async () => {

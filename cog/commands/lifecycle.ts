@@ -78,6 +78,15 @@ export async function remove(
   }
   const lima = context.lima;
   const gateway = context.gateway();
+  // A registration that is already disabled leaves only the name, which a VM
+  // made outside cog may have taken, so the VM must still forward to the socket
+  // that was registered.
+  const retired = gateway.state.retiredSocket(gatewayName(name));
+  if (retired !== null && (await lima.hasGatewaySocket(name, retired))) {
+    await lima.remove(name);
+    say(`cog: ${name} is deleted; its GitHub grants were already disabled.`);
+    return;
+  }
   const record = await gateway.disable(gatewayName(name), { forRemoval: true });
   if (record) {
     if (await lima.hasGatewaySocket(name, record.socket)) {

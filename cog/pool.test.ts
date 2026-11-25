@@ -111,6 +111,7 @@ function fixture(options: Options = {}) {
     gateway: () => ({
       location: {
         state: path.join(root, "state"),
+        sockets: path.join(root, "state", "sock"),
         secrets: path.join(root, "secrets"),
         admin: path.join(root, "state", "admin.sock"),
         pool,
@@ -397,6 +398,29 @@ for (const [step, errno] of [
       }
     });
   }
+}
+
+for (const [step, errno] of [
+  ["link", "ENOSPC"],
+  ["close", "EIO"],
+] as const) {
+  test(`add leaves an existing empty pool directory in place after the ${step} fails`, async () => {
+    const { pool, context, io } = fixture();
+    mkdirSync(pool, { recursive: true, mode: 0o700 });
+    chmodSync(pool, 0o700);
+    if (step === "link") {
+      io.linkFails = true;
+    } else {
+      io.closeFails = true;
+    }
+    const message = await failure(poolCommand(["add", "work"], context, io));
+    assert.match(
+      message,
+      new RegExp(String.raw`cannot write account work \(${errno}\)`),
+    );
+    assert.equal(statSync(pool).mode & 0o777, 0o700);
+    assert.deepEqual(readdirSync(pool), []);
+  });
 }
 
 test("add says that the token is saved when the gateway cannot be told, and exits with an error", async () => {

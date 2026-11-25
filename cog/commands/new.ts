@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { readKeyFile } from "../../gateway/key-file.ts";
 import { placeholderCredential } from "../../gateway/models.ts";
 import { grantProfiles } from "../../gateway/policy.ts";
-import type { Control, PoolStatus } from "../../gateway/control.ts";
+import {
+  socketName,
+  type Control,
+  type PoolStatus,
+} from "../../gateway/control.ts";
 import type { Instance } from "../../gateway/state.ts";
 import { dotfilesRepo, guestLib, guestRepo } from "../config.ts";
 import { CogError, CommandFailed, Interrupted } from "../errors.ts";
@@ -36,7 +39,6 @@ import { inferRepository } from "./lifecycle.ts";
 type NewContext = LifecycleContext<
   | "boot"
   | "clone"
-  | "directory"
   | "edit"
   | "enter"
   | "exists"
@@ -50,6 +52,7 @@ type NewContext = LifecycleContext<
   | "disable"
   | "grant"
   | "health"
+  | "location"
   | "pool"
   | "prepareRepository"
   | "state"
@@ -156,6 +159,37 @@ function requireUsableFireworksKey(file: string): void {
   );
 }
 
+// Lima expands "{{" in a host socket and passes the path to ssh, which expands
+// "%" and "${" in it and reads ":" as the end of the path, so a path that holds
+// one would name a different socket or none.
+const limaUnsafe = /\{\{|[%$:]/u;
+
+function requireLimaSafe(location: string): void {
+  const found = limaUnsafe.exec(location)?.[0];
+  if (found !== undefined) {
+    throw new CogError(
+      `the gateway's socket location ${location} contains "${found}", which Lima or ssh would read as something else; use a state directory without it`,
+    );
+  }
+}
+
+function requireLimaSocket(socket: string, directory: string): void {
+  if (
+    !path.isAbsolute(socket) ||
+    path.dirname(socket) !== directory ||
+    !socketName.test(path.basename(socket))
+  ) {
+    throw new CogError("the GitHub gateway returned an invalid socket");
+  }
+}
+
+// The messages that the registration raises in this process, and that hold
+// nothing but fixed text. Any other failure is told only by the daemon's log.
+const registrationRefusals = new Set([
+  "VM is already registered",
+  "the state directory is too long for a Unix socket",
+]);
+
 function cleanupNote(text: string): void {
   try {
     note(text);
@@ -218,6 +252,7 @@ export async function newVM(
       "the GitHub gateway is not running; run ./install.sh in the cog checkout",
     );
   }
+  requireLimaSafe(gateway.location.sockets);
   // eslint-disable-next-line unicorn/no-declarations-before-early-exit -- Invalid sizes fail before querying Lima.
   const size = sizeArgs(cpus, memory);
   if (!(await lima.exists(base))) {
@@ -254,42 +289,24 @@ export async function newVM(
   try {
     await lima.clone(base, name, size);
     ownsClone = true;
-    let directory: string;
-    try {
-      directory = await lima.directory(name);
-    } catch {
-      signals.check();
-      throw new CogError(`cannot find the Lima directory of ${name}`);
-    }
-    if (!path.isAbsolute(directory)) {
-      throw new CogError(`invalid Lima directory for ${name}`);
-    }
-    const socketDirectory = path.join(directory, "sock");
-    mkdirSync(socketDirectory, { recursive: true, mode: 0o700 });
-    if (!lstatSync(socketDirectory).isDirectory()) {
-      throw new CogError(`invalid socket directory for ${name}`);
-    }
-    chmodSync(socketDirectory, 0o700);
-
     let registration: Instance;
     try {
-      registration = await gateway.register(gatewayVM, directory);
+      registration = await gateway.register(gatewayVM);
       registeredId = registration.id;
-    } catch {
+    } catch (error) {
       signals.check();
       throw new CogError(
-        `cannot register ${name} with the GitHub gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err, and run ./install.sh again if LIMA_HOME or the ~/.lima link moved`,
+        error instanceof Error && registrationRefusals.has(error.message)
+          ? `cannot register ${name} with the GitHub gateway: ${error.message}`
+          : `cannot register ${name} with the GitHub gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err`,
       );
     }
     signals.check();
     const { id, socket } = registration;
-    const socketName = path.basename(socket);
-    if (!/^github-[0-9a-f-]+\.sock$/.test(socketName)) {
-      throw new CogError("the GitHub gateway returned an invalid socket");
-    }
+    requireLimaSocket(socket, gateway.location.sockets);
     const rule = {
       guestSocket: "/tmp/cog-github.sock",
-      hostSocket: `{{.Dir}}/sock/${socketName}`,
+      hostSocket: socket,
       reverse: true,
     };
     await lima.edit(

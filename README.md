@@ -31,22 +31,34 @@ It does not load `.env` or `bunfig.toml` at runtime.
 
 The gateway runs under a Seatbelt profile (`gateway/gateway.sb`, installed as
 `~/.local/share/cog/gateway.sb`) through `sandbox-exec`. It may read and write
-only `~/.local/state/cog`, `~/.config/secrets/cog` and one socket per VM in the
-Lima directory, read its own executable, `openssl`, the system libraries and
+only `~/.local/state/cog` and `~/.config/secrets/cog`, listen only on the
+admin socket and on one socket per VM in `~/.local/state/cog/sock`, read its
+own executable, `openssl`, the system libraries and
 `~/.config/secrets/FIREWORKS_API_KEY`, and connect only to port 443 and the
 name resolver. It cannot read the rest of your home directory, run any other
-program, or connect to other ports or sockets. Apple deprecates `sandbox-exec`
-but it works. The installer resolves every path in the profile to a real path
-and creates the state, secrets and Lima directories (mode 700) when they are
-missing, so the profile is fixed at install: moving the Lima directory
-(`LIMA_HOME` or the `~/.lima` link), or the place the
-`FIREWORKS_API_KEY` link points to, needs `./install.sh` again. The profile
+program, or connect to other ports or sockets. It never touches the Lima
+directory: the sockets are on the internal disk because the Lima directory may
+be on an external volume, where macOS asks for consent to access files on a
+removable volume for each newly built gateway, and the gateway waits for the
+answer before it can listen. Apple deprecates `sandbox-exec` but it works. The
+installer resolves every path in the profile to a real path and creates the
+state and secrets directories (mode 700) when they are missing, so the profile
+is fixed at install: moving the place the `FIREWORKS_API_KEY` link points to
+needs `./install.sh` again. The profile
 does not protect the token files from other programs running as you, and it
 leaves the Tailscale and Cloudflare credentials that only the CLI reads, which
 share the secrets directory, readable and writable by the gateway. Before it
 replaces the running gateway, the installer runs the new executable's `help`
 under the profile and stops if that fails; that checks the profile and the
 executable, not what the gateway does.
+
+A VM made before the sockets moved to `~/.local/state/cog/sock` (its socket was
+in its Lima directory) loses gateway access. When the gateway starts it
+disables each such registration and writes one line to
+`~/Library/Logs/dev.msrl.cog.gateway.err` that names the VM and its ID, says
+that an older cog registered it and that its access is disabled. Run
+`cog rm NAME` and make the VM again with `cog new`; `cog rm` still deletes it
+and cleans up its Tailscale device, and `cog logs ID` still shows its history.
 
 The installer stops the old agent first: the gateway finishes the requests in
 flight, such as a streaming model response, and exits as soon as there are
@@ -222,7 +234,8 @@ for a year and is replaced, when the gateway starts or a VM is registered, once
 half of that is left; guests trust the CA, so they do not notice. A guest's
 HTTPS requests for `github.com` and `api.github.com` go to a relay on
 `127.0.0.1:443` in the guest, which sends them through the per-VM Unix socket
-`/tmp/cog-github.sock` (a reverse forward, one per VM) to the Mac. The gateway
+`/tmp/cog-github.sock` (a reverse forward, one per VM) to the Mac, where the
+gateway listens on `~/.local/state/cog/sock/github-UUID.sock`. The gateway
 chooses the repository's token after checking the current grant and request.
 It refreshes tokens on demand; a refresh failure denies the request. The
 guest's git credential helper
@@ -537,7 +550,9 @@ deploy or an agent image build. After installing, run `cog base` and
   passes, a new cog registers, fetches and pushes through it, a certificate is
   reissued (delete `github.pem` and `github-key.pem` in
   `~/.config/secrets/cog` and restart), and a model request is served.
-  `~/Library/Logs/dev.msrl.cog.gateway.err` shows no `EPERM` line.
+  `~/Library/Logs/dev.msrl.cog.gateway.err` shows no `EPERM` line, and no
+  `ECONNREFUSED` for a host that is up, which is how Bun reports a connection
+  that the profile denies.
 - `zsh -ic exit` prints nothing, `git --version` is 2.54 or later, and
   `git hook list pre-commit` lists gitleaks.
 - `stat /usr/local/lib/cog` shows it root-owned and not writable by group or

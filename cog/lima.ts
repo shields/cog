@@ -46,7 +46,6 @@ export interface Lima {
     template: string,
   ): Promise<void>;
   mountCount(name: string): Promise<string>;
-  directory(name: string): Promise<string>;
   clone(base: string, name: string, size: readonly string[]): Promise<void>;
   edit(name: string, expression: string): Promise<void>;
   boot(name: string): Promise<void>;
@@ -136,7 +135,6 @@ export function createLima(limactl: string): Lima {
       call("start", ["--tty=false", `--name=${name}`, ...size, template]),
     mountCount: (name) =>
       output("list", ["--format", "{{len .Config.Mounts}}", name]),
-    directory: (name) => output("list", ["--format", "{{.Dir}}", name]),
     clone: (base, name, size) =>
       call("clone", ["--tty=false", ...size, base, name]),
     edit: (name, expression) =>

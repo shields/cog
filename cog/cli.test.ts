@@ -37,7 +37,7 @@ import path from "node:path";
 import { onTestFinished, test } from "bun:test";
 import YAML from "yaml";
 import { Control, controlOptions, locations } from "../gateway/control.ts";
-import { grantProfiles } from "../gateway/policy.ts";
+import { compareCodeUnits, grantProfiles } from "../gateway/policy.ts";
 import { State } from "../gateway/state.ts";
 
 const main = path.join(import.meta.dirname, "main.ts");
@@ -64,9 +64,7 @@ async function daemonHealthy(
 
 test("CLI grants and edits apply live and disabled VM logs stay addressable by ID", async () => {
   const root = mkdtempSync("/tmp/cog-");
-  const lima = path.join(root, "lima");
   const secrets = path.join(root, "secrets");
-  mkdirSync(path.join(lima, "sock"), { recursive: true });
   mkdirSync(secrets);
   const repository = "shields/dotfiles";
   writeFileSync(
@@ -173,9 +171,9 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
     assert.match(again.stderr, /run cog pool rm bravo first/);
     assert.match(call(["pool", "rm", "bravo"]), /account bravo is removed/);
     assert.equal(call(["pool", "list"]), "work\n");
-    const instance = await control.register("lima:trial", lima);
+    const instance = await control.register("lima:trial");
     assert.match(instance.id, /^[0-9a-f-]{36}$/);
-    assert.match(instance.socket, /\/sock\/github-[0-9a-f-]{36}\.sock$/);
+    assert.match(instance.socket, /\/state\/sock\/github-[0-9a-f-]{36}\.sock$/);
     assert.equal(
       await control.grant("lima:trial", repository, grantProfiles.cog),
       1,
@@ -268,7 +266,11 @@ function sandbox(): Sandbox {
   );
   const state = new State(path.join(root, "state"));
   try {
-    state.register("lima:trial", path.join(root, "trial.sock"), "tester");
+    state.register(
+      "lima:trial",
+      path.join(root, "state", "sock", "github-aa-11.sock"),
+      "tester",
+    );
   } finally {
     state.close();
   }
@@ -699,32 +701,28 @@ test("help creates no state, and a command that needs the gateway creates it pri
 test("serve closes the listeners it opened and exits when it cannot open one for a registered VM", () => {
   const { root, run } = sandbox();
   const state = new State(path.join(root, "state"));
+  const sockets = path.join(root, "state", "sock");
+  const blocked = path.join(sockets, "github-bb-22.sock");
   try {
-    // The listener for lima:trial is already open when this one fails.
-    state.register(
-      "lima:vanished",
-      path.join(root, "vanished", "vanished.sock"),
-      "tester",
-    );
+    // The gateway opens the listeners in the order of the VMs' names, so the
+    // listener for lima:trial is already open when this one fails.
+    state.register("lima:vanished", blocked, "tester");
   } finally {
     state.close();
   }
+  mkdirSync(blocked, { recursive: true });
   const result = run(["gateway", "serve"]);
   assert.deepEqual(
     { status: result.status, signal: result.signal },
     { status: 1, signal: null },
     result.stderr,
   );
-  assert.match(
-    result.stderr,
-    /^cog: [^\n]*ENOENT[^\n]*vanished\.sock[^\n]*\n$/,
-  );
+  assert.match(result.stderr, /^cog: [^\n]*github-bb-22\.sock[^\n]*\n$/);
+  assert.equal(existsSync(path.join(sockets, "github-aa-11.sock")), false);
 }, 60_000);
 
 test("gateway serve reads the Fireworks key file under the daemon's HOME", async () => {
   const root = mkdtempSync("/tmp/cog-");
-  const lima = path.join(root, "lima");
-  mkdirSync(path.join(lima, "sock"), { recursive: true });
   mkdirSync(path.join(root, "home", ".config", "secrets"), { recursive: true });
   const marker = "fw-made-up-one";
   writeFileSync(
@@ -755,7 +753,7 @@ test("gateway serve reads the Fireworks key file under the daemon's HOME", async
   });
   try {
     assert.equal(await daemonHealthy(control, service), true, serviceError);
-    const instance = await control.register("lima:trial", lima);
+    const instance = await control.register("lima:trial");
     const reply = await new Promise<{ status: number; body: string }>(
       (resolve, reject) => {
         const request = https.request({
@@ -786,6 +784,103 @@ test("gateway serve reads the Fireworks key file under the daemon's HOME", async
     await reasonSeen;
     assert.ok(serviceError.includes("FIREWORKS_API_KEY"), serviceError);
     assert.ok(!serviceError.includes(marker), serviceError);
+  } finally {
+    control.close();
+    if (service.exitCode === null && service.signalCode === null) {
+      const exited = once(service, "exit");
+      service.kill("SIGTERM");
+      await exited;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("gateway serve disables older registrations, clears stale sockets and removes its own", async () => {
+  const root = mkdtempSync("/tmp/cog-");
+  const environment = {
+    ...process.env,
+    COG_ROOT: root,
+    HOME: path.join(root, "home"),
+  };
+  const sockets = path.join(root, "state", "sock");
+  const seeded = new State(path.join(root, "state"));
+  let oldId: string;
+  let freshId: string;
+  try {
+    oldId = seeded.register(
+      "lima:old",
+      path.join(root, "lima", "old", "sock", "github-aa-11.sock"),
+      "tester",
+    ).id;
+    freshId = seeded.register(
+      "lima:fresh",
+      path.join(sockets, "github-bb-22.sock"),
+      "tester",
+    ).id;
+  } finally {
+    seeded.close();
+  }
+  mkdirSync(sockets, { recursive: true });
+  writeFileSync(path.join(sockets, "github-cc-33.sock"), "");
+  writeFileSync(path.join(sockets, "notes.txt"), "");
+  const service = spawn(process.execPath, [main, "gateway", "serve"], {
+    env: environment,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let serviceError = "";
+  service.stderr.on("data", (chunk: Buffer) => {
+    serviceError += chunk.toString();
+  });
+  const control = new Control(locations(environment), {
+    ...controlOptions(environment),
+    actor: "tester",
+  });
+  const health = (socket: string): Promise<number> =>
+    new Promise((resolve, reject) => {
+      const request = https.request({
+        socketPath: socket,
+        servername: "api.github.com",
+        rejectUnauthorized: false,
+        method: "GET",
+        path: "/__cog__/health",
+        agent: false,
+        headers: { host: "api.github.com" },
+      });
+      request.once("error", reject);
+      request.once("response", (incoming) => {
+        incoming.resume();
+        resolve(incoming.statusCode ?? 0);
+      });
+      request.end();
+    });
+  try {
+    assert.equal(await daemonHealthy(control, service), true, serviceError);
+    assert.equal(
+      serviceError,
+      `cog: old (${oldId}) was registered by an older cog; its gateway access is disabled; run cog rm old and make it again with cog new\n`,
+    );
+    assert.equal(control.state.byId(oldId)?.disabled, true);
+    assert.equal(control.state.byId(freshId)?.disabled, false);
+    assert.deepEqual(readdirSync(sockets).toSorted(compareCodeUnits), [
+      "github-bb-22.sock",
+      "notes.txt",
+    ]);
+    const fresh = control.state.byId(freshId);
+    assert.ok(fresh);
+    assert.equal(statSync(fresh.socket).isSocket(), true);
+    assert.equal(await health(fresh.socket), 200);
+
+    await control.disable("lima:fresh");
+    assert.equal(existsSync(fresh.socket), false);
+
+    const second = await control.register("lima:second");
+    assert.equal(statSync(second.socket).isSocket(), true);
+    const exited = once(service, "exit");
+    service.kill("SIGTERM");
+    await exited;
+    assert.equal(existsSync(second.socket), false);
+    assert.equal(existsSync(path.join(root, "state", "admin.sock")), false);
+    assert.deepEqual(readdirSync(sockets), ["notes.txt"]);
   } finally {
     control.close();
     if (service.exitCode === null && service.signalCode === null) {

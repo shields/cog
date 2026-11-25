@@ -78,6 +78,7 @@ export interface GatewayOptions {
   anthropicUpstream?: string;
   fireworksUpstream?: string;
   fireworksKeyFile?: string;
+  upstreamIdleTimeout?: number;
 }
 
 interface ModelCredential {
@@ -87,6 +88,11 @@ interface ModelCredential {
 }
 
 const fireworksUnusable = "the Fireworks key is not usable on the Mac";
+
+// A socket that the network dropped while the Mac slept is otherwise reused by
+// the next request, which cannot be sent again when it has a body. A request
+// sets its own timeout once it has a socket.
+const upstreamIdleTimeout = 30_000;
 
 const forwardedHeaders = [
   "accept",
@@ -536,7 +542,7 @@ export class Gateway {
   }
 
   private agentFor(instanceId: string, secure: boolean): http.Agent {
-    if (this.stopped || !this.listeners.has(instanceId)) {
+    if (!this.listeners.has(instanceId)) {
       throw new Error("the VM's listener is closed");
     }
     // An agent has one scheme, so a VM has one for each scheme that its
@@ -544,9 +550,11 @@ export class Gateway {
     const key = `${instanceId} ${secure ? "https" : "http"}`;
     let agent = this.agents.get(key);
     if (agent === undefined) {
-      agent = secure
-        ? new https.Agent({ keepAlive: true })
-        : new http.Agent({ keepAlive: true });
+      const options = {
+        keepAlive: true,
+        timeout: this.options.upstreamIdleTimeout ?? upstreamIdleTimeout,
+      };
+      agent = secure ? new https.Agent(options) : new http.Agent(options);
       this.agents.set(key, agent);
     }
     return agent;

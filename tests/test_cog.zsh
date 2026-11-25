@@ -162,8 +162,8 @@ list)
         case $2 in
         '{{.Protected}}') [[ -e "$state/protected-$3" ]] && echo true || echo false ;;
         '{{.Status}}') [[ -e "$state/stopped-$3" ]] && echo Stopped || echo Running ;;
-        '{{.Dir}}') echo "$HOME/.lima/$3" ;;
         '{{len .Config.Mounts}}') cat "$state/mounts" 2>/dev/null || echo 0 ;;
+        *PortForwards*) cat "$state/forwards" 2>/dev/null || true ;;
         esac
         ;;
     *) cat "$state/instances" ;;
@@ -506,7 +506,7 @@ new_gateway_case() {
 # register_vm NAME: the gateway already has an active VM of that name, which
 # its daemon does not know.
 register_vm() {
-    gateway_state register "lima:$1" "$HOME_DIR/.lima/$1/sock/github-registered.sock"
+    gateway_state register "lima:$1" "$GATEWAY_ROOT/state/sock/github-registered.sock"
 }
 
 gateway_dump() {
@@ -1246,13 +1246,16 @@ assert_eq "new with a repository succeeds" 0 "$RC"
 vm_id="$(instance_query t1 .id | tr -d '"')"
 assert_eq "the gateway registered the VM under an ID of its own" 1 \
     "$([[ $vm_id =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] && echo 1 || echo 0)"
-assert_eq "new registers the VM as active, with a socket in its Lima directory" 1 \
-    "$([[ "$(instance_query t1 .socket | tr -d '"')" == "$HOME_DIR/.lima/t1/sock/github-"*.sock ]] && echo 1 || echo 0)"
+assert_eq "new registers the VM as active, with a socket in the gateway's socket directory" 1 \
+    "$([[ "$(instance_query t1 .socket | tr -d '"')" == "$GATEWAY_ROOT/state/sock/github-"*.sock ]] && echo 1 || echo 0)"
+assert_eq "the gateway listens on the VM's socket" 1 \
+    "$([[ -S "$(instance_query t1 .socket | tr -d '"')" ]] && echo 1 || echo 0)"
+assert_eq "new makes no sock directory in the Lima directory" 0 "$([[ -e $HOME_DIR/.lima ]] && echo 1 || echo 0)"
 assert_eq "new registers exactly one VM" 1 "$(gateway_dump | jq '.instances | length')"
 assert_eq "new leaves the VM active at its registration revision" '{"disabled":false,"revision":0}' \
     "$(instance_query t1 '{disabled, revision}')"
 assert_contains "new installs reverse socket forwarding to the registered socket" \
-    "guestSocket\":\"/tmp/cog-github.sock\",\"hostSocket\":\"{{.Dir}}/sock/$(instance_query t1 .socket | tr -d '"' | xargs basename)\",\"reverse\":true" \
+    "guestSocket\":\"/tmp/cog-github.sock\",\"hostSocket\":\"$(instance_query t1 .socket | tr -d '"')\",\"reverse\":true" \
     "$(<"$STATE/limactl.log")"
 assert_contains "new starts the VM after configuring its socket" "edit --tty=false --set" "$(<"$STATE/limactl.log")"
 start_call=$(grep -n '^start --tty=false t1$' "$STATE/limactl.log" | head -1 | cut -d: -f1)
@@ -1490,7 +1493,6 @@ assert_contains "an unavailable gateway points to cog's installer" "./install.sh
 assert_eq "an unavailable gateway creates no VM" 0 "$(count_in_log clone)"
 
 new_gateway_case test-base
-mkdir -p "$HOME_DIR/.lima/t1/sock"
 register_vm t1
 EXTRA_ENV+=(LIMA_STUB_SNAPSHOT=delete)
 run_cog new t1 --repo shields/dotfiles
@@ -1604,6 +1606,35 @@ assert_eq "rm of a VM the gateway does not know fails" 1 "$RC"
 assert_contains "rm of an unknown VM says why" "VM is not active" "$OUT"
 assert_eq "rm of an unknown VM deletes nothing" 0 "$(count_in_log delete)"
 
+new_case test-base t1 t2
+prepare_gateway
+gateway_state register lima:t1 "$HOME_DIR/.lima/t1/sock/github-aa-11.sock"
+gateway_state register lima:t2 "$GATEWAY_ROOT/state/sock/github-new.sock"
+start_gateway
+assert_eq "the daemon disables a VM registered outside the socket directory" '{"disabled":true,"grants":{}}' \
+    "$(instance_query t1 '{disabled, grants}')"
+assert_eq "the daemon keeps a VM registered in the socket directory" false "$(instance_query t2 .disabled)"
+assert_eq "the daemon says which VM an older cog registered" 1 \
+    "$([[ "$(<"$STATE/gateway.err")" == "cog: t1 ($(instance_query t1 .id | tr -d '"')) was registered by an older cog; its gateway access is disabled; run cog rm t1 and make it again with cog new" ]] && echo 1 || echo 0)"
+assert_eq "the daemon listens for the VM that stays" 1 "$([[ -S $GATEWAY_ROOT/state/sock/github-new.sock ]] && echo 1 || echo 0)"
+run_cog gateway disable t1
+assert_eq "gateway disable of an already disabled VM fails" 1 "$RC"
+assert_contains "gateway disable of an already disabled VM says why" "VM is not active" "$OUT"
+run_cog rm t1
+assert_eq "rm refuses a VM of that name which lacks the registered socket" 1 "$RC"
+assert_contains "rm of a VM which lacks the registered socket says why" "VM is not active" "$OUT"
+assert_eq "rm of a VM which lacks the registered socket deletes nothing" 0 "$(count_in_log delete)"
+printf 't1\t%s\n' "$HOME_DIR/.lima/t1/sock/github-aa-11.sock" > "$STATE/forwards"
+run_cog rm t1
+assert_eq "rm deletes a VM that an older cog registered" 0 "$RC"
+assert_contains "rm of a VM that an older cog registered deletes it" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+assert_eq "rm of a VM that an older cog registered leaves the other VM" false "$(instance_query t2 .disabled)"
+assert_eq "rm of a VM that an older cog registered leaves the other VM's socket" 1 \
+    "$([[ -S $GATEWAY_ROOT/state/sock/github-new.sock ]] && echo 1 || echo 0)"
+run_cog rm t2
+assert_eq "rm of the registered VM succeeds" 0 "$RC"
+assert_eq "rm removes the VM's socket file" 0 "$([[ -e $GATEWAY_ROOT/state/sock/github-new.sock ]] && echo 1 || echo 0)"
+
 # --- 10. only the final shell reads cog's stdin ---
 new_case test-base
 stdin_marker
@@ -1642,7 +1673,9 @@ for umask_value in 022 000 077; do
     assert_eq "new succeeds under umask $umask_value" 0 "$RC"
     assert_eq "the gateway's state under umask $umask_value is private" "" "$(tree_violations "$GATEWAY_ROOT/state")"
     assert_eq "the gateway's secrets under umask $umask_value are private" "" "$(tree_violations "$GATEWAY_ROOT/secrets")"
-    assert_eq "the VM's socket directory under umask $umask_value is private" "" "$(tree_violations "$HOME_DIR/.lima/t1/sock")"
+    assert_eq "the socket directory under umask $umask_value is private" "" "$(tree_violations "$GATEWAY_ROOT/state/sock")"
+    assert_eq "the socket directory under umask $umask_value holds the VM's socket" 1 \
+        "$([[ -d $GATEWAY_ROOT/state/sock && -S "$(instance_query t1 .socket | tr -d '"')" ]] && echo 1 || echo 0)"
     assert_eq "the state directory holds the database and the admin socket under umask $umask_value" 1 \
         "$([[ -s $GATEWAY_ROOT/state/state.sqlite && -S $GATEWAY_ROOT/state/admin.sock ]] && echo 1 || echo 0)"
 
@@ -1692,7 +1725,7 @@ new_signal_stage() {
 for entry in HUP:129 INT:130 TERM:143; do
     signal=${entry%%:*}
     expected=${entry#*:}
-    new_signal_stage "$signal" "$expected" "after the clone" "{{.Dir}} t1" 0 --repo shields/dotfiles
+    new_signal_stage "$signal" "$expected" "while the Lima config is edited" "edit --tty=false --set" 1 --repo shields/dotfiles
     new_signal_stage "$signal" "$expected" "after the registration" "start --tty=false t1" 1 --repo shields/dotfiles
     new_signal_stage "$signal" "$expected" "during the model gateway wiring" "setup-model-gateway" 1 --repo shields/other
     new_signal_stage "$signal" "$expected" "during the Claude placeholder install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" 1 --repo shields/other

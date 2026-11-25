@@ -14,10 +14,14 @@
 
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import http from "node:http";
@@ -84,12 +88,14 @@ function authorization(
 test("locations come from COG_ROOT, else from HOME", () => {
   assert.deepEqual(locations({ COG_ROOT: "/r" }), {
     state: "/r/state",
+    sockets: "/r/state/sock",
     secrets: "/r/secrets",
     admin: "/r/state/admin.sock",
     pool: "/r/secrets/claude-pool",
   });
   assert.deepEqual(locations({ HOME: "/h" }), {
     state: "/h/.local/state/cog",
+    sockets: "/h/.local/state/cog/sock",
     secrets: "/h/.config/secrets/cog",
     admin: "/h/.local/state/cog/admin.sock",
     pool: "/h/.config/secrets/cog/claude-pool",
@@ -128,26 +134,21 @@ test("the state refuses the configured base as well as cog-base", () => {
   );
 });
 
-test("register checks the directory before it touches anything", async () => {
+test("register checks the socket path before it touches anything", async () => {
   const directory = root();
-  const result = control(directory);
+  const result = control(path.join(directory, "x".repeat(120)));
   await assert.rejects(
-    result.register("lima:t1", "relative/dir"),
-    /Lima instance directory must be absolute/,
+    result.register("lima:t1"),
+    /the state directory is too long for a Unix socket/,
   );
-  await assert.rejects(
-    result.register("lima:t1", `/${"x".repeat(120)}`),
-    /VM path is too long for a Unix socket/,
-  );
-  assert.equal(existsSync(path.join(directory, "state")), false);
+  assert.deepEqual(readdirSync(directory), []);
 });
 
 test("register is undone when the daemon cannot be told", async () => {
   const directory = root();
-  const lima = path.join(directory, "lima");
-  mkdirSync(lima, { recursive: true });
   const result = control(directory);
-  await assert.rejects(result.register("lima:t1", lima));
+  await assert.rejects(result.register("lima:t1"));
+  assert.equal(statSync(result.location.sockets).mode & 0o777, 0o700);
   assert.equal(result.state.byName("lima:t1"), null);
   assert.deepEqual(result.state.active(), []);
   const [row] = result.state.db
@@ -155,7 +156,8 @@ test("register is undone when the daemon cannot be told", async () => {
     .all() as unknown as { id: string; socket: string; disabled: number }[];
   assert.ok(row);
   assert.equal(row.disabled, 1);
-  assert.match(row.socket, /\/lima\/sock\/github-[0-9a-f-]{36}\.sock$/);
+  assert.equal(path.dirname(row.socket), result.location.sockets);
+  assert.match(path.basename(row.socket), /^github-[0-9a-f-]{36}\.sock$/);
   assert.deepEqual(
     result.state
       .events(row.id)
@@ -526,4 +528,101 @@ test("pool shows no field that the daemon added", async () => {
   });
   const answer = await control(directory).pool();
   assert.ok(!JSON.stringify(answer).includes("extra"));
+});
+
+test("the socket directory is made private and must be a real directory", () => {
+  const directory = root();
+  const result = control(directory);
+  mkdirSync(result.location.state, { recursive: true });
+  result.ensureSocketDirectory();
+  assert.equal(statSync(result.location.sockets).mode & 0o777, 0o700);
+  chmodSync(result.location.sockets, 0o755);
+  result.ensureSocketDirectory();
+  assert.equal(statSync(result.location.sockets).mode & 0o777, 0o700);
+  rmSync(result.location.sockets, { recursive: true });
+  symlinkSync(directory, result.location.sockets);
+  assert.throws(() => {
+    result.ensureSocketDirectory();
+  }, /is not a directory/);
+});
+
+test("registrations outside the socket directory are disabled and the rest stay", () => {
+  const directory = root();
+  const result = control(directory);
+  mkdirSync(result.location.sockets, { recursive: true });
+  const inside = result.state.register(
+    "lima:inside",
+    path.join(result.location.sockets, "github-aa.sock"),
+    "tester",
+  );
+  const old = result.state.register(
+    "lima:old",
+    path.join(directory, "lima", "old", "sock", "github-bb.sock"),
+    "tester",
+  );
+  const nested = result.state.register(
+    "lima:nested",
+    path.join(result.location.sockets, "sub", "github-cc.sock"),
+    "tester",
+  );
+  const disabled = result.disableOutsideSocketDirectory();
+  assert.deepEqual(
+    disabled.map((instance) => instance.name).toSorted(compareCodeUnits),
+    ["lima:nested", "lima:old"],
+  );
+  assert.equal(result.state.byId(old.id)?.disabled, true);
+  assert.equal(result.state.byId(nested.id)?.disabled, true);
+  assert.equal(result.state.byId(inside.id)?.disabled, false);
+  assert.deepEqual(result.state.grants(old.id), {});
+  assert.deepEqual(
+    result.state
+      .events(old.id)
+      .map((event) => JSON.stringify(event.changes))
+      .toSorted(compareCodeUnits),
+    [
+      JSON.stringify({ disabled: true, removed: {} }),
+      JSON.stringify({ registered: true }),
+    ],
+  );
+  assert.deepEqual(result.disableOutsideSocketDirectory(), []);
+});
+
+test("stale sockets are removed and nothing else is", () => {
+  const directory = root();
+  const result = control(directory);
+  const { sockets } = result.location;
+  mkdirSync(sockets, { recursive: true });
+  const kept = path.join(sockets, "github-aa-11.sock");
+  result.state.register("lima:kept", kept, "tester");
+  const stale = path.join(sockets, "github-bb-22.sock");
+  const folder = path.join(sockets, "github-cc-33.sock");
+  const others = [
+    "notes.txt",
+    "github-aa-11.sock.bak",
+    "github-ZZ.sock",
+    "admin.sock",
+  ].map((name) => path.join(sockets, name));
+  for (const file of [kept, stale, ...others]) {
+    writeFileSync(file, "");
+  }
+  mkdirSync(folder);
+  assert.deepEqual(result.removeStaleSockets(), [stale]);
+  assert.deepEqual(
+    readdirSync(sockets).toSorted(compareCodeUnits),
+    [kept, folder, ...others]
+      .map((file) => path.basename(file))
+      .toSorted(compareCodeUnits),
+  );
+});
+
+test("a disabled registration's socket counts as stale", () => {
+  const directory = root();
+  const result = control(directory);
+  const { sockets } = result.location;
+  mkdirSync(sockets, { recursive: true });
+  const file = path.join(sockets, "github-aa-11.sock");
+  result.state.register("lima:gone", file, "tester");
+  result.state.disable("lima:gone", "tester");
+  writeFileSync(file, "");
+  assert.deepEqual(result.removeStaleSockets(), [file]);
 });

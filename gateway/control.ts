@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { randomUUID } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +41,7 @@ export type Env = Readonly<Record<string, string | undefined>>;
 
 export interface Locations {
   state: string;
+  sockets: string;
   secrets: string;
   admin: string;
   pool: string;
@@ -51,6 +53,7 @@ export function locations(env: Env): Locations {
   if (root) {
     return {
       state: path.join(root, "state"),
+      sockets: path.join(root, "state", "sock"),
       secrets: path.join(root, "secrets"),
       admin: path.join(root, "state", "admin.sock"),
       pool: path.join(root, "secrets", "claude-pool"),
@@ -64,6 +67,7 @@ export function locations(env: Env): Locations {
   const secrets = path.join(home, ".config", "secrets", "cog");
   return {
     state,
+    sockets: path.join(state, "sock"),
     secrets,
     admin: path.join(state, "admin.sock"),
     pool: path.join(secrets, "claude-pool"),
@@ -287,6 +291,8 @@ function parsePoolStatus(text: string): PoolStatus {
   };
 }
 
+export const socketName = /^github-[0-9a-f-]+\.sock$/;
+
 export type LogRow =
   (AccessLog & { kind: "request" }) | (PolicyEvent & { kind: "policy" });
 
@@ -352,21 +358,65 @@ export class Control {
     return instance;
   }
 
+  ensureSocketDirectory(): void {
+    const directory = this.location.sockets;
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (!lstatSync(directory).isDirectory()) {
+      throw new Error(`${directory} is not a directory`);
+    }
+    chmodSync(directory, 0o700);
+  }
+
+  // The daemon's profile lets it listen only in the socket directory.
+  disableOutsideSocketDirectory(): Instance[] {
+    const outside = this.state
+      .active()
+      .filter(
+        (instance) => path.dirname(instance.socket) !== this.location.sockets,
+      );
+    for (const instance of outside) {
+      this.state.disable(instance.name, this.actor);
+    }
+    return outside;
+  }
+
+  // The runtime removes a socket when its listener closes, so only a daemon
+  // that was killed leaves one behind.
+  removeStaleSockets(): string[] {
+    const wanted = new Set(
+      this.state
+        .active()
+        .filter(
+          (instance) => path.dirname(instance.socket) === this.location.sockets,
+        )
+        .map((instance) => path.basename(instance.socket)),
+    );
+    const removed: string[] = [];
+    for (const entry of readdirSync(this.location.sockets)) {
+      if (!socketName.test(entry) || wanted.has(entry)) {
+        continue;
+      }
+      const file = path.join(this.location.sockets, entry);
+      if (!lstatSync(file).isDirectory()) {
+        rmSync(file);
+        removed.push(file);
+      }
+    }
+    return removed;
+  }
+
   // The daemon must listen on the VM's socket before the VM starts, so the
   // registration is undone when the daemon cannot be told.
-  async register(name: string, limaDirectory: string): Promise<Instance> {
-    if (!path.isAbsolute(limaDirectory)) {
-      throw new Error("Lima instance directory must be absolute");
-    }
-    ensureCertificates(this.location.secrets);
+  async register(name: string): Promise<Instance> {
     const socket = path.join(
-      limaDirectory,
-      "sock",
+      this.location.sockets,
       `github-${randomUUID()}.sock`,
     );
     if (Buffer.byteLength(socket) > 100) {
-      throw new Error("VM path is too long for a Unix socket");
+      throw new Error("the state directory is too long for a Unix socket");
     }
+    ensureCertificates(this.location.secrets);
+    this.ensureSocketDirectory();
     const instance = this.state.register(name, socket, this.actor);
     try {
       await this.sync();
