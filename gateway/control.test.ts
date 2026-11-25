@@ -13,12 +13,15 @@
 // limitations under the License.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -29,6 +32,9 @@ import net from "node:net";
 import path from "node:path";
 import { onTestFinished, test } from "bun:test";
 import YAML from "yaml";
+import { loadConfig } from "../cog/config.ts";
+import { AppAuth } from "./auth.ts";
+import { ensureCertificates } from "./cert.ts";
 import {
   Control,
   controlOptions,
@@ -36,8 +42,10 @@ import {
   parseEdit,
   policyDocument,
   RegistrationFailedHere,
+  socketName,
 } from "./control.ts";
 import { compareCodeUnits, type Grant } from "./policy.ts";
+import { State } from "./state.ts";
 
 const read: Grant = { read: true, pushCogBranches: false };
 const cog: Grant = { read: true, pushCogBranches: true };
@@ -779,3 +787,285 @@ test.each([
     await assert.rejects(control(directory).fireworksKey(), message);
   },
 );
+
+// gateway.sb names the files that the daemon uses by pattern, and an
+// unmatched name is an EPERM in production, which Linux CI cannot show.
+const profile = readFileSync(
+  path.join(import.meta.dirname, "gateway.sb"),
+  "utf8",
+);
+
+function topLevelForms(text: string): string[] {
+  const code = text.replaceAll(/;.*$/gmu, "");
+  const forms: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (const token of code.matchAll(/"(?:[^"\\]|\\.)*"|[()]/gu)) {
+    switch (token[0]) {
+      case "(": {
+        if (depth === 0) {
+          start = token.index;
+        }
+        depth++;
+        break;
+      }
+      case ")": {
+        depth--;
+        if (depth === 0) {
+          forms.push(code.slice(start, token.index + 1));
+        }
+        break;
+      }
+      default: {
+        break;
+      }
+    }
+  }
+  return forms;
+}
+
+function profilePatterns(
+  head: string,
+  parameter: string,
+  directory: string,
+): RegExp[] {
+  const escaped = directory.replaceAll(/[$()*+.?[\\\]^{|}]/gu, String.raw`\$&`);
+  return topLevelForms(profile)
+    .filter((form) => form.startsWith(head))
+    .flatMap((form) =>
+      [
+        ...form.matchAll(
+          /\(regex \(string-append "\^" \(regex-quote \(param "(\w+)"\)\) "((?:[^"\\]|\\.)*)"\)\)/gu,
+        ),
+      ].filter((match) => match[1] === parameter),
+    )
+    .map(
+      (match) =>
+        new RegExp(
+          `^${escaped}${(match[2] ?? "").replaceAll("\\\\", "\\")}`,
+          "u",
+        ),
+    );
+}
+
+// The last matching rule wins, and the deny follows the allows it narrows.
+function permitted(
+  parameter: string,
+  directory: string,
+  file: string,
+): boolean {
+  const allowed = profilePatterns(
+    "(allow file-read* file-write*",
+    parameter,
+    directory,
+  );
+  const denied = profilePatterns(
+    "(deny file-read* file-write*",
+    parameter,
+    directory,
+  );
+  return (
+    allowed.some((pattern) => pattern.test(file)) &&
+    denied.every((pattern) => !pattern.test(file))
+  );
+}
+
+test("the profile admits the certificate files and work directories that the daemon makes", () => {
+  const directory = root();
+  const shims = root();
+  const log = path.join(shims, "listing");
+  const real = spawnSync("sh", ["-c", "command -v openssl"], {
+    encoding: "utf8",
+  }).stdout.trim();
+  writeFileSync(
+    path.join(shims, "openssl"),
+    `#!/bin/sh\nfind "${directory}" >>"${log}"\n"${real}" "$@"\nstatus=$?\nfind "${directory}" >>"${log}"\nexit $status\n`,
+    { mode: 0o700 },
+  );
+  const originalPath = process.env.PATH;
+  onTestFinished(() => {
+    process.env.PATH = originalPath;
+  });
+  process.env.PATH = `${shims}:${originalPath ?? ""}`;
+  ensureCertificates(directory);
+  const listed = new Set(
+    readFileSync(log, "utf8")
+      .split("\n")
+      .filter((file) => file !== "" && file !== directory),
+  );
+  for (const name of readdirSync(directory)) {
+    listed.add(path.join(directory, name));
+  }
+  assert.ok([...listed].includes(`${directory}/.lock`));
+  assert.ok([...listed].some((file) => /\/\.issue-[^/]+\/[^/]+$/u.test(file)));
+  assert.ok(listed.has(`${directory}/ca.srl`));
+  for (const file of listed) {
+    assert.ok(
+      permitted("SECRETS", directory, file),
+      `${file} is not permitted`,
+    );
+  }
+});
+
+interface Internals {
+  file: (repository: string) => string;
+  locked: (repository: string, work: () => void) => Promise<void>;
+  save: (record: Record<string, unknown>) => void;
+}
+
+test("the profile admits the authorization records, temporaries and locks that the daemon makes", async () => {
+  const directory = root();
+  const auth = new AppAuth(directory) as unknown as Internals;
+  const now = Math.floor(Date.now() / 1000);
+  const names = new Set<string>();
+  for (const repository of [
+    "shields/cog",
+    "a/b",
+    `${"o".repeat(39)}/${"r".repeat(100)}`,
+    "a.b_c-d/e.f_g-h",
+  ]) {
+    const file = auth.file(repository);
+    names.add(file);
+    await auth.locked(repository, () => {
+      const lock = `${file}.lock`;
+      assert.ok(readdirSync(directory).includes(path.basename(lock)));
+      names.add(lock);
+    });
+    mkdirSync(file);
+    let temporary = "";
+    try {
+      auth.save({
+        client_id: "Iv-test",
+        repository,
+        access_token: "ghu_old",
+        access_expires_at: now,
+        refresh_token: "ghr_old",
+        refresh_expires_at: now,
+        web_url: "https://github.com",
+        api_url: "https://api.github.com",
+      });
+    } catch (error) {
+      temporary = (error as { path?: string }).path ?? "";
+    }
+    assert.match(temporary, /\.json\.\d+\.\d+\.tmp$/u);
+    names.add(temporary);
+    rmSync(file, { recursive: true });
+  }
+  for (const file of names) {
+    assert.ok(
+      permitted("SECRETS", directory, file),
+      `${file} is not permitted`,
+    );
+  }
+});
+
+test("the profile refuses the files that only the CLI uses", () => {
+  const directory = "/secrets";
+  const tailscale = path.basename(loadConfig({ HOME: "/h" }).tailscaleFile);
+  assert.equal(tailscale, "tailscale-oauth.json");
+  for (const name of [
+    tailscale,
+    `${tailscale}.lock`,
+    `${tailscale}.1.2.tmp`,
+    "cloudflare-admin-token",
+    ".cloudflare-admin-token.AbC123",
+    "notes.txt",
+    "claude-pool/new",
+  ]) {
+    assert.ok(
+      !permitted("SECRETS", directory, path.join(directory, name)),
+      `${name} is permitted`,
+    );
+  }
+  assert.ok(
+    permitted(
+      "SECRETS",
+      directory,
+      path.join(directory, `${Buffer.from("o/r").toString("base64url")}.json`),
+    ),
+  );
+});
+
+test("the profile admits the database files and the socket names that the gateway makes", () => {
+  const directory = root();
+  const state = new State(directory);
+  state.prune();
+  try {
+    const names = readdirSync(directory);
+    assert.ok(names.includes("state.sqlite-wal"));
+    for (const name of [...names, "state.sqlite-journal"]) {
+      assert.ok(
+        permitted("STATE", directory, path.join(directory, name)),
+        `${name} is not permitted`,
+      );
+    }
+  } finally {
+    state.close();
+  }
+  const socket = `github-${randomUUID()}.sock`;
+  assert.ok(socketName.test(socket));
+  assert.ok(
+    permitted("STATE", directory, path.join(directory, "sock", socket)),
+  );
+  const binds = profilePatterns(
+    "(allow network-bind network-inbound",
+    "STATE",
+    directory,
+  );
+  assert.ok(
+    binds.some((pattern) => pattern.test(`${directory}/sock/${socket}`)),
+  );
+  for (const name of ["sock/other.sock", "sock/github-ab.sock.txt", "evil"]) {
+    assert.ok(
+      binds.every((pattern) => !pattern.test(`${directory}/${name}`)),
+      `${name} may be bound`,
+    );
+  }
+  assert.ok(
+    topLevelForms(profile).some(
+      (form) =>
+        form.includes(
+          '(literal (string-append (param "STATE") "/admin.sock"))',
+        ) && form.startsWith("(allow network-bind network-inbound"),
+    ),
+  );
+  for (const name of [
+    "sock/other.sock",
+    "sock/github-ab.sock.txt",
+    "evil",
+    "state.sqlite2",
+  ]) {
+    assert.ok(
+      !permitted("STATE", directory, path.join(directory, name)),
+      `${name} is permitted`,
+    );
+  }
+});
+
+test("the profile's literal paths are the ones that the code names", () => {
+  const where = locations({ COG_ROOT: "/r" });
+  assert.equal(path.relative(where.state, where.admin), "admin.sock");
+  assert.equal(path.relative(where.state, where.sockets), "sock");
+  assert.equal(path.relative(where.secrets, where.pool), "claude-pool");
+  const forms = topLevelForms(profile).map((form) =>
+    form.replaceAll(/\s+/gu, " "),
+  );
+  const admin = '(literal (string-append (param "STATE") "/admin.sock"))';
+  for (const head of [
+    "(allow file-read* file-write*",
+    "(allow network-bind network-inbound",
+  ]) {
+    assert.ok(
+      forms.some((form) => form.startsWith(head) && form.includes(admin)),
+      `${head} names the admin socket`,
+    );
+  }
+  for (const rule of [
+    '(allow file-read* file-write-mode file-write-create (literal (string-append (param "STATE") "/sock")))',
+    '(allow file-read* file-write-mode (literal (param "STATE")) (literal (param "SECRETS")))',
+    '(allow file-read* (subpath (string-append (param "SECRETS") "/claude-pool")))',
+    '(allow file-read* (literal (param "FIREWORKS_KEY")))',
+  ]) {
+    assert.ok(forms.includes(rule), rule);
+  }
+});

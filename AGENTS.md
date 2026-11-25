@@ -215,19 +215,54 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   launchd kills it, and `install.sh` waits ten seconds longer than that for the
   label to go.
   `gateway/gateway.sb` takes exactly the parameters BINARY, STATE, SECRETS and
-  FIREWORKS_KEY through `(param "NAME")`, and the plist passes the same set. It
-  allows listening only on `STATE/sock/github-<hex and dashes>.sock` and
-  `STATE/admin.sock`, and the daemon never touches the Lima directory, which may
-  be on an external volume. Seatbelt matches resolved paths, so `install.sh`
-  resolves each value at install time (the Fireworks key link's final target, or
-  its default name under the resolved directory when missing) and creates the
-  missing state and secrets directories with mode 700, since the gateway cannot
-  create parents. The profile ends with `(deny file-link file-clone)`, which a
-  version 1 profile leaves allowed under `(deny default)` and the gateway never
-  uses. A version 1 profile leaves about 40 other operations allowed too
-  (`process-info*`, `mach-task-name`, `iokit-open-service`, `nvram*`,
-  `darwin-notification-post`); denying them needs a check on a Mac that the
-  gateway still starts and serves. Before it unloads the running agent,
+  FIREWORKS_KEY through `(param "NAME")`, and the plist passes the same set. The
+  daemon never touches the Lima directory, which may be on an external volume.
+  Seatbelt matches resolved paths, so `install.sh` resolves each value at
+  install time (the Fireworks key link's final target, or its default name under
+  the resolved directory when missing) and creates the missing state and
+  secrets directories with mode 700, since the gateway cannot create parents.
+  The profile names what the daemon may touch and nothing else. In SECRETS:
+  `ca.pem`, `ca-key.pem`, `github.pem`, `github-key.pem` and `ca.srl`; `.lock`
+  and `.issue-XXXXXX` with the files in it (`gateway/cert.ts`); the records
+  `BASE64URL.json` with `.json.PID.MS.tmp` and `.json.lock`
+  (`gateway/auth.ts`); `claude-pool/` read-only. The record pattern also fits
+  `tailscale-oauth.json`, which only the CLI uses, so a deny for it follows the
+  allow. The directories STATE, `STATE/sock` and SECRETS themselves are allowed
+  to be listed and given a mode (`STATE/sock` also to be made), since the
+  daemon `chmod`s them and fsyncs them. In STATE: `state.sqlite` with `-wal`,
+  `-shm` and `-journal`, `sock/github-<hex and dashes>.sock` and `admin.sock`.
+  A new file that the daemon makes in SECRETS or STATE needs a rule in the
+  profile and a case in the tests that match the code's names against the
+  profile (the last tests in `gateway/control.test.ts`), or it fails in
+  production with EPERM that no Linux CI run shows. The CLI is not sandboxed,
+  so a file that only it uses needs no rule, and a name that only fits the
+  record pattern needs a deny. Unreadable files give EPERM and nothing in the
+  system log (macOS 27 records no sandbox denials), so find the rule that a
+  failure needs by removing candidates from a copy of the profile and running a
+  scratch daemon under `/usr/bin/sandbox-exec` with `COG_ROOT` in a short
+  `/tmp` directory; the Bash tool's own sandbox forbids `sandbox-exec`, Unix
+  sockets and process inspection.
+  The profile reads links with `(allow file-read-metadata (vnode-type SYMLINK))`
+  because the daemon opens `~/.local/state/cog`, `~/.config/secrets/cog` and
+  the Fireworks key unresolved, and the kernel reads each link on the way; with
+  no such rule a linked HOME, `~/.config`, `~/.local`, the state or secrets
+  directory, or the key breaks the daemon. A version 1 profile allows
+  some operations under `(deny default)`; the profile denies link and
+  clone, NVRAM, IOKit properties and services, Darwin notification posting
+  (and the lookup of `com.apple.system.notification_center`, which is what
+  stops `notify_post`), `process-info*` except the daemon's own `pidinfo`, and
+  `sysctl-read` of `kern.proc*`, which is what stops `KERN_PROCARGS2` and
+  `KERN_PROC_ALL` from showing other processes' arguments, environment and
+  list. Still allowed are, among others, `file-test-existence`, `file-lock`,
+  `mach-bootstrap`, `mach-task-special-port*`, `necp-client-open`,
+  `socket-ioctl`, `system-privilege`, `system-mac-syscall`,
+  `process-codesigning`, `process-info-codesignature` (which `process-info*`
+  does not cover) and the `syscall-*` operations; the profile cannot name
+  a remote host, so port 443 anywhere and any DNS name stay open, and it cannot
+  hide the daemon's own database, CA key and tokens from the daemon. The
+  listeners are allowed only on `STATE/sock/github-<hex and dashes>.sock` and
+  `STATE/admin.sock`, and outbound connections to the Mac's own addresses are
+  denied after the allow of port 443. Before it unloads the running agent,
   `install.sh` runs the staged binary's `help` under the staged profile from
   `/`. A change to the profile or to the paths it names needs the matching
   change in `install.sh` and the README.
@@ -339,6 +374,11 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   predecessor and a leftover `.previous`. The stub scripts run
   under `/bin/bash` 3.2 on a Mac, where `set -e` ignores a failing `[[ ]]`, so
   each guard ends in `|| exit 1`.
+  It also reads the profile's text, since CI cannot run it: it starts from
+  `(deny default)` and `system.sb`, a list pins every allow, no rule grants all
+  of STATE or SECRETS, the deny for `tailscale-oauth.json` follows the
+  authorization-record allow, `claude-pool` is read-only, and the process,
+  NVRAM, IOKit, notification and local-address denies are present and ordered.
 - `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
   refresh, live grants, audit and the HTTPS Unix socket. `cog/*.test.ts` cover
   the CLI and foundation modules, including a real `gateway serve` that

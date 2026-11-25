@@ -30,27 +30,43 @@ checkout. The executable embeds the Lima template, guest scripts and stager.
 It does not load `.env` or `bunfig.toml` at runtime.
 
 The gateway runs under a Seatbelt profile (`gateway/gateway.sb`, installed as
-`~/.local/share/cog/gateway.sb`) through `sandbox-exec`. It may read and write
-only `~/.local/state/cog` and `~/.config/secrets/cog`, listen only on the
-admin socket and on one socket per VM in `~/.local/state/cog/sock`, read its
-own executable, `openssl`, the system libraries and
-`~/.config/secrets/FIREWORKS_API_KEY`, and connect only to port 443 and the
-name resolver. It cannot read the rest of your home directory, run any other
-program, or connect to other ports or sockets. It never touches the Lima
-directory: the sockets are on the internal disk because the Lima directory may
-be on an external volume, where macOS asks for consent to access files on a
-removable volume for each newly built gateway, and the gateway waits for the
-answer before it can listen. Apple deprecates `sandbox-exec` but it works. The
-installer resolves every path in the profile to a real path and creates the
-state and secrets directories (mode 700) when they are missing, so the profile
-is fixed at install: moving the place the `FIREWORKS_API_KEY` link points to
-needs `./install.sh` again. The profile
-does not protect the token files from other programs running as you, and it
-leaves the Tailscale and Cloudflare credentials that only the CLI reads, which
-share the secrets directory, readable and writable by the gateway. Before it
-replaces the running gateway, the installer runs the new executable's `help`
-under the profile and stops if that fails; that checks the profile and the
-executable, not what the gateway does.
+`~/.local/share/cog/gateway.sb`) through `sandbox-exec`. In
+`~/.config/secrets/cog` it may read and write only the four certificate files
+and `ca.srl`, the certificate lock and work directories, and the GitHub
+authorization records with their temporary and lock names, and read
+`claude-pool/`. In `~/.local/state/cog` it may read and write only
+`state.sqlite` and its `-wal`, `-shm` and `-journal` files, the VM sockets in
+`sock/` and `admin.sock`. The Tailscale and Cloudflare credentials that only
+the CLI uses sit in the same secrets directory and are out of its reach, though
+it can list the names in the two directories. It listens only on those sockets
+and reads `~/.config/secrets/FIREWORKS_API_KEY`, the `openssl` configuration
+and the system libraries. It runs only itself and `openssl`, and connects only
+to port 443 on other hosts, never on the Mac's own addresses, and to the name
+resolver. It cannot read the rest of your home directory, stat anything
+outside those paths except a symbolic link, run any other program, connect to
+other ports or sockets, list other processes or read their arguments and
+environment, read NVRAM variables or the serial number, or post
+notifications. It never touches the Lima directory: the sockets are on the
+internal disk because the Lima directory may be on an external volume, where
+macOS asks for consent to access files on a removable volume for each newly
+built gateway, and the gateway waits for the answer before it can listen.
+
+Seatbelt cannot name a host, so a compromised gateway can still connect to any
+remote host on port 443 and resolve any name, and it can still use what it
+owns: the database, the CA key, the GitHub tokens, the Claude pool and the
+Fireworks key. The profile does not protect those files from other programs
+running as you. It also leaves some operations allowed that a version 1
+profile allows under `(deny default)` and the daemon's own code may need, such
+as testing whether a path exists, querying the code signature of a process and
+the system calls of its own process.
+Apple deprecates `sandbox-exec` but it works. The installer resolves every
+path in the profile to a real path and creates the state and secrets
+directories (mode 700) when they are missing, so the profile is fixed at
+install: moving the place that the `FIREWORKS_API_KEY` link, or a link on the
+way to any path in the profile such as `~/.config`, points to needs
+`./install.sh` again. Before it replaces the running gateway, the
+installer runs the new executable's `help` under the profile and stops if that
+fails; that checks the profile and the executable, not what the gateway does.
 
 Before the installer replaces the running gateway, it keeps the installed
 binary, profile and plist as `.previous` files beside them. If the new gateway
@@ -89,9 +105,10 @@ its plist, binary, profile and link. It keeps logs, `~/.local/state/cog`,
 The Mac needs `limactl`, `git`, `tar`, `gitleaks` 8.19 or newer, `jq`, `socat`,
 `gh`, `bun` and `openssl` (macOS ships one). Public checkouts work without a
 `gh` login. For GitHub App authorization, log in to `gh` on the Mac.
-The gateway uses `gh api repos/OWNER/REPO --jq .id` when
-`cog new` needs authorization for a private repository, when `cog grant` needs
-authorization, and for `cog authorize` and `cog cloud authorize`. The Homebrew
+The cog command, never the gateway daemon, runs
+`gh api repos/OWNER/REPO --jq .id` when `cog new` needs authorization for a
+private repository, when `cog grant` needs authorization, and for
+`cog authorize` and `cog cloud authorize`. The Homebrew
 modules in dotfiles (`brew/*.Brewfile` there) install them; cog installs none
 itself, because `brew bundle cleanup` in dotfiles' `provision.sh` would remove
 it again. Run `make setup` for the dependencies of the tests.
@@ -611,6 +628,12 @@ deploy or an agent image build. After installing, run `cog base` and
   `~/Library/Logs/dev.msrl.cog.gateway.err` shows no `EPERM` line, and no
   `ECONNREFUSED` for a host that is up, which is how Bun reports a connection
   that the profile denies.
+  The system log records no sandbox denials on macOS 27, so a profile that is
+  too tight shows only as that `EPERM`. A private repository is the check that
+  the authorization record's temporary file and lock directory are allowed:
+  `cog grant t1 OWNER/PRIVATE`, then fetch in the VM after the access token
+  has expired (it lasts 8 hours), which makes the gateway refresh it and write
+  the record again.
 - `zsh -ic exit` prints nothing, `git --version` is 2.54 or later, and
   `git hook list pre-commit` lists gitleaks.
 - `stat /usr/local/lib/cog` shows it root-owned and not writable by group or

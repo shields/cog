@@ -447,10 +447,184 @@ def test_profile_parameters_match_the_plist(installation: Installation) -> None:
     } == used
 
 
+def profile_rules() -> list[str]:
+    text = (REPO / "gateway/gateway.sb").read_text()
+    rules: list[str] = []
+    depth = 0
+    start = 0
+    in_string = False
+    in_comment = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if in_comment:
+            in_comment = character != "\n"
+        elif in_string:
+            if character == "\\":
+                index += 1
+            elif character == '"':
+                in_string = False
+        elif character == ";":
+            in_comment = True
+        elif character == '"':
+            in_string = True
+        elif character == "(":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                rules.append(" ".join(text[start : index + 1].split()))
+        index += 1
+    return rules
+
+
 def test_profile_denies_the_operations_that_deny_default_leaves_open() -> None:
-    profile = (REPO / "gateway/gateway.sb").read_text()
-    assert "(version 1)" in profile
-    assert "(deny file-link file-clone)" in profile
+    rules = profile_rules()
+    assert "(version 1)" in rules
+    assert "(deny file-link file-clone)" in rules
+    hardware = [
+        "nvram*",
+        "iokit-get-properties",
+        "iokit-open-service",
+        "darwin-notification-post",
+    ]
+    for denied in (
+        f"(deny {' '.join(hardware)})",
+        '(deny mach-lookup (global-name "com.apple.system.notification_center"))',
+        '(deny sysctl-read (sysctl-name-prefix "kern.proc"))',
+        "(deny process-info*)",
+        '(deny network-outbound (remote ip "localhost:*"))',
+    ):
+        assert denied in rules
+        # system.sb allows some of what is denied here, and for one operation
+        # the last matching rule wins.
+        assert rules.index(denied) > rules.index('(import "system.sb")')
+    assert "(allow process-info-pidinfo (target self))" in rules
+    # The deny of the Mac's own addresses narrows the allow of port 443.
+    assert rules.index('(allow network-outbound (remote tcp "*:443"))') < rules.index(
+        '(deny network-outbound (remote ip "localhost:*"))'
+    )
+    assert not any(re.search(r"\bfile\*", rule) for rule in rules)
+    assert "(system-network)" not in rules
+
+
+def form(*parts: str) -> str:
+    return f"({' '.join(parts)})"
+
+
+STATE = '(param "STATE")'
+SECRETS = '(param "SECRETS")'
+
+
+def regex(directory: str, tail: str) -> str:
+    return form("regex", f'(string-append "^" (regex-quote {directory}) "{tail}")')
+
+
+SOCKET = regex(STATE, r"/sock/github-[0-9a-f-]+\\.sock$")
+ADMIN = f'(literal (string-append {STATE} "/admin.sock"))'
+
+GRANTS = [
+    form("allow", "process-fork"),
+    form(
+        "allow",
+        "process-exec",
+        '(literal (param "BINARY"))',
+        '(literal "/usr/bin/openssl")',
+    ),
+    form("allow", "file-read*", '(subpath "/private/etc/ssl")'),
+    form("allow", "file-read-metadata", "(vnode-type SYMLINK)"),
+    form(
+        "allow",
+        "file-read*",
+        "file-write-mode",
+        f"(literal {STATE})",
+        f"(literal {SECRETS})",
+    ),
+    form(
+        "allow",
+        "file-read*",
+        "file-write-mode",
+        "file-write-create",
+        f'(literal (string-append {STATE} "/sock"))',
+    ),
+    form(
+        "allow",
+        "file-read*",
+        "file-write*",
+        regex(STATE, r"/state\\.sqlite(-wal|-shm|-journal)?$"),
+        SOCKET,
+        ADMIN,
+    ),
+    form(
+        "allow",
+        "file-read*",
+        "file-write*",
+        regex(SECRETS, r"/((ca|ca-key|github|github-key)\\.pem|ca\\.srl)$"),
+        regex(SECRETS, r"/\\.(lock|issue-[A-Za-z0-9]+(/[^/]+)?)$"),
+        regex(
+            SECRETS,
+            r"/[A-Za-z0-9_-]+\\.json(\\.[0-9]+\\.[0-9]+\\.tmp|\\.lock)?$",
+        ),
+    ),
+    form("allow", "file-read*", f'(subpath (string-append {SECRETS} "/claude-pool"))'),
+    form("allow", "file-read*", '(literal (param "FIREWORKS_KEY"))'),
+    form("allow", "network-bind", "network-inbound", SOCKET, ADMIN),
+    form("allow", "network-outbound", '(remote tcp "*:443")'),
+    form("allow", "network-outbound", '(literal "/private/var/run/mDNSResponder")'),
+    form(
+        "allow",
+        "mach-lookup",
+        '(global-name "com.apple.dnssd.service")',
+        '(global-name "com.apple.SystemConfiguration.DNSConfiguration")',
+    ),
+    form("allow", "process-info-pidinfo", "(target self)"),
+]
+
+
+def test_profile_starts_from_deny_default_and_grants_only_what_was_reviewed() -> None:
+    rules = profile_rules()
+    assert rules[:3] == ["(version 1)", "(deny default)", '(import "system.sb")']
+    assert [rule for rule in rules if rule.startswith("(allow")] == GRANTS
+
+
+def test_profile_does_not_grant_whole_directories() -> None:
+    rules = profile_rules()
+    assert not any(
+        re.search(r'\(subpath \(param "(STATE|SECRETS)"\)\)', rule) for rule in rules
+    )
+    assert "(allow file-read-metadata)" not in rules
+    assert [rule for rule in rules if rule.startswith("(allow file-read-metadata")] == [
+        "(allow file-read-metadata (vnode-type SYMLINK))"
+    ]
+    for rule in rules:
+        if re.search(r'\(literal \(param "(STATE|SECRETS)"\)\)', rule):
+            assert rule.startswith("(allow file-read* file-write-mode (literal")
+        if '/sock"))' in rule and "(literal (string-append" in rule:
+            assert not rule.startswith("(allow file-read* file-write*")
+    pool = [rule for rule in rules if "claude-pool" in rule]
+    assert len(pool) == 1
+    assert pool[0].startswith("(allow file-read* (subpath")
+
+
+def test_profile_denies_the_cli_credential_after_the_authorization_records() -> None:
+    rules = profile_rules()
+    records = next(
+        index
+        for index, rule in enumerate(rules)
+        if rule.startswith("(allow file-read* file-write*") and "\\.json" in rule
+    )
+    deny = next(
+        index
+        for index, rule in enumerate(rules)
+        if rule.startswith("(deny file-read* file-write*") and "tailscale-oauth" in rule
+    )
+    assert records < deny
+    assert rules[deny] == (
+        '(deny file-read* file-write* (regex (string-append "^" '
+        '(regex-quote (param "SECRETS")) "/tailscale-oauth\\\\.json")))'
+    )
 
 
 def test_validation_runs_the_staged_files(installation: Installation) -> None:
