@@ -689,6 +689,17 @@ since the gateway accepts pushes only to `cog/UUID/*`. `cog base` and
 The dotfiles README states the same contract, and `tests/test_cog_contract.py`
 there checks it from its side.
 
+Model access in a Lima guest also relies on dotfiles. Where
+`/etc/cog-github-gateway` exists, `.zshenv` exports `SSL_CERT_FILE`,
+`NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` as the system bundle, which holds
+the gateway's CA, so Claude Code trusts the gateway for `api.anthropic.com` and
+`api.fireworks.ai`. On Linux, `.zshrc` exports `CLAUDE_CODE_OAUTH_TOKEN` from
+`~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN`, where cog writes the placeholder,
+so Claude Code sends `Authorization: Bearer cog` and stays in direct mode. `cg`
+sends the content of `~/.config/secrets/FIREWORKS_API_KEY`, the placeholder
+again, as the bearer token to `https://api.fireworks.ai/inference` and no other
+credential.
+
 ## History
 
 The commits before "Move the files to their places in this repository" come

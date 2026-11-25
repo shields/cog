@@ -196,6 +196,11 @@ dotfiles reads the two markers and the shape of the settings that cog writes,
 and cog reads dotfiles' `provision.sh`, `.claude/settings.json`,
 `tools/configure_codex.py` and `~/.codex/rules/no-push.rules`. The README's "The
 contract with dotfiles" lists them, and dotfiles' README states the same.
+Model access in a Lima guest also relies on dotfiles' `.zshenv` (the CA bundle
+variables where the gateway marker exists), `.zshrc` (the export of
+`CLAUDE_CODE_OAUTH_TOKEN` from its secrets file) and `cg` (the bearer token
+from `FIREWORKS_API_KEY`), so a change to where cog writes the placeholder
+needs the same change there.
 Renaming a marker, changing what a marker holds (`cog-github-gateway` is a VM
 UUID or `cloudflare`), or changing what `throwaway.sh` and
 `configure-github-access.sh` require of the settings file (a non-empty
