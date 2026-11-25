@@ -16,6 +16,7 @@ import path from "node:path";
 import { placeholderCredential } from "../../gateway/models.ts";
 import { grantProfiles } from "../../gateway/policy.ts";
 import {
+  RegistrationFailedHere,
   socketName,
   type Control,
   type FireworksKeyStatus,
@@ -205,13 +206,6 @@ function requireLimaSocket(socket: string, directory: string): void {
   }
 }
 
-// The messages that the registration raises in this process, and that hold
-// nothing but fixed text. Any other failure is told only by the daemon's log.
-const registrationRefusals = new Set([
-  "VM is already registered",
-  "the state directory is too long for a Unix socket",
-]);
-
 function cleanupNote(text: string): void {
   try {
     note(text);
@@ -341,8 +335,8 @@ export async function newVM(
     } catch (error) {
       signals.check();
       throw new CogError(
-        error instanceof Error && registrationRefusals.has(error.message)
-          ? `cannot register ${name} with the GitHub gateway: ${error.message}`
+        error instanceof RegistrationFailedHere
+          ? `cannot register ${name} with the GitHub gateway: ${error.message.replaceAll(/\s+/g, " ")}`
           : `cannot register ${name} with the GitHub gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err`,
       );
     }

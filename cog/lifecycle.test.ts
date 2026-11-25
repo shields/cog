@@ -24,7 +24,11 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { onTestFinished, spyOn, test } from "bun:test";
-import { Control, locations } from "../gateway/control.ts";
+import {
+  Control,
+  locations,
+  RegistrationFailedHere,
+} from "../gateway/control.ts";
 import { State } from "../gateway/state.ts";
 import { grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
@@ -895,21 +899,22 @@ function registering(
   return { ...context, gateway: () => ({ ...gateway(), register }) };
 }
 
-test("new says why the gateway refuses the registration when the reason is one of its own fixed messages", async () => {
+test("new says why a registration failed when it failed in this process, on one line", async () => {
   const { calls, context } = fixture();
-  const { state, location } = context.gateway();
-  const socket = path.join(location.sockets, "github-ab-12.sock");
-  state.register("lima:vm", socket, "test");
   await assert.rejects(
     newVM(
       noSecrets,
-      registering(context, (name) =>
-        Promise.resolve(state.register(name, socket, "test")),
+      registering(context, () =>
+        Promise.reject(
+          new RegistrationFailedHere(
+            "gateway CA files are incomplete:\n  ca.pem exists without ca-key.pem",
+          ),
+        ),
       ),
     ),
     {
       message:
-        "cannot register vm with the GitHub gateway: VM is already registered",
+        "cannot register vm with the GitHub gateway: gateway CA files are incomplete: ca.pem exists without ca-key.pem",
     },
   );
   assert.deepEqual(calls.at(-1), ["remove", "vm"]);
@@ -934,13 +939,13 @@ test("new says that the socket path is too long, which only the registration fin
   );
 });
 
-test("new names the gateway's log, and shows nothing of the reason, when the registration fails in any other way", async () => {
+test("new names the gateway's log, and shows nothing of the reason, when the daemon fails the registration", async () => {
   const { context } = fixture();
   await assert.rejects(
     newVM(
       noSecrets,
       registering(context, () =>
-        Promise.reject(new Error("EACCES: permission denied, mkdir '/place'")),
+        Promise.reject(new Error("gateway administration failed")),
       ),
     ),
     {

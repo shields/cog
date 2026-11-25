@@ -1519,7 +1519,7 @@ register_vm t1
 EXTRA_ENV+=(LIMA_STUB_SNAPSHOT=delete)
 run_cog new t1 --repo shields/dotfiles
 assert_eq "a failed registration stops new" 1 "$RC"
-assert_contains "a failed registration says so" "cannot register t1 with the GitHub gateway" "$OUT"
+assert_contains "a failed registration says why" "cannot register t1 with the GitHub gateway: VM is already registered" "$OUT"
 assert_contains "a failed registration deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 assert_eq "a failed registration leaves no instance" 0 "$(grep -cx t1 "$STATE/instances" || true)"
 assert_eq "a failed registration leaves the earlier registration alone" '{"disabled":false,"revision":0}' \

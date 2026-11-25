@@ -35,6 +35,7 @@ import {
   locations,
   parseEdit,
   policyDocument,
+  RegistrationFailedHere,
 } from "./control.ts";
 import { compareCodeUnits, type Grant } from "./policy.ts";
 
@@ -137,12 +138,44 @@ test("the state refuses the configured base as well as cog-base", () => {
 test("register checks the socket path before it touches anything", async () => {
   const directory = root();
   const result = control(path.join(directory, "x".repeat(120)));
-  await assert.rejects(
-    result.register("lima:t1"),
-    /the state directory is too long for a Unix socket/,
-  );
+  await assert.rejects(result.register("lima:t1"), (error: unknown) => {
+    assert.ok(error instanceof RegistrationFailedHere);
+    assert.equal(
+      error.message,
+      "the state directory is too long for a Unix socket",
+    );
+    return true;
+  });
   assert.deepEqual(readdirSync(directory), []);
 });
+
+test("a registration that fails in this process is told apart from one that the daemon fails", async () => {
+  const directory = root();
+  const result = control(directory);
+  await assert.rejects(result.register("lima:t1"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error instanceof RegistrationFailedHere, false);
+    return true;
+  });
+  result.state.register(
+    "lima:t2",
+    path.join(result.location.sockets, "github-ab-12.sock"),
+    "tester",
+  );
+  await assert.rejects(result.register("lima:t2"), (error: unknown) => {
+    assert.ok(error instanceof RegistrationFailedHere);
+    assert.equal(error.message, "VM is already registered");
+    return true;
+  });
+  writeFileSync(path.join(result.location.secrets, "ca.pem"), "");
+  rmSync(path.join(result.location.secrets, "ca-key.pem"));
+  await assert.rejects(result.register("lima:t3"), (error: unknown) => {
+    assert.ok(error instanceof RegistrationFailedHere);
+    assert.match(error.message, /^gateway CA files are incomplete: /);
+    return true;
+  });
+  assert.equal(result.state.byName("lima:t3"), null);
+}, 60_000);
 
 test("register is undone when the daemon cannot be told", async () => {
   const directory = root();

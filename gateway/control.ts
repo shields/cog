@@ -337,6 +337,15 @@ export const socketName = /^github-[0-9a-f-]+\.sock$/;
 export type LogRow =
   (AccessLog & { kind: "request" }) | (PolicyEvent & { kind: "policy" });
 
+// A registration that fails in the caller's process, before the daemon is
+// asked for anything, so the daemon's log holds nothing about it.
+export class RegistrationFailedHere extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "RegistrationFailedHere";
+  }
+}
+
 export class Control {
   readonly location: Locations;
   readonly actor: string;
@@ -464,12 +473,20 @@ export class Control {
       this.location.sockets,
       `github-${randomUUID()}.sock`,
     );
-    if (Buffer.byteLength(socket) > 100) {
-      throw new Error("the state directory is too long for a Unix socket");
+    let instance: Instance;
+    try {
+      if (Buffer.byteLength(socket) > 100) {
+        throw new Error("the state directory is too long for a Unix socket");
+      }
+      ensureCertificates(this.location.secrets);
+      this.ensureSocketDirectory();
+      instance = this.state.register(name, socket, this.actor);
+    } catch (error) {
+      throw new RegistrationFailedHere(
+        error instanceof Error ? error.message : "unknown error",
+        { cause: error },
+      );
     }
-    ensureCertificates(this.location.secrets);
-    this.ensureSocketDirectory();
-    const instance = this.state.register(name, socket, this.actor);
     try {
       await this.sync();
     } catch (error) {

@@ -77,13 +77,15 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   contains `{{`, `%`, `$` or `:`, which Lima or ssh would read as something
   else, and a socket that is not directly in that directory or is not named
   `github-[0-9a-f-]+.sock`, and writes the absolute path as the forward's
-  `hostSocket`. It names the registration's own refusals (a VM that is
-  registered already, a socket path over 100 bytes) in its error, and points at
-  the daemon's log for any other failure. `cog gateway serve` first makes the
-  directory, disables each enabled registration whose socket is not directly
-  inside it (through `State.disable`, as `cog gateway disable` does) with one
-  stderr line per VM, and removes files there named like a socket that no
-  enabled registration owns. Bun unlinks a listener's socket file when its
+  `hostSocket`. `Control.register` raises `RegistrationFailedHere` for a
+  failure in the caller's process (the socket path's length, the certificates,
+  the socket directory, the database), and `cog new` shows that message, since
+  the daemon's log holds nothing about it; a failure of the sync that follows
+  is the daemon's, and the error points at its log. `cog gateway serve` first
+  makes the directory, disables each enabled registration whose socket is not
+  directly inside it (through `State.disable`, as `cog gateway disable` does)
+  with one stderr line per VM, and removes files there named like a socket that
+  no enabled registration owns. Bun unlinks a listener's socket file when its
   server closes, so retiring a VM and `stop()` need no removal of their own.
   Such a VM stays removable: `cog rm` of a VM whose registration is already
   disabled deletes it when the Lima VM still forwards to the socket that was
