@@ -449,8 +449,8 @@ install does not know the pool: run `./install.sh` again. One bad entry makes
 the whole pool unusable, so use these commands rather than editing the
 directory; `rm` also takes the file name of a stray entry that is not an
 account, such as a copied file. The gateway reads the directory when it starts
-and when `add`, `rm`, `cog new` or a VM's registration asks it to, so an entry
-that you fixed by hand counts after one of those.
+and when `add`, `rm`, `cog new`, `cog gateway disable` or a VM's registration
+asks it to, so an entry that you fixed by hand counts after one of those.
 
 Every `cog new` VM uses the pool, and the gateway keeps each VM on one account
 until the rate-limit headers show it near its limit. A 401 from the provider

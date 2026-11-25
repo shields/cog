@@ -265,7 +265,13 @@ function writeEntry(
     descriptor = undefined;
     io.close(written);
     io.link(temporary, entry);
-    unlinkSync(temporary);
+    try {
+      unlinkSync(temporary);
+    } catch (error) {
+      if (code(error) !== "ENOENT") {
+        throw error;
+      }
+    }
   } catch (error) {
     const unclosed = descriptor;
     if (unclosed !== undefined) {

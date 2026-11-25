@@ -226,18 +226,28 @@ export function writeSecretFile(file: string, bytes: Uint8Array): void {
     fchmodSync(descriptor, 0o600);
     writeAll(descriptor, bytes);
     fsyncSync(descriptor);
-    closeSync(descriptor);
+    const written = descriptor;
     descriptor = undefined;
+    closeSync(written);
     renameSync(temporary, file);
   } catch {
-    try {
-      if (descriptor !== undefined) {
-        closeSync(descriptor);
-      }
-      rmSync(temporary, { force: true });
-    } catch {
-      // The write failed first, and its error is the one that is reported.
+    const unclosed = descriptor;
+    if (unclosed !== undefined) {
+      attempt(() => {
+        closeSync(unclosed);
+      });
     }
+    attempt(() => {
+      rmSync(temporary, { force: true });
+    });
     throw new CogError(`cannot write ${file}`);
+  }
+}
+
+function attempt(cleanup: () => void): void {
+  try {
+    cleanup();
+  } catch {
+    // The write failed first, and its error is the one that is reported.
   }
 }

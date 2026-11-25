@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import {
   chmodSync,
   existsSync,
@@ -27,7 +28,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, onTestFinished, test } from "bun:test";
+import { describe, onTestFinished, spyOn, test } from "bun:test";
 import { compareCodeUnits } from "../gateway/policy.ts";
 import { CogError } from "./errors.ts";
 import {
@@ -301,6 +302,31 @@ describe("writeSecretFile", () => {
     const bytes = Uint8Array.from([0xff, 0x00, 0x80, 0x0a]);
     writeSecretFile(file, bytes);
     assert.deepEqual(new Uint8Array(readFileSync(file)), bytes);
+  });
+
+  test("a close that fails after it released the descriptor leaves no temporary file and closes nothing twice", () => {
+    const dir = directory();
+    const file = path.join(dir, "TOKEN");
+    const close = fs.closeSync;
+    let closed = 0;
+    const closing = spyOn(fs, "closeSync").mockImplementation((descriptor) => {
+      closed += 1;
+      close(descriptor);
+      if (closed === 1) {
+        throw Object.assign(new Error(`disk ${marker}`), { code: "EIO" });
+      }
+    });
+    onTestFinished(() => {
+      closing.mockRestore();
+    });
+    assert.equal(
+      message(() => {
+        writeSecretFile(file, toBytes(marker));
+      }),
+      `cannot write ${file}`,
+    );
+    assert.equal(closed, 1);
+    assert.deepEqual(readdirSync(dir), []);
   });
 
   test("a failure leaves no temporary file, keeps the old one and quotes nothing", () => {

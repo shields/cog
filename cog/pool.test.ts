@@ -26,6 +26,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -58,6 +59,7 @@ interface Captured extends PoolIo {
   linkFails: boolean;
   closeFails: boolean;
   onLink?: () => void;
+  afterLink?: (temporary: string) => void;
 }
 
 function capture(pool = ""): Captured {
@@ -81,6 +83,7 @@ function capture(pool = ""): Captured {
         throw Object.assign(new Error(`disk ${typed}`), { code: "ENOSPC" });
       }
       linkSync(existing, created);
+      captured.afterLink?.(existing);
     },
     close: (descriptor) => {
       closeSync(descriptor);
@@ -448,6 +451,20 @@ test("add removes its signal handlers after a success and after a failure", asyn
   assert.deepEqual(listeners(), before);
 });
 
+test("add that finds its temporary file gone after the link still saves the account and reloads the gateway", async () => {
+  const { pool, calls, context, io } = fixture();
+  seed(pool, { alpha });
+  io.afterLink = (temporary) => {
+    unlinkSync(temporary);
+  };
+  await poolCommand(["add", "work"], context, io);
+  assert.deepEqual(readdirSync(pool).toSorted(compareCodeUnits), [
+    "alpha",
+    "work",
+  ]);
+  assert.deepEqual(calls, ["sync", "pool"]);
+});
+
 test("add that fails and is interrupted ends as interrupted and leaves no temporary", async () => {
   const { pool, context, io } = fixture();
   seed(pool, { alpha });
@@ -472,11 +489,14 @@ for (const verb of ["add", "rm"] as const) {
     const young = ".fresh.0123456789ab";
     const dot = ".other";
     const odd = ".gone.0123456789abc";
-    for (const name of [old, young, dot, odd]) {
+    const inside = ".x.gone.0123456789ab";
+    const folder = ".dir.0123456789ab";
+    for (const name of [old, young, dot, odd, inside]) {
       writeFileSync(path.join(pool, name), `${bravo}\n`, { mode: 0o600 });
     }
+    mkdirSync(path.join(pool, folder));
     const aged = (Date.now() - 90_000) / 1000;
-    for (const name of [old, dot, odd]) {
+    for (const name of [old, dot, odd, inside, folder]) {
       utimesSync(path.join(pool, name), aged, aged);
     }
     const recent = (Date.now() - 30_000) / 1000;
@@ -487,7 +507,7 @@ for (const verb of ["add", "rm"] as const) {
       io,
     );
     assert.equal(existsSync(path.join(pool, old)), false);
-    for (const name of [young, dot, odd]) {
+    for (const name of [young, dot, odd, inside, folder]) {
       assert.equal(existsSync(path.join(pool, name)), true, name);
     }
   });
