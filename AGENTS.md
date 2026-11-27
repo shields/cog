@@ -384,8 +384,9 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   `bun build` stub read from a `build` file), make `bootstrap` or `bootout`
   fail once or signal the installer during `bootout`, and check the restored
   files byte for byte, a first install, an unhealthy
-  predecessor, a leftover `.previous` and an install killed with SIGKILL or
-  SIGQUIT, which `--uninstall` must clean up. The stub scripts run
+  predecessor, a leftover `.previous` and an install killed with SIGKILL,
+  which `--uninstall` must clean up; no test sends SIGQUIT, which ends the
+  Mac's bash 3.2 but which CI's bash 5 ignores. The stub scripts run
   under `/bin/bash` 3.2 on a Mac, where `set -e` ignores a failing `[[ ]]`, so
   each guard ends in `|| exit 1`.
   It also reads the profile's text, since CI cannot run it: it starts from

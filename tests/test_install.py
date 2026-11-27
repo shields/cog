@@ -151,11 +151,10 @@ esac
 """
 
 
-# A runner that was started in the background inherits ignored SIGINT and
-# SIGQUIT, which bash cannot trap, and the interrupt tests send one of them.
+# A runner that was started in the background inherits ignored SIGINT, which
+# bash cannot trap, and the interrupt tests send it.
 def default_signals() -> None:
     _ = signal.signal(signal.SIGINT, signal.SIG_DFL)
-    _ = signal.signal(signal.SIGQUIT, signal.SIG_DFL)
 
 
 @dataclass(frozen=True)
@@ -1110,11 +1109,12 @@ def staging_directories(installation: Installation) -> list[Path]:
     ]
 
 
+# Bash 5 ignores SIGQUIT, so only SIGKILL ends the installer on every platform.
 KILLS = {
     "during the build": {"TEST_SIGNAL_AT": "build:1", "TEST_SIGNAL": "KILL"},
     "while the previous gateway stops": {
         "TEST_SIGNAL_AT": "sleep:1",
-        "TEST_SIGNAL": "QUIT",
+        "TEST_SIGNAL": "KILL",
         "TEST_UNLOAD_DELAY": "5",
     },
     "while the new agent starts": {
