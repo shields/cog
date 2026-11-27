@@ -140,8 +140,10 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   emits no `drain` on an upstream request once its response has ended, so
   `sendBody` stops waiting for one then: it destroys the upstream request and
   reads and drops the rest of the guest's upload, which keeps that connection
-  usable. An upstream that answers early and still takes the writes keeps
-  receiving the rest.
+  usable. An upstream that answers in full before the upload ends keeps
+  receiving the rest only while its request takes each write without
+  backpressure; at the first write that has to wait, the upload is cut off, and
+  the audit row still says `completed`.
   The same server answers `api.anthropic.com` and `api.fireworks.ai`, the
   third and fourth names on the leaf, for a guest whose `/etc/hosts` points
   those names at the relay. `guest/setup-github-gateway` maps the two GitHub
@@ -233,8 +235,8 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   `~/.local/state/cog` and secrets are `~/.config/secrets/cog`; `COG_ROOT` moves
   them in tests. `install.sh` installs `~/.local/share/cog/cog` by rename and
   links `~/bin/cog` to it. The generated `dev.msrl.cog.gateway` LaunchAgent
-  names that executable, not the checkout. The README describes the manual
-  migration and the unrelated Homebrew formula named `cog`.
+  names that executable, not the checkout. The README describes the unrelated
+  Homebrew formula named `cog`.
 - The LaunchAgent runs `cog gateway serve` through `/usr/bin/sandbox-exec`
   with `-f ~/.local/share/cog/gateway.sb` and one `-D NAME=VALUE` for each
   parameter, with working directory `/` (the profile allows reading it) and
@@ -242,11 +244,12 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   `/usr/bin/openssl`, the only other program the profile lets it run. The
   gateway finishes its requests in flight on SIGTERM, and a model response can
   stream for minutes, so the plist sets `ExitTimeOut` to 60 seconds, after which
-  launchd kills it, and `install.sh` waits ten seconds longer than that for the
-  label to go. `cog gateway serve` handles SIGINT and SIGTERM from its first
-  line, since the default action during the issue of the certificates would
-  leave their lock behind and block every later start. The handler runs once
-  the issue ends, so a signal that arrives while it waits for a lock that
+  launchd kills it, and `install.sh` checks for the label to go up to 700 times,
+  pausing 0.1 second after each check, so it gives up at least ten seconds after
+  launchd kills the gateway. `cog gateway serve` handles SIGINT and SIGTERM from
+  its first line, since the default action during the issue of the certificates
+  would leave their lock behind and block every later start. The handler runs
+  once the issue ends, so a signal that arrives while it waits for a lock that
   another run holds (up to 120 seconds) is bounded by `ExitTimeOut`.
   `gateway/gateway.sb` takes exactly the parameters BINARY, STATE, SECRETS and
   FIREWORKS_KEY through `(param "NAME")`, and the plist passes the same set. The
@@ -397,8 +400,9 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   registration outside `STATE/sock` with `cog rm` still deleting that VM. The
   limactl stub answers the guest shell check with `LIMA_STUB_GUEST_CHECK`;
   the cases cover its success, each missing export, empty output and a failing
-  call, with rollback and no secret in any output. The daemon answers the
-  Fireworks key state for the existing Fireworks cases.
+  call, with rollback and no secret in any output. In each Fireworks case the
+  daemon, not a stub, looks for the key file under that case's `HOME` and
+  answers `cog new`'s question about its state.
   `tests/test_setup_secrets.zsh` runs in temporary guest homes.
 - `tests/test_install.py` gives the installer a temporary home and substitutes
   launchctl, Bun, plutil and sandbox-exec. The sandbox-exec stub checks the

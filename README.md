@@ -70,14 +70,15 @@ fails; that checks the profile and the executable, not what the gateway does.
 
 Before the installer replaces the running gateway, it keeps the installed
 binary, profile and plist as `.previous` files beside them. If the new gateway
-does not report ready within 10 seconds, or any step from stopping the previous
-agent to that report fails or is interrupted (Ctrl-C while the previous gateway
-finishes its requests, for example), the installer unloads the new agent, puts
-the kept files back, starts the previous agent, waits for it to report ready,
-and exits 1 with one line that says whether the previous gateway is healthy; if
-restoring fails, it says what failed and to run `./install.sh --uninstall` and
-install again. If launchd has not released the previous agent 70 seconds after
-the stop, the installer gives up with a timeout message and restores nothing.
+does not report ready after 100 runs of `cog gateway health` (at least 10
+seconds), or any step from stopping the previous agent to that report fails or
+is interrupted (Ctrl-C while the previous gateway finishes its requests, for
+example), the installer unloads the new agent, puts the kept files back, starts
+the previous agent, waits for it to report ready, and exits 1 with one line that
+says whether the previous gateway is healthy; if restoring fails, it says what
+failed and to run `./install.sh --uninstall` and install again. If launchd has
+not released the previous agent after 700 checks (at least 70 seconds), the
+installer gives up with a timeout message and restores nothing.
 The installer ignores further interrupts while it restores. A first install has
 nothing to restore: it reports the failure and leaves the new files and agent in
 place. The rollback restores the program, the profile and the agent, not the
@@ -105,9 +106,9 @@ and cleans up its Tailscale device, and `cog logs ID` still shows its history.
 
 The installer stops the old agent first: the gateway finishes the requests in
 flight, such as a streaming model response, and exits as soon as there are
-none; launchd kills it after 60 seconds, so the installer waits up to 70
-seconds for it to go. Then it waits for `cog gateway health` to report
-readiness. If that fails, check
+none; launchd kills it after 60 seconds, so the installer checks for it to go up
+to 700 times, pausing 0.1 second after each check. Then it waits for
+`cog gateway health` to report readiness. If that fails, check
 `~/Library/Logs/dev.msrl.cog.gateway.err`; standard output goes to the adjacent
 `.out` file. `./install.sh --uninstall` unloads the agent and removes
 its plist, binary, profile and link. It keeps logs, `~/.local/state/cog`,
@@ -486,6 +487,12 @@ no request while another is free, so the hold lasts its ten minutes unless
 every account is held and a request then succeeds on it. Use only the
 inference-only token that `claude setup-token` makes, because the gateway
 forwards any path with it.
+
+Nothing in cog keeps a program that runs as you from reading the pool's files.
+On the Mac, Claude Code's sandbox keeps the commands it runs from reading
+`~/.config/secrets`, through `sandbox.filesystem.denyRead` in dotfiles'
+`.claude/settings.json`; that setting covers no other program, and cog neither
+sets nor checks it.
 
 `cog pool add` holds SIGHUP, SIGINT and SIGTERM while it writes the entry, so
 the token file is either complete (mode 600) with no temporary beside it, or
