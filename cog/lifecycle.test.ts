@@ -403,7 +403,7 @@ const wiring = (calls: unknown[][]): string[][] =>
     )
     .map((call) => (call[2] as string[]).filter((word) => word !== "sudo"));
 
-test("new wires only Fireworks when --no-claude-token is given with a key file", async () => {
+test("new wires only Fireworks when --no-claude is given with a key file", async () => {
   const { calls, context } = fireworksFixture("usable");
   await newVM(noSecrets, context);
   const lines = wiring(calls).map((argv) => argv.at(-1));
@@ -441,7 +441,7 @@ test("new checks only the CA export in the guest's shell when only Fireworks is 
 
 test("new wires nothing for Fireworks without a key file", async () => {
   const { calls, context } = fireworksFixture("missing");
-  await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+  await newVM(["vm", "--no-repo", "--no-codex"], context);
   const text = JSON.stringify(
     calls.filter(([method]) => method !== "fireworksKey"),
   );
@@ -457,7 +457,7 @@ test.each(["is empty", "holds more than one word", "is not a regular file"])(
     const { calls, context, failures } = fixture();
     failures.fireworks = { reason };
     await assert.rejects(
-      newVM(["vm", "--repo", "owner/repo", "--no-codex-auth"], context),
+      newVM(["vm", "--repo", "owner/repo", "--no-codex"], context),
       {
         message: `${context.config.fireworksKeyFile} ${reason}; fix it or remove it`,
       },
@@ -475,7 +475,7 @@ test("a Fireworks key file that the gateway cannot read says to run the installe
   const { calls, context, failures } = fixture();
   failures.fireworks = { reason: gatewayCannotRead };
   await assert.rejects(
-    newVM(["vm", "--repo", "owner/repo", "--no-codex-auth"], context),
+    newVM(["vm", "--repo", "owner/repo", "--no-codex"], context),
     {
       message: `the gateway's ${context.config.fireworksKeyFile} ${gatewayCannotRead}; if the file or link was moved since the install, run ./install.sh in the cog checkout again, otherwise fix it or remove it`,
     },
@@ -487,7 +487,7 @@ test("new fails before any VM work when the gateway cannot answer about the Fire
   const { calls, context, failures } = fixture();
   failures.fireworks = "old";
   await assert.rejects(
-    newVM(["vm", "--repo", "owner/repo", "--no-codex-auth"], context),
+    newVM(["vm", "--repo", "owner/repo", "--no-codex"], context),
     {
       message:
         "cannot read the Fireworks key state from the gateway: the running gateway is older than this cog; run ./install.sh in the cog checkout",
@@ -512,7 +512,7 @@ test("a failure of the Fireworks probe names Fireworks and rolls back", async ()
 test("a failure of the Fireworks probe with Claude wired names both models and both causes", async () => {
   const { calls, context, failures } = fireworksFixture("usable");
   failures.probeFails = "https://api.fireworks.ai/__cog__/health";
-  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
+  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex"], context), {
     message:
       "vm cannot reach Claude and Fireworks through the gateway; if cog gateway health fails, start the gateway, and a base built by an older cog lacks this wiring, so run cog base again",
   });
@@ -526,25 +526,22 @@ test("new asks no one for a Claude token and fails before any VM work when the p
   for (const [pool, message] of [
     [
       "unconfigured",
-      "the Claude pool has no account; run cog account add claude NAME, or pass --no-claude-token",
+      "the Claude pool has no account; run cog account add claude NAME, or pass --no-claude",
     ],
     [
       "unusable",
-      "the Claude pool is not usable: account work is broken; fix that (cog account rm claude NAME removes an account), or pass --no-claude-token",
+      "the Claude pool is not usable: account work is broken; fix that (cog account rm claude NAME removes an account), or pass --no-claude",
     ],
     [
       "old",
-      "cannot read the Claude pool state from the gateway: the running gateway is older than this cog; run ./install.sh in the cog checkout, or pass --no-claude-token",
+      "cannot read the Claude pool state from the gateway: the running gateway is older than this cog; run ./install.sh in the cog checkout, or pass --no-claude",
     ],
   ] as const) {
     const { calls, context, failures } = fixture();
     failures.pool = pool;
-    await assert.rejects(
-      newVM(["vm", "--no-repo", "--no-codex-auth"], context),
-      {
-        message,
-      },
-    );
+    await assert.rejects(newVM(["vm", "--no-repo", "--no-codex"], context), {
+      message,
+    });
     assert.deepEqual(calls, [
       ["health"],
       ["exists", "base"],
@@ -559,7 +556,7 @@ test("new asks no one for a Claude token and fails before any VM work when the p
 test("new stops before any VM work when the gateway cannot read the pool again", async () => {
   const { calls, context, failures } = fixture();
   failures.syncFails = true;
-  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
+  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex"], context), {
     message:
       "cannot make the gateway read the Claude pool again: gateway administration failed; see ~/Library/Logs/dev.msrl.cog.gateway.err",
   });
@@ -598,13 +595,10 @@ test.each([
   async (_, step) => {
     const { calls, context, failures } = fixture();
     failures.probeFails = step.at(-1) ?? "";
-    await assert.rejects(
-      newVM(["vm", "--no-repo", "--no-codex-auth"], context),
-      {
-        message:
-          "vm cannot reach Claude through the gateway; if cog gateway health fails, start the gateway, and a base built by an older cog lacks this wiring, so run cog base again",
-      },
-    );
+    await assert.rejects(newVM(["vm", "--no-repo", "--no-codex"], context), {
+      message:
+        "vm cannot reach Claude through the gateway; if cog gateway health fails, start the gateway, and a base built by an older cog lacks this wiring, so run cog base again",
+    });
     assert.deepEqual(calls.slice(-2), [
       ["disable", "lima:vm"],
       ["remove", "vm"],
@@ -625,7 +619,7 @@ const guestCheckCalls = (calls: readonly unknown[][]): unknown[][] =>
 
 test("new checks the guest's shell after the secrets and before it is ready", async () => {
   const { calls, context } = fixture();
-  await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+  await newVM(["vm", "--no-repo", "--no-codex"], context);
   const checks = guestCheckCalls(calls);
   assert.equal(checks.length, 1);
   const argv = checks[0]?.[2] as string[];
@@ -674,12 +668,9 @@ test.each([
   async (_, output, problem) => {
     const { calls, context, failures } = fixture();
     failures.guestCheck = output;
-    await assert.rejects(
-      newVM(["vm", "--no-repo", "--no-codex-auth"], context),
-      {
-        message: `vm's shell is not set up for Claude through the gateway: ${problem}; the base was built from dotfiles that lack this, so update the dotfiles checkout and run cog base again`,
-      },
-    );
+    await assert.rejects(newVM(["vm", "--no-repo", "--no-codex"], context), {
+      message: `vm's shell is not set up for Claude through the gateway: ${problem}; the base was built from dotfiles that lack this, so update the dotfiles checkout and run cog base again`,
+    });
     assert.deepEqual(calls.slice(-2), [
       ["disable", "lima:vm"],
       ["remove", "vm"],
@@ -690,7 +681,7 @@ test.each([
 test("a guest shell check that limactl cannot run fails new and rolls back without blaming the dotfiles", async () => {
   const { calls, context, failures } = fixture();
   failures.guestCheck = new CommandFailed("limactl shell", 255);
-  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
+  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex"], context), {
     message:
       "cannot check vm's shell for Claude through the gateway (limactl shell failed with status 255); run cog new again, and if it fails the same way, the dotfiles in the base may break zsh, so update the dotfiles checkout and run cog base again",
   });
@@ -708,7 +699,7 @@ test.each([
   "the guest check script reports a token of %p with fixed words only",
   async (token, words) => {
     const { calls, context } = fixture();
-    await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+    await newVM(["vm", "--no-repo", "--no-codex"], context);
     const script = (guestCheckCalls(calls)[0]?.[2] as string[])[4] ?? "";
     const child = Bun.spawn(["zsh", "-f", "-c", script], {
       env: { PATH: process.env.PATH ?? "", CLAUDE_CODE_OAUTH_TOKEN: token },
@@ -726,7 +717,7 @@ test.each([
 
 test("the guest check script accepts the system bundle, or a link to it, as NODE_EXTRA_CA_CERTS and nothing else", async () => {
   const { calls, context } = fixture();
-  await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+  await newVM(["vm", "--no-repo", "--no-codex"], context);
   const script = (guestCheckCalls(calls)[0]?.[2] as string[])[4] ?? "";
   const directory = home();
   const bundle = path.join(directory, "bundle.crt");
@@ -765,7 +756,7 @@ test("the guest check script accepts the system bundle, or a link to it, as NODE
 
 test("the guest check script wants the variables exported, not only set in the shell", async () => {
   const { calls, context } = fixture();
-  await newVM(["vm", "--no-repo", "--no-codex-auth"], context);
+  await newVM(["vm", "--no-repo", "--no-codex"], context);
   const script = (guestCheckCalls(calls)[0]?.[2] as string[])[4] ?? "";
   const directory = home();
   const bundle = path.join(directory, "bundle.crt");
@@ -800,12 +791,12 @@ test("the guest check script wants the variables exported, not only set in the s
 test("an unexpected error from the guest check is not reworded", async () => {
   const { context, failures } = fixture();
   failures.guestCheck = new Error("boom");
-  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
+  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex"], context), {
     message: "boom",
   });
 });
 
-test("--no-claude-token skips the pool, the wiring and the placeholder", async () => {
+test("--no-claude skips the pool, the wiring and the placeholder", async () => {
   const { calls, context, failures } = fixture();
   failures.pool = "unconfigured";
   await newVM(noSecrets, context);
@@ -817,7 +808,22 @@ test("--no-claude-token skips the pool, the wiring and the placeholder", async (
   assert.deepEqual(guestCheckCalls(calls), []);
 });
 
-const noSecrets = ["vm", "--no-repo", "--no-claude-token", "--no-codex-auth"];
+const noSecrets = ["vm", "--no-repo", "--no-claude", "--no-codex"];
+
+test("new takes --no-claude and --no-codex and refuses the longer spellings", async () => {
+  const { calls, context } = fixture();
+  for (const earlier of [
+    ["--no-claude", "token"],
+    ["--no-codex", "auth"],
+  ].map((parts) => parts.join("-"))) {
+    await assert.rejects(newVM(["vm", "--no-repo", earlier], context), {
+      message: `unknown option ${earlier}`,
+    });
+  }
+  assert.deepEqual(calls, []);
+  await newVM(["vm", "--no-repo", "--no-claude", "--no-codex"], context);
+  assert.ok(calls.length > 0);
+});
 
 test("new does not delete a VM if the name is taken during clone", async () => {
   const { calls, context } = fixture();
@@ -859,7 +865,7 @@ test.each([
             }),
         }),
       }),
-      { message: "the GitHub gateway returned an invalid socket" },
+      { message: "the gateway returned an invalid socket" },
     );
     assert.ok(calls.every(([method]) => method !== "edit"));
     assert.deepEqual(calls.at(-2), ["disable", "lima:vm"]);
@@ -924,7 +930,7 @@ test("new says why a registration failed when it failed in this process, on one 
     ),
     {
       message:
-        "cannot register vm with the GitHub gateway: gateway CA files are incomplete: ca.pem exists without ca-key.pem",
+        "cannot register vm with the gateway: gateway CA files are incomplete: ca.pem exists without ca-key.pem",
     },
   );
   assert.deepEqual(calls.at(-1), ["remove", "vm"]);
@@ -944,7 +950,7 @@ test("new says that the socket path is too long, which only the registration fin
     ),
     {
       message:
-        "cannot register vm with the GitHub gateway: the state directory is too long for a Unix socket",
+        "cannot register vm with the gateway: the state directory is too long for a Unix socket",
     },
   );
 });
@@ -960,7 +966,7 @@ test("new names the gateway's log, and shows nothing of the reason, when the dae
     ),
     {
       message:
-        "cannot register vm with the GitHub gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err",
+        "cannot register vm with the gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err",
     },
   );
 });
@@ -1003,10 +1009,7 @@ test("a shell handoff failure leaves the ready VM and registration intact", asyn
   const { calls, context } = fixture();
   context.lima.enter = () => Promise.reject(new Error("shell unavailable"));
   await assert.rejects(
-    newVM(
-      ["vm", "--repo=owner/repo", "--no-claude-token", "--no-codex-auth"],
-      context,
-    ),
+    newVM(["vm", "--repo=owner/repo", "--no-claude", "--no-codex"], context),
     /shell unavailable/,
   );
   const methods = new Set(calls.map(([method]) => method));
@@ -1020,7 +1023,7 @@ test("new does not ask, authorize or clone when the Codex file fails validation"
   mkdirSync(path.dirname(codex), { recursive: true });
   writeFileSync(codex, 'not-json-"private-marker"');
   await assert.rejects(newVM(["vm", "--repo", "owner/repo"], context), {
-    message: `${codex} is not a JSON object; run codex login on this Mac again, or pass --no-codex-auth`,
+    message: `${codex} is not a JSON object; run codex login on this Mac again, or pass --no-codex`,
   });
   assert.deepEqual(calls, [["health"], ["exists", "base"], ["exists", "vm"]]);
 });

@@ -17,7 +17,7 @@ import { baseVM } from "./commands/base.ts";
 import { cloudCommand } from "./commands/cloud.ts";
 import { gatewayCommand } from "./commands/gateway.ts";
 import type { Context } from "./commands/context.ts";
-import { grant, list, remove } from "./commands/lifecycle.ts";
+import { disable, grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
 import { accountCommand } from "./commands/account.ts";
 import { authorize, edit, logs, revoke, show } from "./commands/policy.ts";
@@ -34,7 +34,7 @@ function usage(config: Config): string {
   return `usage: cog base [--dotfiles DIR] [MODULE...]
                               build ${base} from lima/dev.yaml and guest/ of this cog and
                               the dotfiles checkout DIR
-       cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
+       cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude] [--no-codex]
                               clone ${base}, install secrets, clone the repository, open a shell
        cog tailscale config CLIENT-ID
                               configure automatic Tailscale SSH access to new VMs
@@ -48,15 +48,16 @@ function usage(config: Config): string {
                               print what a VM asked for and what the policy did
        cog authorize OWNER/REPO
                               run the GitHub App device flow for a repository
-       cog gateway serve|health|disable NAME
-                              the daemon that launchd runs, its health check, and
-                              the removal of a VM's registration
+       cog gateway serve|health
+                              the daemon that launchd runs and its health check
        cog cloud config|authorize|new|list|show|start|logs|events|grant|revoke|rm
                               administer Cloudflare containers
        cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status
                               keep Claude accounts in the gateway's pool
+       cog disable NAME       cut a VM off from the gateway (GitHub and the models) for
+                              good; there is no enable, and cog rm NAME then deletes it
        cog rm NAME            delete a VM (${base} is refused)
-       cog list               list the VMs
+       cog list | ls          list the VMs
 
 DIR defaults to ${defaultDotfiles} and is never taken from the current
 directory. It must be the top level of a git checkout with provision.sh,
@@ -81,14 +82,14 @@ cog/VM-ID/*, run cog grant NAME OWNER/REPO --profile cog on the Mac.
 new gives the VM no Claude credential: its Claude Code reaches Anthropic through
 the gateway, which uses an account from the pool that cog account add claude
 keeps, and the VM holds only a placeholder. new fails when the pool has no
-usable account. --no-claude-token skips the placeholder and the mapping, for a
-VM that will use claude auth login.
+usable account. --no-claude does not wire Claude Code to the gateway (no pool
+check, no mapping, no placeholder), for a VM that will use claude auth login.
 
 new copies this Mac's Codex login, ${codexAuthFile}, into the VM, and
 fails when there is none: run codex login here first, with
 cli_auth_credentials_store = "file" in ~/.codex/config.toml, since with keyring
 or auto the login is in the OS credential store and no file exists.
---no-codex-auth skips it, for a VM that will use codex login --device-auth.
+--no-codex does not copy it, for a VM that will use codex login --device-auth.
 
 When ${fireworksKeyFile} exists, new asks the gateway whether it is usable,
 wires api.fireworks.ai to the gateway and gives the VM only the placeholder
@@ -117,7 +118,11 @@ async function dispatch(
     case "new":
       return await newVM(args, context);
     case "list":
+    case "ls":
       await list(args, context);
+      return 0;
+    case "disable":
+      await disable(args, context);
       return 0;
     case "rm":
       await remove(args, context);

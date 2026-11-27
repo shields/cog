@@ -47,9 +47,13 @@
 ## Layout
 
 - `cog/main.ts` dispatches the Lima lifecycle and gateway commands through
-  `cog/commands/`. `grant` takes a bare VM name and optionally `--profile
-read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
-  use `gateway/control.ts` in-process; the daemon runs as `cog gateway serve`.
+  `cog/commands/`. `cog disable NAME` (`cog/commands/lifecycle.ts`) calls
+  `Control.disable` and cuts the VM off from the gateway for good; there is no
+  enable, and `cog rm NAME` then deletes it. `cog gateway` has only `serve` and
+  `health`. `cog ls` is `cog list`. `grant` takes a bare VM name and optionally
+  `--profile read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The
+  gateway commands use `gateway/control.ts` in-process; the daemon runs as
+  `cog gateway serve`.
   `make build` type-checks and compiles `build/cog`. The installer uses Bash
   3.2, so
   no `mapfile`, associative arrays, `${var,,}` or expansion of an empty array
@@ -95,7 +99,7 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   is the daemon's, and the error points at its log. Once the check below finds
   no daemon, `cog gateway serve` makes the directory, disables each enabled
   registration whose socket is not directly inside it (through `State.disable`,
-  as `cog gateway disable` does) with one stderr line per VM, and removes files
+  as `cog disable` does) with one stderr line per VM, and removes files
   there named like a socket that no enabled registration owns. Bun unlinks a
   listener's socket file when its server closes, so retiring a VM and `stop()`
   need no removal of their own. Such a VM stays removable: `cog rm` of a VM
@@ -149,7 +153,7 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   those names at the relay. `guest/setup-github-gateway` maps the two GitHub
   names, and `guest/setup-model-gateway` (run by `cog new` after the GitHub
   health probe) maps `api.anthropic.com` for `claude`, unless
-  `--no-claude-token`, and `api.fireworks.ai` for `fireworks`, when the Mac
+  `--no-claude`, and `api.fireworks.ai` for `fireworks`, when the Mac
   has a Fireworks key file. The Cloudflare image runs neither script.
   `gateway/models.ts` (pure) has no allow or deny list of paths: the relay lends
   the host's credential for any path, which a guest that held a token of its own
@@ -241,7 +245,7 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   `pushCogBranches` enables pushes in a persisted grant. `cog new` reads public
   repositories anonymously and grants read-only access to a private checkout.
 - Names: the push namespace is `cog/VM-ID/*`; the markers are
-  `/etc/cog-throwaway` and `/etc/cog-github-gateway`; the base is `cog-base`
+  `/etc/cog-throwaway` and `/etc/cog-gateway`; the base is `cog-base`
   (`COG_BASE`); the guest socket is `/tmp/cog-github.sock` and the host
   sockets are in `STATE/sock`; the health path is
   `/__cog__/health`; the dummy credential is `cog`. State is
@@ -329,7 +333,7 @@ Fireworks; a Lima guest holds no real Claude token or Fireworks key. The
 gateway reads the Fireworks key on the Mac for each credentialed request, and
 `cog new` never opens the file and learns its state from the gateway.
 The CA goes to `setup-github-gateway`'s stdin. `cog new` needs a usable Claude
-pool, checked before the clone, unless `--no-claude-token`. `cog account add
+pool, checked before the clone, unless `--no-claude`. `cog account add
 claude` reads a pool token with the no-echo prompt and creates the file
 exclusively with mode 600 by a dot-named temporary and a link, so the loader
 never sees a partial entry. `writeAccount` runs that write inside
@@ -359,7 +363,7 @@ partial line that the startup files left on stdout, and then prints only the
 words `ca` (`NODE_EXTRA_CA_CERTS` is not exported, or does not name a readable
 file that is the same inode as `/etc/ssl/certs/ca-certificates.crt`), `token`
 (`CLAUDE_CODE_OAUTH_TOKEN` is not exported, or is not `cog`; this clause is
-left out with `--no-claude-token`) and `done`; no value leaves the guest. A
+left out with `--no-claude`) and `done`; no value leaves the guest. A
 missing `done` or a failing `limactl` is a `CogError`, which the rollback
 handles by disabling and deleting the VM. Only a missing `done` blames the
 dotfiles; a failing `limactl` (the connection to the VM dropped, say) says so
@@ -390,7 +394,7 @@ needs the same change there. `cog new`'s shell check reads two of them: the
 `/etc/ssl/certs/ca-certificates.crt` and the `.zshrc` must export
 `CLAUDE_CODE_OAUTH_TOKEN` as the placeholder `cog`, so a change to either
 needs the same change in `cog/commands/new.ts`.
-Renaming a marker, changing what a marker holds (`cog-github-gateway` is a VM
+Renaming a marker, changing what a marker holds (`cog-gateway` is a VM
 UUID or `cloudflare`), or changing what `throwaway.sh` and
 `configure-github-access.sh` require of the settings file (a non-empty
 `permissions.deny`, a `PreToolUse` hook

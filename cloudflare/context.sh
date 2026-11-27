@@ -32,12 +32,12 @@ die() {
 
 marker_readers=(
     .zshrc:/etc/cog-throwaway
-    .zshrc:/etc/cog-github-gateway
-    .zshenv:/etc/cog-github-gateway
-    .zsh.d/wt.zsh:/etc/cog-github-gateway
-    .codex/hooks/git_guard.py:/etc/cog-github-gateway
+    .zshrc:/etc/cog-gateway
+    .zshenv:/etc/cog-gateway
+    .zsh.d/wt.zsh:/etc/cog-gateway
+    .codex/hooks/git_guard.py:/etc/cog-gateway
     tools/configure_codex.py:/etc/cog-throwaway
-    provision.sh:/etc/cog-github-gateway
+    provision.sh:/etc/cog-gateway
 )
 
 check_marker_readers() {
@@ -46,7 +46,7 @@ check_marker_readers() {
         file=${entry%%:*}
         marker=${entry#*:}
         if [[ ! -f $tree/$file || -L $tree/$file ]] || ! grep -qF -- "$marker" "$tree/$file"; then
-            die "$file in the dotfiles checkout does not name $marker, which cog writes; a checkout from before the split reads other markers, so update it"
+            die "$file in the dotfiles checkout does not name $marker, which cog writes; a checkout from before the split or the rename of the gateway marker reads other markers, so update it"
         fi
     done
 }

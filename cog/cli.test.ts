@@ -223,7 +223,7 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
         .repositories,
       {},
     );
-    assert.equal(call(["gateway", "disable", "trial"]), "");
+    assert.equal(call(["disable", "trial"]), "");
     const state = new State(path.join(root, "state"));
     try {
       for (let index = 0; index < 101; index++) {
@@ -506,7 +506,7 @@ test("the gateway verbs take bare names and refuse the other spelling", () => {
     ["show", "lima:trial"],
     ["edit", "lima:trial"],
     ["revoke", "lima:trial", "shields/dotfiles"],
-    ["gateway", "disable", "lima:trial"],
+    ["disable", "lima:trial"],
   ]) {
     const result = run(args);
     assert.equal(result.status, 1, args.join(" "));
@@ -549,11 +549,13 @@ test("usage errors name the command and exit 1", () => {
     [["logs"], "usage: cog logs NAME|VM-ID [--follow|--all]"],
     [["logs", "a", "--tail"], "usage: cog logs NAME|VM-ID [--follow|--all]"],
     [["authorize"], "usage: cog authorize OWNER/REPO"],
-    [["gateway"], "usage: cog gateway serve|health|disable NAME"],
+    [["gateway"], "usage: cog gateway serve|health"],
+    [["disable"], "usage: cog disable NAME"],
+    [["disable", "a", "b"], "usage: cog disable NAME"],
     [["gateway", "serve", "x"], "usage: cog gateway serve"],
     [["gateway", "health", "x"], "usage: cog gateway health"],
-    [["gateway", "disable"], "usage: cog gateway disable NAME"],
-    [["gateway", "init"], "usage: cog gateway serve|health|disable NAME"],
+    [["gateway", "disable", "a"], "usage: cog gateway serve|health"],
+    [["gateway", "init"], "usage: cog gateway serve|health"],
   ] as const) {
     const result = run([...args]);
     assert.equal(result.status, 1, args.join(" "));
@@ -624,6 +626,15 @@ test("the moved executable ignores dotenv and Bun preloads in the current direct
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "clean\n");
   assert.equal(result.stderr, "");
+  const alias = spawnSync(installed, ["ls"], {
+    cwd,
+    env: { HOME: root, PATH: root },
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(alias.status, 0, alias.stderr);
+  assert.equal(alias.stdout, "clean\n");
+  assert.equal(alias.stderr, "");
 }, 60_000);
 
 test("help prints the usage to stdout and exits 0", () => {
@@ -633,7 +644,7 @@ test("help prints the usage to stdout and exits 0", () => {
     assert.equal(result.status, 0);
     assert.equal(result.stderr, "");
     assert.match(result.stdout, /^usage: cog base /);
-    assert.match(result.stdout, /cog gateway serve\|health\|disable NAME/);
+    assert.match(result.stdout, /cog gateway serve\|health\n/);
     assert.match(
       result.stdout,
       /cog account add claude NAME \| rm claude NAME \| rename claude OLD NEW \| list \| status/,
@@ -685,6 +696,7 @@ test("lifecycle verbs reject invalid arguments before using a VM", () => {
     ],
     [["rm"], "usage: cog rm NAME"],
     [["list", "x"], "usage: cog list"],
+    [["ls", "x"], "usage: cog list"],
   ] as const) {
     const result = run([...args]);
     assert.equal(result.status, 1, args.join(" "));

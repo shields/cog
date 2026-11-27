@@ -96,22 +96,22 @@ function regularFile(file: string): boolean {
 export function readCodexAuth(file: string): Uint8Array {
   if (!existsSync(file)) {
     throw new CogError(
-      `${file} does not exist; Codex keeps its login in the OS credential store when cli_auth_credentials_store in ~/.codex/config.toml is keyring or auto: set it to "file" and run codex login on this Mac, or pass --no-codex-auth`,
+      `${file} does not exist; Codex keeps its login in the OS credential store when cli_auth_credentials_store in ~/.codex/config.toml is keyring or auto: set it to "file" and run codex login on this Mac, or pass --no-codex`,
     );
   }
   if (!regularFile(file)) {
     throw new CogError(
-      `${file} is not a regular file; remove it, or pass --no-codex-auth`,
+      `${file} is not a regular file; remove it, or pass --no-codex`,
     );
   }
   if (!readable(file)) {
     throw new CogError(
-      `cannot read ${file}; run codex login on this Mac again, or pass --no-codex-auth`,
+      `cannot read ${file}; run codex login on this Mac again, or pass --no-codex`,
     );
   }
   if (statSync(file).size === 0) {
     throw new CogError(
-      `${file} is empty; run codex login on this Mac again, or pass --no-codex-auth`,
+      `${file} is empty; run codex login on this Mac again, or pass --no-codex`,
     );
   }
   const bytes = new Uint8Array(readFileSync(file));
@@ -123,7 +123,7 @@ export function readCodexAuth(file: string): Uint8Array {
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new CogError(
-      `${file} is not a JSON object; run codex login on this Mac again, or pass --no-codex-auth`,
+      `${file} is not a JSON object; run codex login on this Mac again, or pass --no-codex`,
     );
   }
   return bytes;

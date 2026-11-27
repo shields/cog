@@ -47,13 +47,13 @@ async function fixture() {
     writeFileSync(filename, value, { mode });
     chmodSync(filename, mode);
   };
-  write(".zshrc", "/etc/cog-throwaway\n/etc/cog-github-gateway\n");
-  write(".zshenv", "/etc/cog-github-gateway\n");
-  write(".zsh.d/wt.zsh", "/etc/cog-github-gateway\n");
-  write(".codex/hooks/git_guard.py", "/etc/cog-github-gateway\n");
+  write(".zshrc", "/etc/cog-throwaway\n/etc/cog-gateway\n");
+  write(".zshenv", "/etc/cog-gateway\n");
+  write(".zsh.d/wt.zsh", "/etc/cog-gateway\n");
+  write(".codex/hooks/git_guard.py", "/etc/cog-gateway\n");
   write(".claude/settings.json", "{}\n");
   write("tools/configure_codex.py", "/etc/cog-throwaway\n");
-  write("provision.sh", "#!/bin/sh\n# /etc/cog-github-gateway\n", 0o755);
+  write("provision.sh", "#!/bin/sh\n# /etc/cog-gateway\n", 0o755);
   await run([
     "git",
     "-C",
@@ -368,6 +368,23 @@ test("base fails before Lima if an embedded guest file contains a secret", async
   const directory = stage();
   assert.ok(directory);
   assert.equal(existsSync(directory), false);
+});
+
+test("base refuses a dotfiles checkout whose files read the earlier marker path", async () => {
+  const { calls, context, materialize, write } = await fixture();
+  const earlier = `/etc/cog-${["github", "gateway"].join("-")}`;
+  for (const file of [".zshrc", ".zshenv", ".zsh.d/wt.zsh", "provision.sh"]) {
+    const mode = file === "provision.sh" ? 0o755 : 0o644;
+    write(file, `/etc/cog-throwaway\n${earlier}\n`, mode);
+    await assert.rejects(
+      baseVM([], context, materialize),
+      new RegExp(
+        `${file.replaceAll(".", "\\.")} in the dotfiles checkout does not name /etc/cog-gateway`,
+      ),
+    );
+    write(file, "/etc/cog-throwaway\n/etc/cog-gateway\n", mode);
+  }
+  assert.deepEqual(calls, []);
 });
 
 test("base rejects both a stale staged reader and an origin with a trailing control", async () => {

@@ -91,10 +91,10 @@ function parseArgs(args: readonly string[]): {
       case "--no-repo":
         noRepo = true;
         break;
-      case "--no-claude-token":
+      case "--no-claude":
         noClaude = true;
         break;
-      case "--no-codex-auth":
+      case "--no-codex":
         noCodex = true;
         break;
       default:
@@ -106,7 +106,7 @@ function parseArgs(args: readonly string[]): {
           name = argument;
         } else {
           throw new CogError(
-            "usage: cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]",
+            "usage: cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude] [--no-codex]",
           );
         }
     }
@@ -123,7 +123,7 @@ function parseArgs(args: readonly string[]): {
 async function requireUsablePool(
   gateway: Pick<Control, "pool" | "sync">,
 ): Promise<void> {
-  const skip = "or pass --no-claude-token";
+  const skip = "or pass --no-claude";
   const reason = (error: unknown): string =>
     error instanceof Error ? error.message : "unknown error";
   try {
@@ -202,7 +202,7 @@ function requireLimaSocket(socket: string, directory: string): void {
     path.dirname(socket) !== directory ||
     !socketName.test(path.basename(socket))
   ) {
-    throw new CogError("the GitHub gateway returned an invalid socket");
+    throw new CogError("the gateway returned an invalid socket");
   }
 }
 
@@ -294,7 +294,7 @@ export async function newVM(
     await gateway.health();
   } catch {
     throw new CogError(
-      "the GitHub gateway is not running; run ./install.sh in the cog checkout",
+      "the gateway is not running; run ./install.sh in the cog checkout",
     );
   }
   requireLimaSafe(gateway.location.sockets);
@@ -339,8 +339,8 @@ export async function newVM(
       signals.check();
       throw new CogError(
         error instanceof RegistrationFailedHere
-          ? `cannot register ${name} with the GitHub gateway: ${error.message.replaceAll(/\s+/g, " ")}`
-          : `cannot register ${name} with the GitHub gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err`,
+          ? `cannot register ${name} with the gateway: ${error.message.replaceAll(/\s+/g, " ")}`
+          : `cannot register ${name} with the gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err`,
       );
     }
     signals.check();
@@ -537,7 +537,7 @@ export async function newVM(
           await gateway.disable(gatewayVM);
         } catch {
           cleanupNote(
-            `cog: could not disable GitHub access for ${name}; run: cog gateway disable ${name}`,
+            `cog: could not disable gateway access for ${name}; run: cog disable ${name}`,
           );
         }
       }

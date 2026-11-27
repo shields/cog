@@ -163,7 +163,7 @@ describe("the Codex login", () => {
       const text = login(content);
       assert.match(
         text,
-        / is not a JSON object; run codex login on this Mac again, or pass --no-codex-auth$/,
+        / is not a JSON object; run codex login on this Mac again, or pass --no-codex$/,
       );
       assert.equal(text.includes(marker), false);
     }
@@ -184,13 +184,13 @@ describe("the Codex login", () => {
     );
     assert.equal(
       message(() => readCodexAuth(dir)),
-      `${dir} is not a regular file; remove it, or pass --no-codex-auth`,
+      `${dir} is not a regular file; remove it, or pass --no-codex`,
     );
     const empty = path.join(dir, "empty");
     writeFileSync(empty, "");
     assert.equal(
       message(() => readCodexAuth(empty)),
-      `${empty} is empty; run codex login on this Mac again, or pass --no-codex-auth`,
+      `${empty} is empty; run codex login on this Mac again, or pass --no-codex`,
     );
   });
 
@@ -203,7 +203,7 @@ describe("the Codex login", () => {
     chmodSync(locked, 0o000);
     assert.equal(
       message(() => readCodexAuth(locked)),
-      `cannot read ${locked}; run codex login on this Mac again, or pass --no-codex-auth`,
+      `cannot read ${locked}; run codex login on this Mac again, or pass --no-codex`,
     );
   });
 });

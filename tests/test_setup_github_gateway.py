@@ -31,7 +31,7 @@ PUSH_RULES = [
 ]
 OTHER_RULES = ["Bash(git commit*)", "Bash(gh pr merge*)", "Read(~/.ssh/**)"]
 SETTINGS = Path("etc/claude-code/managed-settings.json")
-MARKER = Path("etc/cog-github-gateway")
+MARKER = Path("etc/cog-gateway")
 
 
 @pytest.fixture
@@ -150,6 +150,7 @@ def test_gateway_access(guest: Path, marker: str) -> None:
     assert (guest / SETTINGS).stat().st_mode & 0o777 == 0o644
     assert (guest / MARKER).read_text() == f"{marker}\n"
     assert (guest / MARKER).stat().st_mode & 0o777 == 0o644
+    assert not (guest / ("etc/cog-" + "github-gateway")).exists()
     assert not (home / ".codex/rules/no-push.rules").exists()
     assert gitconfig.read_text() == original
     for host, helper in {

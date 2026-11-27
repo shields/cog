@@ -10,7 +10,7 @@ never has one.
 cog isolates, and does not hide, what the agents can do inside the machine:
 the agents run with full access there, and anything with root can undo the
 network rules. What remains is limited to state outside it: the deny rules, the
-`git_guard.py` hook from dotfiles, the GitHub gateway and the network isolation
+`git_guard.py` hook from dotfiles, the gateway and the network isolation
 described below.
 
 The VM and gateway files come from shields/dotfiles, where they started. A base
@@ -136,21 +136,24 @@ this `PATH` order does not hold.
 
 ```
 cog base [--dotfiles DIR] [MODULE...]
-cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
+cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude] [--no-codex]
 cog grant NAME [OWNER/REPO] [--profile read|cog]
 cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status
 cog tailscale config CLIENT-ID
+cog disable NAME
 cog rm NAME
-cog list
+cog list | ls
 ```
 
 `cog base` builds the base VM `cog-base` once, and again to refresh it; it takes
 tens of minutes. `cog new` makes a VM from a clone of the base, installs the
 secrets and the repository, and opens a shell in it. `cog grant` adds a
 repository grant to a running VM. `cog account` keeps the Claude accounts that
-every VM uses through the gateway. `cog rm` disables the VM's GitHub access and
-deletes it, and refuses the base. `cog list` is `limactl list`. `ssh lima-NAME`
-also works, through `~/.lima/*/ssh.config`.
+every VM uses through the gateway. `cog disable` cuts a VM off from the gateway
+(GitHub and the models) for good: there is no enable, and `cog rm NAME` then
+deletes the VM. `cog rm` disables the VM's gateway access itself and deletes
+it, and refuses the base. `cog list`, also spelled `cog ls`, is `limactl list`.
+`ssh lima-NAME` also works, through `~/.lima/*/ssh.config`.
 
 `cog base` takes the dotfiles checkout from `--dotfiles DIR`, or else
 `~/src/github.com/shields/dotfiles`; it never infers it from the current
@@ -377,7 +380,8 @@ your browser. Paste the code there to authorize the repository.
 The gateway reads grants for every request, so changes take effect without a VM
 restart. `cog rm` disables access before deleting the VM. A new VM with the same
 display name receives a new ID and no old grants. `cog logs VM-ID` can
-inspect a deleted VM's retained history. The gateway also has `cog gateway health` and `cog gateway disable NAME`.
+inspect a deleted VM's retained history. The gateway also has
+`cog gateway health`.
 Internally it stores Lima VM names as `lima:NAME` and refuses to register
 `lima:cog-base` or the VM that `COG_BASE` names.
 
@@ -431,7 +435,7 @@ forwards the request.
 `cog new` has the gateway read the pool again and asks it for the pool state
 before it clones anything, and fails with what to do when the pool has no
 account, is not usable, or the running gateway is too old to answer. Add an
-account with `cog account add claude NAME`, or pass `--no-claude-token`, which
+account with `cog account add claude NAME`, or pass `--no-claude`, which
 skips the pool check, the mapping and the placeholder, so that the VM reaches
 Anthropic directly and you can run `claude auth login` in it. `cog new` no
 longer reads or asks for a token, and leaves
@@ -440,12 +444,14 @@ longer reads or asks for a token, and leaves
 A base built by an older cog lacks `setup-model-gateway`. Run `cog base` again
 before `cog new`; `new` fails and deletes the VM when the script is missing or
 the probe fails. VMs that exist already keep the token they have and are not
-affected.
+affected. A base built before the gateway marker became `/etc/cog-gateway` also
+needs `cog base` again: its dotfiles read the earlier marker name, so a VM from
+it gets the new marker and its shell and hooks do not see it.
 
 At the end of setup, when Claude or Fireworks is wired, `cog new` runs the guest
 user's interactive zsh and checks that it exports `NODE_EXTRA_CA_CERTS` as the
 system bundle (`/etc/ssl/certs/ca-certificates.crt`), which holds the gateway's
-CA, and, unless `--no-claude-token`, `CLAUDE_CODE_OAUTH_TOKEN` as the
+CA, and, unless `--no-claude`, `CLAUDE_CODE_OAUTH_TOKEN` as the
 placeholder `cog`. Only the words `ca`, `token` and `done` leave the guest,
 never a value. If it fails, the VM is deleted and its registration disabled,
 with a message of the form `NAME's shell is not set up for Claude through the
@@ -494,7 +500,7 @@ from an older install does not know the pool: run `./install.sh` again. One bad
 entry makes the whole pool unusable, so use these commands rather than editing
 the directory; `rm` also takes the file name of a stray entry that is not an
 account, such as a copied file. The gateway reads the directory when it starts
-and when `add`, `rm`, `rename`, `cog new`, `cog gateway disable` or a VM's
+and when `add`, `rm`, `rename`, `cog new`, `cog disable` or a VM's
 registration asks it to, so an entry that you fixed by hand counts after one of
 those.
 
@@ -566,7 +572,7 @@ names; finish with `cog account rm claude OLD`.
   `~/.codex/config.toml` is `file`: with `keyring` or `auto` Codex keeps the
   login in the Keychain, and OpenAI says the copy does not apply then. So set
   `cli_auth_credentials_store = "file"` and run `codex login` on the Mac first.
-  `--no-codex-auth` skips it, and then says to run `codex login --device-auth`
+  `--no-codex` skips it, and then says to run `codex login --device-auth`
   in the VM, after you turn on device code login in ChatGPT's security
   settings.
 
@@ -578,7 +584,7 @@ Isolated, with `lima/dev.yaml` as the source:
   `cog base` fails if `~/.lima/_config` has added any.
 - No guest port is forwarded to the Mac. Lima still opens `127.0.0.1` ports on
   the Mac for SSH and for its DNS resolver, which other programs on the Mac can
-  reach. The GitHub gateway has one reverse Unix socket forward per VM.
+  reach. The gateway has one reverse Unix socket forward per VM.
 - On enrolled VMs, the Tailscale interface accepts SSH. Guest services on
   other ports and forwarded traffic are dropped. The VM keeps Lima DNS and
   does not accept subnet routes.
@@ -596,7 +602,7 @@ mapping is installed, a program in the guest that sends its own Anthropic API
 key or login to `api.anthropic.com` is refused with 403, since the gateway
 accepts only the placeholder or no credential. The gateway attributes each
 request to the VM, and `cog logs NAME` shows it. A VM made with
-`--no-claude-token` has no mapping and keeps whatever login it makes. The
+`--no-claude` has no mapping and keeps whatever login it makes. The
 gateway does not record which VMs were wired for a model, so a program with
 root in such a VM can still reach the pool by mapping the name itself.
 
@@ -621,7 +627,7 @@ Not isolated:
 - What a Fireworks key on the Mac allows. The gateway forwards any path on
   `api.fireworks.ai` with it, as it does for the Claude token, so anything in an
   enabled VM can do what the key allows without reading it, until
-  `cog gateway disable NAME` or removing the key file stops it.
+  `cog disable NAME` or removing the key file stops it.
 - The Mac's own public address, if it has one. Only the private ranges are
   rejected.
 
@@ -662,13 +668,13 @@ their sandboxed, prompting behavior.
 - Both backends run `configure-github-access.sh`. It removes the five
   `git push` deny rules from the managed settings and fails if it removes none.
   It deletes `~/.codex/rules/no-push.rules` and writes the Lima VM's UUID or
-  `cloudflare` to `/etc/cog-github-gateway`. It sets github.com's credential
+  `cloudflare` to `/etc/cog-gateway`. It sets github.com's credential
   helper with `git config --file ~/.config/git/config --replace-all` because
   chezmoi manages `~/.gitconfig`. With the marker present, dotfiles'
   `provision.sh` configures only gist.github.com's helper.
 - On Lima, `setup-github-gateway` also installs the CA, the `/etc/hosts`
   mapping of the GitHub hosts to `127.0.0.1` and the relay unit
-  `cog-github-gateway`. `setup-model-gateway` then adds the mappings of
+  `cog-gateway`. `setup-model-gateway` then adds the mappings of
   `api.anthropic.com` (`claude`) and `api.fireworks.ai` (`fireworks`) to the
   same relay. The Cloudflare image does not run it.
 - Both backends tell agents their exact `cog/VM-ID/*` namespace and instruct
@@ -728,7 +734,7 @@ OWNER/REPO` for a public repository. Then check:
   `~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN` in the VM holds only `cog` (no
   `sk-ant-` string is in the VM's files or environment). `cog logs t1` on the
   Mac shows `model.claude` rows that name the pool account, and
-  `cog gateway disable t1` makes `claude -p hi` fail. `codex` runs without a
+  `cog disable t1` makes `claude -p hi` fail. `codex` runs without a
   login too (with the Mac's `codex login`; `codex login status` says so).
 - `emacs -nw` starts and exits.
 - `cog new` passes its shell check with the real dotfiles. In the VM, a Python
@@ -849,7 +855,7 @@ cog needs from a dotfiles checkout:
 
 dotfiles reads two marker files that cog writes in the guest:
 `/etc/cog-throwaway`, whose presence makes the machine a throwaway VM, and
-`/etc/cog-github-gateway`, one line holding the VM's UUID, or `cloudflare`. The
+`/etc/cog-gateway`, one line holding the VM's UUID, or `cloudflare`. The
 readers are `.zshrc`, `.zshenv`, `.zsh.d/wt.zsh`, `.codex/hooks/git_guard.py`,
 `tools/configure_codex.py` and `provision.sh`. Where the second file holds a
 UUID, dotfiles' `wt` names a new worktree's branch `cog/UUID/worktree-NAME`,
@@ -859,7 +865,7 @@ The dotfiles README states the same contract, and `tests/test_cog_contract.py`
 there checks it from its side.
 
 Model access in a Lima guest also relies on dotfiles. Where
-`/etc/cog-github-gateway` exists, `.zshenv` exports `SSL_CERT_FILE`,
+`/etc/cog-gateway` exists, `.zshenv` exports `SSL_CERT_FILE`,
 `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` as the system bundle, which holds
 the gateway's CA, so Claude Code trusts the gateway for `api.anthropic.com` and
 `api.fireworks.ai`. On Linux, `.zshrc` exports `CLAUDE_CODE_OAUTH_TOKEN` from

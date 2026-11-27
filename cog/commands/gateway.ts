@@ -14,7 +14,6 @@
 
 import { Gateway } from "../../gateway/server.ts";
 import { CogError } from "../errors.ts";
-import { gatewayName, validName } from "../names.ts";
 import { note, say } from "../output.ts";
 import type { Context } from "./context.ts";
 
@@ -79,15 +78,7 @@ export async function gatewayCommand(
       await context.gateway().health();
       say("ready");
       return;
-    case "disable": {
-      const [name, ...extra] = rest;
-      if (name === undefined || extra.length > 0) {
-        throw new CogError("usage: cog gateway disable NAME");
-      }
-      await context.gateway().disable(gatewayName(validName(name)));
-      return;
-    }
     default:
-      throw new CogError("usage: cog gateway serve|health|disable NAME");
+      throw new CogError("usage: cog gateway serve|health");
   }
 }

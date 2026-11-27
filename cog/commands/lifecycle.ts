@@ -63,6 +63,17 @@ export async function list(
   await context.lima.list();
 }
 
+export async function disable(
+  args: readonly string[],
+  context: LifecycleContext<never, "disable">,
+): Promise<void> {
+  const [name, ...extra] = args;
+  if (name === undefined || extra.length > 0) {
+    throw new CogError("usage: cog disable NAME");
+  }
+  await context.gateway().disable(gatewayName(validName(name)));
+}
+
 export async function remove(
   args: readonly string[],
   context: LifecycleContext<"remove" | "hasGatewaySocket", "disable" | "state">,

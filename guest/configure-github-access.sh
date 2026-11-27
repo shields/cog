@@ -53,5 +53,5 @@ mv -f "$managed" "$settings"
 rm -f "$guest_home/.codex/rules/no-push.rules"
 sudo -H -u "$user" mkdir -p "$guest_home/.config/git"
 sudo -H -u "$user" git config --file "$guest_home/.config/git/config" --replace-all credential.https://github.com.helper "!$helper"
-printf '%s\n' "$marker" >/etc/cog-github-gateway
-chmod 644 /etc/cog-github-gateway
+printf '%s\n' "$marker" >/etc/cog-gateway
+chmod 644 /etc/cog-gateway
