@@ -22,6 +22,7 @@ import YAML from "yaml";
 import { AppAuth, defaultApiUrl, type DeviceCodePrompt } from "./auth.ts";
 import { ensureCertificates, type Certificates } from "./cert.ts";
 import { accountName, type AccountSnapshot } from "./pool.ts";
+import { proxyPort, type ProxyStatus } from "./proxy.ts";
 import {
   compareCodeUnits,
   cogPrefix,
@@ -46,6 +47,8 @@ export interface Locations {
   secrets: string;
   admin: string;
   pool: string;
+  proxy: string;
+  proxyCa: string;
 }
 
 // HOME comes from the environment, not from the passwd entry.
@@ -58,6 +61,8 @@ export function locations(env: Env): Locations {
       secrets: path.join(root, "secrets"),
       admin: path.join(root, "state", "admin.sock"),
       pool: path.join(root, "secrets", "claude-pool"),
+      proxy: path.join(root, "secrets", "proxy-url"),
+      proxyCa: path.join(root, "state", "ca.pem"),
     };
   }
   const home = env.HOME;
@@ -72,6 +77,8 @@ export function locations(env: Env): Locations {
     secrets,
     admin: path.join(state, "admin.sock"),
     pool: path.join(secrets, "claude-pool"),
+    proxy: path.join(secrets, "proxy-url"),
+    proxyCa: path.join(state, "ca.pem"),
   };
 }
 
@@ -81,6 +88,21 @@ export interface ControlOptions {
   apiUrl?: string | undefined;
   baseName?: string | undefined;
   actor?: string | undefined;
+  proxyPort?: number | undefined;
+}
+
+// The installed daemon's profile lets it listen only on the default port, so
+// the variable serves the tests, which must not take that port from a gateway
+// that is installed on the same Mac.
+function proxyPortFrom(value: string | undefined): number | undefined {
+  if (value === undefined || value === "") {
+    return undefined;
+  }
+  const port = /^[0-9]{1,5}$/u.test(value) ? Number(value) : 0;
+  if (port < 1 || port > 65_535) {
+    throw new Error("COG_PROXY_PORT is not a port number");
+  }
+  return port;
 }
 
 export function controlOptions(env: Env): ControlOptions {
@@ -89,6 +111,7 @@ export function controlOptions(env: Env): ControlOptions {
     webUrl: env.COG_GITHUB_WEB_URL,
     apiUrl: env.COG_GITHUB_API_URL,
     baseName: env.COG_BASE === "" ? undefined : env.COG_BASE,
+    proxyPort: proxyPortFrom(env.COG_PROXY_PORT),
   };
 }
 
@@ -149,6 +172,7 @@ export function parseEdit(
 
 const poolAnswerLimit = 1_048_576;
 const fireworksKeyAnswerLimit = 4096;
+const proxyAnswerLimit = 4096;
 const acknowledgementLimit = 4096;
 
 async function adminRequest(
@@ -333,6 +357,35 @@ function parseFireworksKeyStatus(text: string): FireworksKeyStatus {
   return { state, reason: null };
 }
 
+function parseProxyStatus(text: string): ProxyStatus {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("the gateway answered with invalid JSON");
+  }
+  if (
+    !isRecord(raw) ||
+    (raw.state !== "off" &&
+      raw.state !== "unusable" &&
+      raw.state !== "listening")
+  ) {
+    throw new Error("the gateway answered with an invalid proxy state");
+  }
+  const { state } = raw;
+  const reason: unknown = raw.reason;
+  if (state === "unusable") {
+    if (typeof reason !== "string" || reason === "") {
+      throw new Error("the gateway answered with an invalid proxy reason");
+    }
+    return { state, reason };
+  }
+  if (reason !== null) {
+    throw new Error("the gateway answered with an invalid proxy reason");
+  }
+  return { state, reason: null };
+}
+
 export const socketName = /^github-[0-9a-f-]+\.sock$/;
 
 export type LogRow =
@@ -350,6 +403,7 @@ export class RegistrationFailedHere extends Error {
 export class Control {
   readonly location: Locations;
   readonly actor: string;
+  readonly proxyPort: number;
   readonly #options: ControlOptions;
   #state: State | undefined;
   #auth: AppAuth | undefined;
@@ -358,6 +412,7 @@ export class Control {
     this.location = location;
     this.#options = options;
     this.actor = options.actor ?? os.userInfo().username;
+    this.proxyPort = options.proxyPort ?? proxyPort;
   }
 
   // Opened on first use, so that a command that needs neither creates no
@@ -439,6 +494,17 @@ export class Control {
         "/fireworks-key",
         "GET",
         fireworksKeyAnswerLimit,
+      ),
+    );
+  }
+
+  async proxy(): Promise<ProxyStatus> {
+    return parseProxyStatus(
+      await adminRequest(
+        this.location.admin,
+        "/proxy",
+        "GET",
+        proxyAnswerLimit,
       ),
     );
   }

@@ -33,12 +33,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import https from "node:https";
+import net from "node:net";
 import path from "node:path";
 import { onTestFinished, test } from "bun:test";
 import YAML from "yaml";
 import { Control, controlOptions, locations } from "../gateway/control.ts";
 import { compareCodeUnits, grantProfiles } from "../gateway/policy.ts";
-import { State } from "../gateway/state.ts";
+import { proxyUrl } from "../gateway/proxy.ts";
+import { macInstance, State } from "../gateway/state.ts";
+import { toBytes, writeSecretFile } from "./secrets.ts";
 
 const main = path.join(import.meta.dirname, "main.ts");
 
@@ -917,6 +920,123 @@ test("gateway serve disables older registrations, clears stale sockets and remov
     assert.equal(existsSync(second.socket), false);
     assert.equal(existsSync(path.join(root, "state", "admin.sock")), false);
     assert.deepEqual(readdirSync(sockets), ["notes.txt"]);
+  } finally {
+    control.close();
+    if (service.exitCode === null && service.signalCode === null) {
+      const exited = once(service, "exit");
+      service.kill("SIGTERM");
+      await exited;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("gateway serve disables a Mac registration outside the socket directory and says to run cog proxy enable", async () => {
+  const root = mkdtempSync("/tmp/cog-");
+  const environment = {
+    ...process.env,
+    COG_ROOT: root,
+    HOME: path.join(root, "home"),
+  };
+  const seeded = new State(path.join(root, "state"));
+  let macId: string;
+  try {
+    macId = seeded.register(
+      macInstance,
+      path.join(root, "elsewhere", "sock", "github-aa-11.sock"),
+      "tester",
+    ).id;
+  } finally {
+    seeded.close();
+  }
+  const service = spawn(process.execPath, [main, "gateway", "serve"], {
+    env: environment,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let serviceError = "";
+  service.stderr.on("data", (chunk: Buffer) => {
+    serviceError += chunk.toString();
+  });
+  const control = new Control(locations(environment), {
+    ...controlOptions(environment),
+    actor: "tester",
+  });
+  try {
+    assert.equal(await daemonHealthy(control, service), true, serviceError);
+    assert.equal(
+      serviceError,
+      `cog: the Mac's proxy registration (${macId}) was made outside this state directory; its gateway access is disabled; run cog proxy enable\n`,
+    );
+    assert.equal(control.state.byId(macId)?.disabled, true);
+  } finally {
+    control.close();
+    if (service.exitCode === null && service.signalCode === null) {
+      const exited = once(service, "exit");
+      service.kill("SIGTERM");
+      await exited;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("gateway serve starts the Mac's proxy from the URL file, on the port that COG_PROXY_PORT names", async () => {
+  const root = mkdtempSync("/tmp/cog-");
+  const probe = net.createServer();
+  await new Promise<void>((resolve) => {
+    probe.listen({ host: "::1", port: 0, ipv6Only: true }, resolve);
+  });
+  const { port } = probe.address() as net.AddressInfo;
+  await new Promise<void>((resolve) => {
+    probe.close(() => {
+      resolve();
+    });
+  });
+  const environment = {
+    ...process.env,
+    COG_ROOT: root,
+    HOME: path.join(root, "home"),
+    COG_PROXY_PORT: String(port),
+  };
+  const service = spawn(process.execPath, [main, "gateway", "serve"], {
+    env: environment,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let serviceError = "";
+  service.stderr.on("data", (chunk: Buffer) => {
+    serviceError += chunk.toString();
+  });
+  const control = new Control(locations(environment), {
+    ...controlOptions(environment),
+    actor: "tester",
+  });
+  try {
+    assert.equal(await daemonHealthy(control, service), true, serviceError);
+    assert.deepEqual(await control.proxy(), { state: "off", reason: null });
+    writeSecretFile(
+      control.location.proxy,
+      toBytes(`${proxyUrl("k".repeat(43), port)}\n`),
+    );
+    await control.register("mac");
+    assert.deepEqual(await control.proxy(), {
+      state: "listening",
+      reason: null,
+    });
+    const answer = await new Promise<string>((resolve, reject) => {
+      const socket = net.connect({ host: "::1", port });
+      let text = "";
+      socket.on("data", (chunk: Buffer) => {
+        text += chunk.toString("latin1");
+      });
+      socket.once("error", reject);
+      socket.once("close", () => {
+        resolve(text);
+      });
+      socket.write(
+        "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+      );
+    });
+    assert.match(answer, /^HTTP\/1\.1 407 /u);
+    assert.equal(serviceError, "");
   } finally {
     control.close();
     if (service.exitCode === null && service.signalCode === null) {

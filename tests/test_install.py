@@ -587,8 +587,11 @@ GRANTS = [
     ),
     form("allow", "file-read*", f'(subpath (string-append {SECRETS} "/claude-pool"))'),
     form("allow", "file-read*", '(literal (param "FIREWORKS_KEY"))'),
+    form("allow", "file-read*", f'(literal (string-append {SECRETS} "/proxy-url"))'),
     form("allow", "network-bind", "network-inbound", SOCKET, ADMIN),
     form("allow", "network-outbound", ADMIN),
+    form("allow", "network-bind", "network-inbound", '(local tcp "localhost:17443")'),
+    form("allow", "network-outbound", SOCKET),
     form("allow", "network-outbound", '(remote tcp "*:443")'),
     form("allow", "network-outbound", '(literal "/private/var/run/mDNSResponder")'),
     form(

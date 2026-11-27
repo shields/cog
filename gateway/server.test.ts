@@ -32,7 +32,7 @@ import {
   type Server,
   type Socket,
 } from "node:net";
-import { connect as tlsConnect } from "node:tls";
+import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import {
   chmodSync,
   existsSync,
@@ -62,9 +62,12 @@ import {
 import { promisify } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { AppAuth } from "./auth.ts";
+import { ensureCertificates } from "./cert.ts";
+import { Control } from "./control.ts";
 import { compareCodeUnits } from "./policy.ts";
+import { proxyUrl } from "./proxy.ts";
 import { Gateway, sendBody } from "./server.ts";
-import { State, type Instance } from "./state.ts";
+import { macInstance, State, type Instance } from "./state.ts";
 
 afterEach(() => {
   mock.restore();
@@ -6783,3 +6786,870 @@ test("GET /fireworks-key answers missing when no key file is configured, and 404
   assert.deepEqual(JSON.parse(answer.text), { state: "missing", reason: null });
   assert.equal((await requestFireworksKey(adminSocket, "POST")).status, 404);
 });
+
+const macKey = "k".repeat(43);
+const otherKey = "j".repeat(43);
+
+function noProxyKeys(...shown: unknown[]): void {
+  const text = shown
+    .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
+    .join("\n");
+  for (const secret of [macKey, otherKey]) {
+    assert.ok(!text.includes(secret), "a proxy key is shown");
+    assert.ok(
+      !text.includes(Buffer.from(`cog:${secret}`).toString("base64")),
+      "a proxy credential is shown",
+    );
+  }
+}
+
+function listenOn(port: number): Promise<Server> {
+  const server = createNetServer();
+  defer(async () => {
+    if (server.listening) {
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      });
+    }
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ host: "::1", port, ipv6Only: true }, () => {
+      resolve(server);
+    });
+  });
+}
+
+async function freePort(): Promise<number> {
+  const server = await listenOn(0);
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
+  return address.port;
+}
+
+function writeProxyFile(file: string, content: string, mode = 0o600): void {
+  writeFileSync(file, content);
+  chmodSync(file, mode);
+}
+
+interface ProxiedOptions {
+  mac?: boolean;
+  // undefined is a usable file, null is none.
+  file?: string | null;
+  mode?: number;
+  port?: number;
+  grace?: number;
+  respond?: Parameters<typeof startModelStub>[0];
+}
+
+async function startProxied(options: ProxiedOptions = {}) {
+  const root = mkdtempSync(path.join(tmpdir(), "cog-proxy-"));
+  defer(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+  const stderr = captureStderr();
+  const state = new State(path.join(root, "state"));
+  defer(() => {
+    if (state.db.isOpen) {
+      state.close();
+    }
+  });
+  const secrets = path.join(root, "secrets");
+  mkdirSync(secrets);
+  const certificates = ensureCertificates(path.join(root, "certs"));
+  const port = options.port ?? (await freePort());
+  const proxyFile = path.join(secrets, "proxy-url");
+  if (options.file !== null) {
+    writeProxyFile(
+      proxyFile,
+      options.file ?? proxyUrl(macKey, port),
+      options.mode,
+    );
+  }
+  const poolDirectory = path.join(root, "claude-pool");
+  writePool(poolDirectory, { alpha: tokens.alpha });
+  const anthropic = await startModelStub(options.respond);
+  const provider = await startModelStub();
+  const github = await startModelStub();
+  const fireworksFile = keyFile(`${keys.one}\n`);
+  const received: Buffer[] = [];
+  const blind = rawUpstream((socket) => {
+    socket.on("data", (chunk: Buffer) => {
+      received.push(chunk);
+      socket.write(chunk);
+    });
+  });
+  defer(async () => {
+    blind.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      blind.close(() => {
+        resolve();
+      });
+    });
+  });
+  await new Promise<void>((resolve) => {
+    blind.listen(0, "127.0.0.1", resolve);
+  });
+  const blindAddress = blind.address();
+  assert.ok(blindAddress && typeof blindAddress !== "string");
+  const hosts: string[] = [];
+  const work = state.register(
+    "lima:work",
+    path.join(root, "work.sock"),
+    "tester",
+  );
+  const mac =
+    options.mac === false
+      ? null
+      : state.register(macInstance, path.join(root, "mac.sock"), "tester");
+  const adminSocket = path.join(root, "admin.sock");
+  const gateway = new Gateway(state, new AppAuth(secrets), {
+    cert: certificates.cert,
+    key: certificates.key,
+    adminSocket,
+    webUpstream: github.origin,
+    apiUpstream: github.origin,
+    pool: poolDirectory,
+    anthropicUpstream: anthropic.origin,
+    fireworksUpstream: provider.origin,
+    fireworksKeyFile: fireworksFile,
+    proxyFile,
+    proxyPort: port,
+    proxyConnect: (host) => {
+      hosts.push(host);
+      return connect({ host: "127.0.0.1", port: blindAddress.port });
+    },
+    ...(options.grace === undefined ? {} : { proxyGrace: options.grace }),
+  });
+  defer(() => gateway.stop());
+  await gateway.start();
+  return {
+    root,
+    port,
+    proxyFile,
+    adminSocket,
+    state,
+    gateway,
+    work,
+    mac,
+    anthropic,
+    provider,
+    github,
+    fireworksFile,
+    ca: readFileSync(certificates.ca),
+    stderr,
+    blind: { received, hosts },
+    notices: (): string[] =>
+      stderr.filter((line) => line.startsWith("cog: Mac proxy unavailable")),
+  };
+}
+
+type Proxied = Awaited<ReturnType<typeof startProxied>>;
+
+function proxyAuthorization(key: string): string {
+  return `Basic ${Buffer.from(`cog:${key}`).toString("base64")}`;
+}
+
+async function connectThrough(
+  port: number,
+  { key = macKey, target = `${claudeName}:443` } = {},
+): Promise<{ socket: Socket; status: number; head: string; rest: Buffer }> {
+  const socket = connect({ host: "::1", port });
+  defer(() => {
+    socket.destroy();
+  });
+  socket.write(
+    `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\nProxy-Authorization: ${proxyAuthorization(key)}\r\n\r\n`,
+  );
+  let buffered: Buffer = Buffer.alloc(0);
+  const ended = signal();
+  const onData = (chunk: Buffer): void => {
+    buffered = Buffer.concat([buffered, chunk]);
+    if (buffered.includes("\r\n\r\n")) {
+      ended.resolve();
+    }
+  };
+  socket.on("data", onData);
+  socket.once("close", ended.resolve);
+  await within("the proxy to answer", ended.promise);
+  socket.off("data", onData);
+  socket.pause();
+  const split = buffered.indexOf("\r\n\r\n");
+  const head = buffered
+    .subarray(0, split === -1 ? undefined : split)
+    .toString();
+  return {
+    socket,
+    status: Number(head.split(" ", 3)[1]),
+    head,
+    rest: split === -1 ? Buffer.alloc(0) : buffered.subarray(split + 4),
+  };
+}
+
+async function secure(
+  p: Proxied,
+  tunnel: Socket,
+  servername = claudeName,
+): Promise<TLSSocket> {
+  const client = tlsConnect({ socket: tunnel, ca: p.ca, servername });
+  defer(() => {
+    client.destroy();
+  });
+  await within("the handshake", once(client, "secureConnect"));
+  return client;
+}
+
+async function intercepted(p: Proxied, key = macKey): Promise<TLSSocket> {
+  const tunnel = await connectThrough(p.port, { key });
+  assert.equal(tunnel.status, 200);
+  assert.equal(tunnel.rest.length, 0);
+  return secure(p, tunnel.socket);
+}
+
+async function requestOver(socket: Socket, request: string): Promise<string> {
+  const chunks: Buffer[] = [];
+  socket.on("data", (chunk: Buffer) => {
+    chunks.push(chunk);
+  });
+  const closed = once(socket, "close");
+  socket.write(request);
+  await within("the connection to close", closed);
+  return Buffer.concat(chunks).toString();
+}
+
+async function healthOn(socket: Socket): Promise<void> {
+  let seen = "";
+  const answered = signal();
+  const onData = (chunk: Buffer): void => {
+    seen += chunk.toString();
+    if (seen.includes("cog ready\n") && seen.endsWith("0\r\n\r\n")) {
+      answered.resolve();
+    }
+  };
+  socket.on("data", onData);
+  socket.write(`GET /__cog__/health HTTP/1.1\r\nhost: ${claudeName}\r\n\r\n`);
+  await within("the health answer", answered.promise);
+  socket.off("data", onData);
+  assert.match(seen, /^HTTP\/1\.1 200 /);
+}
+
+function closing(socket: Socket): Promise<void> {
+  return new Promise((resolve) => {
+    if (socket.destroyed) {
+      resolve();
+    } else {
+      socket.once("close", () => {
+        resolve();
+      });
+    }
+  });
+}
+
+function connectCode(port: number): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: "::1", port });
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      resolve(error.code);
+    });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(undefined);
+    });
+  });
+}
+
+interface AdminAnswer {
+  status: number;
+  type: unknown;
+  text: string;
+}
+
+function requestAdmin(
+  adminSocket: string,
+  route: string,
+  method = "GET",
+): Promise<AdminAnswer> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      { socketPath: adminSocket, path: route, method, agent: false },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.once("end", () => {
+          resolve({
+            status: response.statusCode ?? 0,
+            type: response.headers["content-type"],
+            text: Buffer.concat(chunks).toString(),
+          });
+        });
+      },
+    );
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+async function proxyState(p: Proxied): Promise<unknown> {
+  const answer = await requestAdmin(p.adminSocket, "/proxy");
+  assert.equal(answer.status, 200);
+  assert.equal(answer.type, "application/json");
+  noProxyKeys(answer.text);
+  return JSON.parse(answer.text);
+}
+
+async function syncOk(p: Proxied): Promise<void> {
+  assert.equal(await requestSync(p.adminSocket), 200);
+}
+
+test("a model request through the Mac's proxy reaches the stub with a pooled token, and is audited to the mac instance", async () => {
+  const p = await startProxied();
+  assert.ok(p.mac);
+  const health = await requestOver(
+    await intercepted(p),
+    `GET /__cog__/health HTTP/1.1\r\nhost: ${claudeName}\r\nconnection: close\r\n\r\n`,
+  );
+  assert.match(health, /^HTTP\/1\.1 200 /);
+  assert.ok(health.includes("\r\ncog ready\n\r\n"));
+  const body = '{"model":"made-up"}';
+  const reply = await requestOver(
+    await intercepted(p),
+    `POST /v1/messages HTTP/1.1\r\nhost: ${claudeName}\r\nauthorization: Bearer cog\r\ncontent-type: application/json\r\ncontent-length: ${String(body.length)}\r\nconnection: close\r\n\r\n${body}`,
+  );
+  assert.match(reply, /^HTTP\/1\.1 200 /);
+  assert.ok(reply.includes('{"ok":true}'));
+  assert.equal(p.anthropic.requests.length, 1);
+  const forwarded = lastRequest(p.anthropic);
+  assert.equal(forwarded.url, "/v1/messages");
+  assert.equal(forwarded.headers.authorization, `Bearer ${tokens.alpha}`);
+  assert.equal(forwarded.body.toString(), body);
+  const model = p.state
+    .logs(p.mac.id)
+    .filter((row) => row.operation === "model.claude");
+  assert.deepEqual(
+    model.map(({ allowed, reason }) => ({ allowed, reason })),
+    [{ allowed: true, reason: "pool account alpha" }],
+  );
+  assert.deepEqual(p.state.logs(p.work.id), []);
+  noSecrets(health, reply);
+  noProxyKeys(health, reply, p.stderr);
+});
+
+test.each([
+  ["api.fireworks.ai", "POST", "/v1/messages", { authorization: "Bearer cog" }],
+  [
+    "github.com",
+    "GET",
+    "/shields/dotfiles.git/info/refs?service=git-upload-pack",
+    {},
+  ],
+  ["api.github.com", "GET", "/user", {}],
+] as const)(
+  "a request for %s inside the Mac's tunnel is refused with 403 and reaches no upstream",
+  async (host, method, target, headers) => {
+    const p = await startProxied();
+    assert.ok(p.mac);
+    const tunnel = await connectThrough(p.port);
+    assert.equal(tunnel.status, 200);
+    const reply = await requestOver(
+      await secure(p, tunnel.socket, host),
+      `${method} ${target} HTTP/1.1\r\nhost: ${host}\r\n${Object.entries(
+        headers,
+      )
+        .map(([name, value]) => `${name}: ${value}\r\n`)
+        .join("")}content-length: 0\r\nconnection: close\r\n\r\n`,
+    );
+    assert.match(reply, /^HTTP\/1\.1 403 /);
+    assert.equal(p.provider.requests.length, 0);
+    assert.equal(p.github.requests.length, 0);
+    assert.equal(p.anthropic.requests.length, 0);
+    assert.deepEqual(
+      p.state
+        .logs(p.mac.id)
+        .filter((row) => row.operation === "model.fireworks"),
+      [],
+    );
+    noProxyKeys(reply, p.stderr);
+    noKeys(reply, p.stderr);
+  },
+);
+
+test("the Fireworks key file is not read for a request inside the Mac's tunnel, and a lima instance on its own socket still gets Fireworks", async () => {
+  const p = await startProxied();
+  rmSync(p.fireworksFile);
+  writeFileSync(p.fireworksFile, `${keys.one} ${keys.two}\n`);
+  const refused = await requestOver(
+    await secure(p, (await connectThrough(p.port)).socket, fireworksName),
+    `POST /v1/messages HTTP/1.1\r\nhost: ${fireworksName}\r\nauthorization: Bearer cog\r\ncontent-length: 0\r\nconnection: close\r\n\r\n`,
+  );
+  assert.match(refused, /^HTTP\/1\.1 403 /);
+  writeFileSync(p.fireworksFile, `${keys.one}\n`);
+  const reply = await fireworks(
+    p.work.socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 200);
+  assert.equal(p.provider.requests.length, 1);
+  assert.equal(
+    lastRequest(p.provider).headers.authorization,
+    `Bearer ${keys.one}`,
+  );
+});
+
+test("a blind tunnel through the proxy carries bytes untouched and writes no audit row", async () => {
+  const p = await startProxied();
+  assert.ok(p.mac);
+  const tunnel = await connectThrough(p.port, { target: "example.com:443" });
+  assert.equal(tunnel.status, 200);
+  const bytes = Buffer.from(
+    Array.from({ length: 4096 }, (_, i) => (i * 7 + 3) & 255),
+  );
+  const echoed: Buffer[] = [];
+  const complete = signal();
+  tunnel.socket.on("data", (chunk: Buffer) => {
+    echoed.push(chunk);
+    if (Buffer.concat(echoed).length >= bytes.length) {
+      complete.resolve();
+    }
+  });
+  tunnel.socket.resume();
+  tunnel.socket.write(bytes);
+  await within("the echo", complete.promise);
+  assert.ok(Buffer.concat(echoed).equals(bytes));
+  assert.ok(Buffer.concat(p.blind.received).equals(bytes));
+  assert.deepEqual(p.blind.hosts, ["example.com"]);
+  assert.deepEqual(p.state.logs(p.mac.id), []);
+  assert.deepEqual(p.state.logs(p.work.id), []);
+  assert.equal(p.anthropic.requests.length, 0);
+  noProxyKeys(p.stderr);
+});
+
+const proxyCases: {
+  name: string;
+  options: (port: number) => ProxiedOptions;
+  state: "off" | "unusable";
+  reason: string | ((port: number) => string) | null;
+}[] = [
+  {
+    name: "no file and no mac",
+    options: () => ({ mac: false, file: null }),
+    state: "off",
+    reason: null,
+  },
+  {
+    name: "a file but no mac",
+    options: () => ({ mac: false }),
+    state: "unusable",
+    reason: "the Mac is not registered",
+  },
+  {
+    name: "a mac but no file",
+    options: () => ({ file: null }),
+    state: "unusable",
+    reason: "the proxy URL file is missing",
+  },
+  {
+    name: "a malformed file",
+    options: () => ({ file: proxyUrl(macKey, 1) }),
+    state: "unusable",
+    reason: "the proxy URL file does not hold a proxy URL that this cog wrote",
+  },
+  {
+    name: "a file open to other users",
+    options: () => ({ mode: 0o644 }),
+    state: "unusable",
+    reason: "the proxy URL file is open to other users",
+  },
+];
+
+test.each(proxyCases)(
+  "GET /proxy answers $state for $name, writes one notice for it however many syncs follow, and never fails a sync or a lima listener",
+  async ({ options, state, reason }) => {
+    const p = await startProxied(options(0));
+    const expected = typeof reason === "function" ? reason(p.port) : reason;
+    assert.deepEqual(await proxyState(p), { state, reason: expected });
+    await syncOk(p);
+    await syncOk(p);
+    assert.deepEqual(
+      p.notices(),
+      expected === null ? [] : [`cog: Mac proxy unavailable: ${expected}\n`],
+    );
+    assert.equal(await connectCode(p.port), "ECONNREFUSED");
+    const health = await claude(p.work.socket, "GET", "/__cog__/health");
+    assert.equal(health.status, 200);
+    assert.equal(health.body.toString(), "cog ready\n");
+    noProxyKeys(p.stderr);
+  },
+);
+
+test("GET /proxy answers listening for a usable file and a registered mac, and 404 to other methods", async () => {
+  const p = await startProxied();
+  assert.deepEqual(await proxyState(p), { state: "listening", reason: null });
+  assert.deepEqual(p.notices(), []);
+  assert.equal(
+    (await requestAdmin(p.adminSocket, "/proxy", "POST")).status,
+    404,
+  );
+});
+
+test("a port that another listener holds is reported with its number and EADDRINUSE, once, and is taken at the first sync after it is freed", async () => {
+  const port = await freePort();
+  const holder = await listenOn(port);
+  const p = await startProxied({ port });
+  const busy = `cannot listen on [::1]:${String(port)} (EADDRINUSE)`;
+  assert.deepEqual(await proxyState(p), { state: "unusable", reason: busy });
+  await syncOk(p);
+  await syncOk(p);
+  assert.deepEqual(p.notices(), [`cog: Mac proxy unavailable: ${busy}\n`]);
+  const health = await claude(p.work.socket, "GET", "/__cog__/health");
+  assert.equal(health.status, 200);
+  await new Promise<void>((resolve) => {
+    holder.close(() => {
+      resolve();
+    });
+  });
+  await syncOk(p);
+  assert.deepEqual(await proxyState(p), { state: "listening", reason: null });
+  const tunnel = await connectThrough(p.port);
+  assert.equal(tunnel.status, 200);
+  assert.equal(p.notices().length, 1);
+  rmSync(p.proxyFile);
+  await syncOk(p);
+  assert.deepEqual(p.notices(), [
+    `cog: Mac proxy unavailable: ${busy}\n`,
+    "cog: Mac proxy unavailable: the proxy URL file is missing\n",
+  ]);
+  noProxyKeys(p.stderr);
+});
+
+test("the periodic refresh starts the listener once the port that was held is free", async () => {
+  const intervals = mockIntervals();
+  const port = await freePort();
+  const holder = await listenOn(port);
+  const p = await startProxied({ port });
+  assert.deepEqual(await proxyState(p), {
+    state: "unusable",
+    reason: `cannot listen on [::1]:${String(port)} (EADDRINUSE)`,
+  });
+  await new Promise<void>((resolve) => {
+    holder.close(() => {
+      resolve();
+    });
+  });
+  intervals.tick(60_000);
+  await within(
+    "the periodic refresh to start the listener",
+    (async () => {
+      while (
+        JSON.stringify(await proxyState(p)) !==
+        JSON.stringify({ state: "listening", reason: null })
+      ) {
+        await nextTurn();
+      }
+    })(),
+  );
+});
+
+test("a proxy URL file that appears after the start makes the listener start at the next sync", async () => {
+  const p = await startProxied({ file: null });
+  assert.equal(await connectCode(p.port), "ECONNREFUSED");
+  writeProxyFile(p.proxyFile, proxyUrl(macKey, p.port));
+  await syncOk(p);
+  assert.deepEqual(await proxyState(p), { state: "listening", reason: null });
+  await healthOn(await intercepted(p));
+  assert.equal(p.notices().length, 1);
+});
+
+test("a sync that changes nothing about the proxy keeps an open tunnel working and the listener unrestarted", async () => {
+  const p = await startProxied();
+  const tunnel = await intercepted(p);
+  await healthOn(tunnel);
+  p.state.register("lima:extra", path.join(p.root, "extra.sock"), "tester");
+  await syncOk(p);
+  await syncOk(p);
+  assert.equal(tunnel.destroyed, false);
+  await healthOn(tunnel);
+  await healthOn(await intercepted(p));
+  assert.deepEqual(p.notices(), []);
+});
+
+const closers: {
+  name: string;
+  act: (p: Proxied) => void;
+  reason: string | null;
+}[] = [
+  {
+    name: "a removed file",
+    act: (p) => {
+      rmSync(p.proxyFile);
+    },
+    reason: "the proxy URL file is missing",
+  },
+  {
+    name: "a changed key",
+    act: (p) => {
+      writeProxyFile(p.proxyFile, proxyUrl(otherKey, p.port));
+    },
+    reason: null,
+  },
+  {
+    name: "a disabled mac instance",
+    act: (p) => {
+      p.state.disable(macInstance, "tester");
+    },
+    reason: "the Mac is not registered",
+  },
+];
+
+test.each(closers)(
+  "$name at the next sync closes the listener and every open tunnel",
+  async ({ act, reason }) => {
+    const p = await startProxied();
+    const inside = await intercepted(p);
+    await healthOn(inside);
+    const blind = await connectThrough(p.port, { target: "example.com:443" });
+    assert.equal(blind.status, 200);
+    const gone = Promise.all([closing(inside), closing(blind.socket)]);
+    act(p);
+    await syncOk(p);
+    await within("both tunnels to close", gone);
+    if (reason === null) {
+      assert.deepEqual(await proxyState(p), {
+        state: "listening",
+        reason: null,
+      });
+      const old = await connectThrough(p.port);
+      assert.equal(old.status, 407);
+      assert.match(old.head, /^HTTP\/1\.1 407 /);
+      const fresh = await connectThrough(p.port, { key: otherKey });
+      assert.equal(fresh.status, 200);
+      await healthOn(await secure(p, fresh.socket));
+    } else {
+      assert.deepEqual(await proxyState(p), { state: "unusable", reason });
+      assert.equal(await connectCode(p.port), "ECONNREFUSED");
+    }
+    noProxyKeys(p.stderr);
+  },
+);
+
+test("a sync whose refresh fails for another instance still closes the proxy of a disabled Mac", async () => {
+  const p = await startProxied();
+  const open = await connectThrough(p.port);
+  assert.equal(open.status, 200);
+  p.state.disable(macInstance, "tester");
+  p.state.register(
+    "lima:broken",
+    path.join(p.root, "missing", "broken.sock"),
+    "tester",
+  );
+  assert.equal(await requestSync(p.adminSocket), 503);
+  await within("the tunnel to close", closing(open.socket));
+  assert.equal(await connectCode(p.port), "ECONNREFUSED");
+  assert.deepEqual(await proxyState(p), {
+    state: "unusable",
+    reason: "the Mac is not registered",
+  });
+});
+
+async function stopWithin(p: Proxied): Promise<void> {
+  await within("stop() to finish", p.gateway.stop());
+  assert.equal(await connectCode(p.port), "ECONNREFUSED");
+}
+
+test("stop() finishes with an idle intercepted tunnel open", async () => {
+  const p = await startProxied();
+  const tunnel = await intercepted(p);
+  await healthOn(tunnel);
+  await stopWithin(p);
+  await within("the tunnel to close", closing(tunnel));
+});
+
+test("stop() finishes with a blind tunnel open, and destroys it", async () => {
+  const p = await startProxied();
+  const blind = await connectThrough(p.port, { target: "example.com:443" });
+  assert.equal(blind.status, 200);
+  await stopWithin(p);
+  await within("the tunnel to close", closing(blind.socket));
+});
+
+test.each([
+  ["keep-alive", ""],
+  ["Connection: close", "connection: close\r\n"],
+] as const)(
+  "a model request in flight through the proxy when stop() is called still gets its complete answer (%s)",
+  async (_, connection) => {
+    const release = signal();
+    const p = await startProxied({
+      respond: (_request, response) => {
+        void release.promise.then(() => {
+          response
+            .writeHead(200, { "content-type": "application/json" })
+            .end('{"ok":true}');
+        });
+      },
+    });
+    const tunnel = await intercepted(p);
+    const blind = await connectThrough(p.port, { target: "example.com:443" });
+    assert.equal(blind.status, 200);
+    const reply = requestOver(
+      tunnel,
+      `POST /v1/messages HTTP/1.1\r\nhost: ${claudeName}\r\nauthorization: Bearer cog\r\ncontent-length: 2\r\n${connection}\r\n{}`,
+    );
+    await within("the request to arrive", p.anthropic.firstChunk);
+    const stopping = p.gateway.stop();
+    await within("the blind tunnel to close", closing(blind.socket));
+    assert.equal(await connectCode(p.port), "ECONNREFUSED");
+    release.resolve();
+    const answer = await within("the answer", reply);
+    assert.match(answer, /^HTTP\/1\.1 200 /);
+    assert.ok(answer.includes('{"ok":true}'));
+    assert.ok(answer.endsWith("0\r\n\r\n"));
+    await within("stop() to finish", stopping);
+    assert.equal(await connectCode(p.port), "ECONNREFUSED");
+  },
+);
+
+test("a tunnel to the mac socket that never sends a byte holds stop() back for no longer than proxyGrace", async () => {
+  const p = await startProxied({ grace: 200 });
+  const tunnel = await connectThrough(p.port);
+  assert.equal(tunnel.status, 200);
+  const started = Date.now();
+  await stopWithin(p);
+  assert.ok(Date.now() - started < 1500, "stop() waited for the default grace");
+  await within("the tunnel to close", closing(tunnel.socket));
+});
+
+function stubAdmin(reply: { status?: number; body: string }): Control {
+  const root = mkdtempSync("/tmp/cog-");
+  defer(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+  const admin = path.join(root, "a.sock");
+  const server = createServer((request, response) => {
+    response
+      .writeHead(request.url === "/proxy" ? (reply.status ?? 200) : 404)
+      .end(reply.body);
+  });
+  server.listen(admin);
+  defer(async () => {
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+  });
+  const control = new Control(
+    {
+      state: path.join(root, "state"),
+      sockets: path.join(root, "sock"),
+      secrets: path.join(root, "secrets"),
+      admin,
+      pool: path.join(root, "pool"),
+      proxy: path.join(root, "proxy-url"),
+      proxyCa: path.join(root, "ca.pem"),
+    },
+    { actor: "tester" },
+  );
+  defer(() => {
+    control.close();
+  });
+  return control;
+}
+
+test("Control.proxy returns the three answers of the daemon", async () => {
+  for (const answer of [
+    { state: "off", reason: null },
+    { state: "listening", reason: null },
+    { state: "unusable", reason: "the Mac is not registered" },
+  ]) {
+    const control = stubAdmin({ body: JSON.stringify(answer) });
+    assert.deepEqual(await control.proxy(), answer);
+  }
+});
+
+test("Control.proxy reads what a running gateway answers", async () => {
+  const p = await startProxied({ file: null });
+  const control = new Control(
+    {
+      state: path.join(p.root, "state"),
+      sockets: path.join(p.root, "sock"),
+      secrets: path.join(p.root, "secrets"),
+      admin: p.adminSocket,
+      pool: path.join(p.root, "claude-pool"),
+      proxy: p.proxyFile,
+      proxyCa: path.join(p.root, "ca.pem"),
+    },
+    { actor: "tester" },
+  );
+  defer(() => {
+    control.close();
+  });
+  assert.deepEqual(await control.proxy(), {
+    state: "unusable",
+    reason: "the proxy URL file is missing",
+  });
+  writeProxyFile(p.proxyFile, proxyUrl(macKey, p.port));
+  await control.sync();
+  assert.deepEqual(await control.proxy(), { state: "listening", reason: null });
+});
+
+test("Control.proxy says that an older daemon needs ./install.sh, and fails when the daemon refuses", async () => {
+  await assert.rejects(
+    stubAdmin({ status: 404, body: "" }).proxy(),
+    /the running gateway is older than this cog; run \.\/install\.sh/,
+  );
+  await assert.rejects(
+    stubAdmin({ status: 503, body: "" }).proxy(),
+    /gateway administration failed/,
+  );
+});
+
+test.each([
+  ["text", "not json", /invalid JSON/],
+  ["an array", "[]", /invalid proxy state/],
+  ["null", "null", /invalid proxy state/],
+  [
+    "an unknown state",
+    JSON.stringify({ state: "broken", reason: null }),
+    /invalid proxy state/,
+  ],
+  [
+    "a reason with off",
+    JSON.stringify({ state: "off", reason: "x" }),
+    /invalid proxy reason/,
+  ],
+  [
+    "a reason with listening",
+    JSON.stringify({ state: "listening", reason: "x" }),
+    /invalid proxy reason/,
+  ],
+  [
+    "unusable without a reason",
+    JSON.stringify({ state: "unusable", reason: null }),
+    /invalid proxy reason/,
+  ],
+  [
+    "unusable with an empty reason",
+    JSON.stringify({ state: "unusable", reason: "" }),
+    /invalid proxy reason/,
+  ],
+  [
+    "an oversized answer",
+    JSON.stringify({ state: "unusable", reason: "x".repeat(5000) }),
+    /answer too big/,
+  ],
+] as const)(
+  "Control.proxy rejects an answer with %s",
+  async (_, body, message) => {
+    await assert.rejects(stubAdmin({ body }).proxy(), message);
+  },
+);

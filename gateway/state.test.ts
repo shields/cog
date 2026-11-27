@@ -19,7 +19,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, mock, spyOn, test } from "bun:test";
 import { compareCodeUnits } from "./policy.ts";
-import { State } from "./state.ts";
+import { macInstance, State } from "./state.ts";
 
 afterEach(() => {
   mock.restore();
@@ -541,4 +541,58 @@ test("a policy that is not a mapping is rejected and leaves the grants in place"
     assert.equal(state.byName("lima:work")?.revision, 1);
     assert.deepEqual(state.grants(instance.id), { "shields/dotfiles": read });
   });
+});
+
+test("the Mac is registered by the exact name mac, and other names without the lima: prefix stay refused", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-state-"));
+  const state = new State(directory);
+  try {
+    for (const name of [
+      "mac2",
+      "host",
+      "Mac",
+      "mac:1",
+      "MAC",
+      "mac ",
+      "lima",
+    ]) {
+      assert.throws(
+        () => state.register(name, path.join(directory, "x.sock"), "tester"),
+        /invalid VM name/,
+        name,
+      );
+    }
+    const mac = state.register(
+      macInstance,
+      path.join(directory, "mac.sock"),
+      "tester",
+    );
+    assert.equal(mac.name, "mac");
+    assert.equal(state.byName("mac")?.id, mac.id);
+    assert.throws(
+      () => state.register("mac", path.join(directory, "m2.sock"), "tester"),
+      /already registered/,
+    );
+  } finally {
+    state.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the Mac can be disabled and registered again as a new instance", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-state-"));
+  const state = new State(directory);
+  try {
+    const first = state.register("mac", path.join(directory, "a.sock"), "t");
+    state.disable("mac", "tester");
+    assert.equal(state.byName("mac"), null);
+    const second = state.register("mac", path.join(directory, "b.sock"), "t");
+    assert.notEqual(second.id, first.id);
+    assert.equal(second.name, "mac");
+    assert.equal(state.byName("mac")?.id, second.id);
+    assert.equal(state.byId(first.id)?.disabled, true);
+  } finally {
+    state.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

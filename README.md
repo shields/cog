@@ -34,15 +34,17 @@ The gateway runs under a Seatbelt profile (`gateway/gateway.sb`, installed as
 `~/.config/secrets/cog` it may read and write only the four certificate files
 and `ca.srl`, the certificate lock and work directories, and the GitHub
 authorization records with their temporary and lock names, and read
-`claude-pool/`. In `~/.local/state/cog` it may read and write only
-`state.sqlite` and its `-wal`, `-shm` and `-journal` files, the VM sockets in
-`sock/` and `admin.sock`. The Tailscale and Cloudflare credentials that only
+`claude-pool/` and `proxy-url`. In `~/.local/state/cog` it may read and write
+only `state.sqlite` and its `-wal`, `-shm` and `-journal` files, the VM sockets
+in `sock/` and `admin.sock`. The Tailscale and Cloudflare credentials that only
 the CLI uses sit in the same secrets directory and are out of its reach, though
 it can list the names in the two directories. It listens only on those sockets
-and reads `~/.config/secrets/FIREWORKS_API_KEY`, the `openssl` configuration
-and the system libraries. It runs only itself and `openssl`, and connects only
-to port 443 on other hosts, never on the Mac's own addresses, to the name
-resolver and to its own admin socket. It cannot read the rest of your home
+and, for `cog proxy`, on `localhost:17443` (the code binds `[::1]`), and reads
+`~/.config/secrets/FIREWORKS_API_KEY`, the `openssl` configuration and the
+system libraries. It runs only itself and `openssl`, and connects only to port
+443 on other hosts, never on the Mac's own addresses, to the name resolver, to
+its own admin socket and to the VM sockets, which is how the proxy hands a
+tunnel to the instance that serves it. It cannot read the rest of your home
 directory, stat anything outside those paths except a symbolic link, run any
 other program, connect to other ports or sockets, list other processes or read
 their arguments and environment, read NVRAM variables or the serial number, or
@@ -52,10 +54,10 @@ macOS asks for consent to access files on a removable volume for each newly
 built gateway, and the gateway waits for the answer before it can listen.
 
 Seatbelt cannot name a host, so a compromised gateway can still connect to any
-remote host on port 443 and resolve any name, and it can still use what it
-owns: the database, the CA key, the GitHub tokens, the Claude pool and the
-Fireworks key. The profile does not protect those files from other programs
-running as you. It also leaves some operations allowed that a version 1
+remote host on port 443 and resolve any name, and it can still use what it owns:
+the database, the CA key, the GitHub tokens, the Claude pool, the Fireworks key
+and the proxy's key. The profile does not protect those files from other
+programs running as you. It also leaves some operations allowed that a version 1
 profile allows under `(deny default)` and the daemon's own code may need, such
 as testing whether a path exists, querying the code signature of a process and
 the system calls of its own process.
@@ -110,9 +112,11 @@ none; launchd kills it after 60 seconds, so the installer checks for it to go up
 to 700 times, pausing 0.1 second after each check. Then it waits for
 `cog gateway health` to report readiness. If that fails, check
 `~/Library/Logs/dev.msrl.cog.gateway.err`; standard output goes to the adjacent
-`.out` file. `./install.sh --uninstall` unloads the agent and removes
-its plist, binary, profile and link. It keeps logs, `~/.local/state/cog`,
-`~/.config/secrets/cog`, `~/.config/cog` and the VMs.
+`.out` file. `./install.sh --uninstall` unloads the agent and removes its plist,
+binary, profile and link. It keeps logs, `~/.local/state/cog`,
+`~/.config/secrets/cog`, `~/.config/cog` and the VMs. If `cog proxy enable` has
+run, run `cog proxy disable` first: the kept `proxy-url` makes dotfiles' `c`
+fail, with `cog` gone, until you delete that file.
 
 The Mac needs `limactl`, `git`, `tar`, `gitleaks` 8.19 or newer, `jq`, `socat`,
 `gh`, `bun` and `openssl` (macOS ships one). Public checkouts work without a
@@ -139,6 +143,7 @@ cog base [--dotfiles DIR] [MODULE...]
 cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude] [--no-codex]
 cog grant NAME [OWNER/REPO] [--profile read|cog]
 cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status
+cog proxy enable | disable | status | logs [--follow|--all]
 cog tailscale config CLIENT-ID
 cog disable NAME
 cog rm NAME
@@ -149,11 +154,13 @@ cog list | ls
 tens of minutes. `cog new` makes a VM from a clone of the base, installs the
 secrets and the repository, and opens a shell in it. `cog grant` adds a
 repository grant to a running VM. `cog account` keeps the Claude accounts that
-every VM uses through the gateway. `cog disable` cuts a VM off from the gateway
-(GitHub and the models) for good: there is no enable, and `cog rm NAME` then
-deletes the VM. `cog rm` disables the VM's gateway access itself and deletes
-it, and refuses the base. `cog list`, also spelled `cog ls`, is `limactl list`.
-`ssh lima-NAME` also works, through `~/.lima/*/ssh.config`.
+every VM uses through the gateway. `cog proxy` lets the Claude Code that runs on
+the Mac use those accounts too (see "Claude Code on the Mac"). `cog disable`
+cuts a VM off from the gateway (GitHub and the models) for good: there is no
+enable, and `cog rm NAME` then deletes the VM. `cog rm` disables the VM's
+gateway access itself and deletes it, and refuses the base. `cog list`, also
+spelled `cog ls`, is `limactl list`. `ssh lima-NAME` also works, through
+`~/.lima/*/ssh.config`.
 
 `cog base` takes the dotfiles checkout from `--dotfiles DIR`, or else
 `~/src/github.com/shields/dotfiles`; it never infers it from the current
@@ -217,7 +224,9 @@ VM stays ready; reconnect with `limactl shell NAME`.
 
 Tests replace the terminal and the gateway locations with `COG_PROMPT_INPUT`
 (a file supplying the first line for a hidden credential prompt) and
-`COG_ROOT`. The program honours both outside tests.
+`COG_ROOT`, and the proxy's port with `COG_PROXY_PORT`. The program honours all
+three outside tests, but the installed gateway's profile lets it listen only on
+the default port.
 
 ## Connect from your phone
 
@@ -541,6 +550,86 @@ the rename again says that there is no account OLD. If the removal of OLD failed
 too, `cog: interrupted` is all that is shown and `cog account list` shows both
 names; finish with `cog account rm claude OLD`.
 
+### Claude Code on the Mac
+
+`cog proxy enable` lets the Claude Code that runs on the Mac itself use the
+pool and hold only the placeholder `cog`, as a VM's does. The gateway then
+listens on `[::1]:17443` as an HTTP proxy that accepts only `CONNECT` to port
+443 with the proxy's key. A tunnel for `api.anthropic.com` ends at the gateway,
+which answers with its own certificate and treats the requests in it as it
+treats a VM's: `Authorization: Bearer cog` gets a pool token, a request with no
+credential goes through as sent, and any other credential is refused. A tunnel
+for any other host is connected to that host and carried untouched, with no
+inspection and no audit row. It has to be: with `HTTPS_PROXY` set, Claude Code
+and the programs it starts send every HTTPS connection to the proxy.
+
+The command needs a running gateway with a usable pool. It writes the value for
+`HTTPS_PROXY`, `http://cog:KEY@[::1]:17443`, to
+`~/.config/secrets/cog/proxy-url` (mode 0600), registers the Mac with the
+gateway as the instance `mac`, checks that the gateway listens, and then copies
+the gateway's CA certificate to `~/.local/state/cog/ca.pem`. If the registration
+fails or the gateway does not listen, it removes what it wrote and says why. If
+a later step fails (the copy of the CA certificate, or asking the gateway
+again), the file and the registration stay, `cog proxy status` fails with the
+reason, and `cog proxy enable` again repairs it. Claude Code uses the proxy when
+it starts with these in its environment:
+
+```
+HTTPS_PROXY                  the content of ~/.config/secrets/cog/proxy-url
+NODE_EXTRA_CA_CERTS          ~/.local/state/cog/ca.pem
+CLAUDE_CODE_OAUTH_TOKEN      cog
+```
+
+dotfiles' `c` sets them on a Mac where the file exists, after `cog proxy status`
+has confirmed that the proxy listens. `cog proxy status` prints `listening on
+[::1]:17443 as VM-ID` or `off`, and fails with the reason in any other state:
+the file without the registration or the reverse, a file that cog did not write,
+a port that another program holds, or a CA copy that is not the gateway's CA.
+`cog proxy enable` repairs each of those except a held port: while another
+program holds the port, `enable` fails with the same reason and removes what it
+wrote, so stop that program and run `enable` again. `cog proxy logs
+[--follow|--all]` prints the Mac's requests to Anthropic as `cog logs` prints a
+VM's. `cog proxy disable` removes the file and the CA copy, disables the
+registration, and closes the listener and every tunnel. An `enable` after that
+makes a new key and a new registration, which is how to replace a key, and a
+session that started before it must be started again.
+
+What this does not do, and what it costs:
+
+- The key is in the file, in the environment of Claude Code and of every
+  program it starts outside its sandbox, and in each `CONNECT` on the loopback
+  interface, so it is only as secret as your account on the Mac. It keeps other
+  users of the Mac out. A VM cannot use it even with the key: the proxy listens
+  on `::1` only, and Lima carries a guest's connections to the Mac's
+  `127.0.0.1` and no further. Whoever can connect with the key can use the pool
+  as `mac` and open a tunnel to any host on port 443 that the Mac can reach.
+- Every HTTPS connection of such a session goes through the gateway. Running
+  `./install.sh` or stopping the gateway cuts them, and while no gateway runs
+  the session has no HTTPS at all; `c` refuses to start then.
+- Only port 443 is tunnelled. HTTPS on another port fails with 403, and the
+  Mac's own addresses with 502 (the installed gateway's profile denies them; a
+  gateway run by hand has no profile), so `c` lists `localhost`, `127.0.0.1` and
+  `::1` in `NO_PROXY`.
+- Another Anthropic client in the session reaches the gateway too, so it works
+  only with the placeholder and only if it trusts the gateway's CA, which
+  `NODE_EXTRA_CA_CERTS` gives to Node and Bun programs alone. A program with
+  its own API key needs `HTTPS_PROXY` unset.
+- The registration `mac` gets `api.anthropic.com` and nothing else: a request
+  for `api.fireworks.ai` or GitHub inside its tunnel is refused, so the proxy's
+  key never lends the Mac's Fireworks key or a GitHub token. The Mac's own
+  `cg`, `git` and `gh` keep their own credentials, and their connections are
+  tunnelled untouched.
+- A fault of the proxy (the port is taken, the file is damaged) does not stop
+  the gateway or a VM's access. The gateway writes one line to its log for each
+  change, tries again at every sync and every minute, and `cog proxy status`
+  gives the reason.
+- A tunnel that carries nothing for 20 minutes is closed, and a caller that has
+  not shown the key within 5 seconds is dropped. The gateway keeps 64 places for
+  callers that have not shown the key yet, so a program on the Mac that has no
+  key can still fill them, at 5 seconds a time, and keep the proxy from
+  answering anyone: the key protects the pool and the tunnels, not the proxy's
+  availability.
+
 ### The rest
 
 - `~/.config/secrets/FIREWORKS_API_KEY`, the key `cg` uses, stays on the Mac.
@@ -748,7 +837,14 @@ OWNER/REPO` for a public repository. Then check:
   and replacing the key file on the Mac makes the next request use the new key.
 - From the VM, `curl -m3 host.lima.internal:PORT` fails at once for a server on
   the Mac, and `lsof -nP -iTCP -sTCP:LISTEN` on the Mac shows only Lima's
-  `127.0.0.1` ports.
+  `127.0.0.1` ports and, while the proxy is enabled, the gateway's
+  `[::1]:17443`.
+- After `cog proxy enable`, `c -p hi` on the Mac answers with no login,
+  `cog proxy logs` shows `model.claude` rows that name a pool account, and
+  `curl -x 'http://[::1]:17443' https://example.com/` (no key) gets a 407. From
+  a VM whose nftables table is deleted, `curl -m3 host.lima.internal:17443`
+  still fails. After `cog proxy disable`, `c` on the Mac uses its own login
+  again and nothing listens on the port.
 
 ## Cloudflare containers
 
@@ -880,6 +976,15 @@ credential.
 `/etc/ssl/certs/ca-certificates.crt` and `.zshrc` must export
 `CLAUDE_CODE_OAUTH_TOKEN` from its secrets file. It does not check
 `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` or `cg`.
+
+On the Mac, dotfiles' `c` reads what `cog proxy enable` writes. Where
+`~/.config/secrets/cog/proxy-url` exists, it runs `cog proxy status`, starts
+nothing unless the output begins with `listening `, and then exports
+`HTTPS_PROXY` (the file's content), `NODE_EXTRA_CA_CERTS`
+(`~/.local/state/cog/ca.pem`), `CLAUDE_CODE_OAUTH_TOKEN` (`cog`) and a
+`NO_PROXY` for the loopback names to that `claude` alone. A change to either
+path, to that word of `cog proxy status` or to the placeholder needs the same
+change in dotfiles.
 
 ## History
 

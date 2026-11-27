@@ -76,6 +76,10 @@ interface GrantRow {
   capabilities: string;
 }
 
+// The Mac itself, for the Claude Code that runs on it. A VM's name starts with
+// "lima:", so no VM has this name.
+export const macInstance = "mac";
+
 export class State {
   readonly db: DatabaseSync;
   readonly #base: string;
@@ -202,9 +206,10 @@ export class State {
 
   register(name: string, socket: string, actor: string): Instance {
     if (
-      !/^lima:[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/.test(name) ||
-      name === "lima:cog-base" ||
-      name === `lima:${this.#base}`
+      name !== macInstance &&
+      (!/^lima:[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/.test(name) ||
+        name === "lima:cog-base" ||
+        name === `lima:${this.#base}`)
     ) {
       throw new Error("invalid VM name");
     }

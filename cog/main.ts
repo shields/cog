@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { Control, controlOptions, locations } from "../gateway/control.ts";
+import { proxyPort } from "../gateway/proxy.ts";
 import { baseVM } from "./commands/base.ts";
 import { cloudCommand } from "./commands/cloud.ts";
 import { gatewayCommand } from "./commands/gateway.ts";
@@ -21,6 +22,7 @@ import { disable, grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
 import { accountCommand } from "./commands/account.ts";
 import { authorize, edit, logs, revoke, show } from "./commands/policy.ts";
+import { proxyCommand } from "./commands/proxy.ts";
 import { dotfilesRepo, loadConfig, type Config, type Env } from "./config.ts";
 import { CogError, exitStatus } from "./errors.ts";
 import { createLima, findLimactl, type Lima } from "./lima.ts";
@@ -29,8 +31,9 @@ import { note, say } from "./output.ts";
 import { configureTailscale } from "./tailscale.ts";
 import { promptClaudeToken } from "./secrets.ts";
 
-function usage(config: Config): string {
+function usage(config: Config, env: Env): string {
   const { base, defaultDotfiles, codexAuthFile, fireworksKeyFile } = config;
+  const proxyFile = locations(env).proxy;
   return `usage: cog base [--dotfiles DIR] [MODULE...]
                               build ${base} from lima/dev.yaml and guest/ of this cog and
                               the dotfiles checkout DIR
@@ -54,6 +57,8 @@ function usage(config: Config): string {
                               administer Cloudflare containers
        cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status
                               keep Claude accounts in the gateway's pool
+       cog proxy enable|disable|status|logs [--follow|--all]
+                              let Claude Code on this Mac use the pool through the gateway
        cog disable NAME       cut a VM off from the gateway (GitHub and the models) for
                               good; there is no enable, and cog rm NAME then deletes it
        cog rm NAME            delete a VM (${base} is refused)
@@ -95,6 +100,12 @@ When ${fireworksKeyFile} exists, new asks the gateway whether it is usable,
 wires api.fireworks.ai to the gateway and gives the VM only the placeholder
 cog: the key stays on this Mac, where the gateway reads the file for each
 request. new never reads it.
+
+proxy enable makes the gateway listen on [::1]:${String(proxyPort)} for the Claude
+Code that runs on this Mac, and writes the value for its HTTPS_PROXY, which
+holds a key, to ${proxyFile}. Requests to
+api.anthropic.com then use a pool account as a VM's do, and every other host is
+tunnelled untouched. proxy disable stops that and makes the key useless.
 `;
 }
 
@@ -107,7 +118,7 @@ async function dispatch(
     case "help":
     case "-h":
     case "--help":
-      say(usage(context.config).trimEnd());
+      say(usage(context.config, context.env).trimEnd());
       return 0;
     case "base":
       await baseVM(args, context);
@@ -156,11 +167,14 @@ async function dispatch(
     case "account":
       await accountCommand(args, context);
       return 0;
+    case "proxy":
+      await proxyCommand(args, context);
+      return 0;
     case "cloud":
       say(JSON.stringify(await cloudCommand(args, context.config), null, 2));
       return 0;
     default:
-      note(usage(context.config).trimEnd());
+      note(usage(context.config, context.env).trimEnd());
       return 2;
   }
 }
@@ -175,7 +189,7 @@ async function main(argv: string[], env: Env): Promise<number> {
       validName(config.base);
     }
     if (verb === undefined) {
-      note(usage(config).trimEnd());
+      note(usage(config, env).trimEnd());
       return 2;
     }
     const context: Context = {

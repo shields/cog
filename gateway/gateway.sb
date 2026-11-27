@@ -76,6 +76,10 @@
 (allow file-read*
   (literal (param "FIREWORKS_KEY")))
 
+;; The CLI writes the Mac proxy's URL, which holds its key; the daemon reads it.
+(allow file-read*
+  (literal (string-append (param "SECRETS") "/proxy-url")))
+
 ;; One listener per VM, in the socket directory, and the admin socket. Start
 ;; connects to the admin socket to find a daemon that already owns it.
 (allow network-bind network-inbound
@@ -83,6 +87,15 @@
   (literal (string-append (param "STATE") "/admin.sock")))
 (allow network-outbound
   (literal (string-append (param "STATE") "/admin.sock")))
+
+;; The proxy for the Claude Code that runs on this Mac. The code binds ::1,
+;; which a Lima guest cannot reach; "localhost" here is the only local address
+;; that Seatbelt can name besides "*", and it does not stop a bind of every
+;; address. A tunnel for api.anthropic.com is piped to the Mac's own listener.
+(allow network-bind network-inbound
+  (local tcp "localhost:17443"))
+(allow network-outbound
+  (regex (string-append "^" (regex-quote (param "STATE")) "/sock/github-[0-9a-f-]+\\.sock$")))
 
 ;; Upstream HTTPS, and name resolution through mDNSResponder. Seatbelt can name
 ;; a port but not a host or a range, so any remote host on 443 is reachable;

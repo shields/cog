@@ -20,6 +20,7 @@ import http, {
   type ServerResponse,
 } from "node:http";
 import https from "node:https";
+import type net from "node:net";
 import { AppAuth } from "./auth.ts";
 import {
   classifyModel,
@@ -55,7 +56,15 @@ import {
   type Account,
   type AccountSnapshot,
 } from "./pool.ts";
-import { State } from "./state.ts";
+import {
+  ConnectProxy,
+  interceptedHost,
+  proxyAddress,
+  proxyPort,
+  readProxyUrl,
+  type ProxyStatus,
+} from "./proxy.ts";
+import { macInstance, State } from "./state.ts";
 
 interface RequestBody {
   buffered: Buffer;
@@ -78,6 +87,10 @@ export interface GatewayOptions {
   fireworksUpstream?: string;
   fireworksKeyFile?: string;
   upstreamIdleTimeout?: number;
+  proxyFile?: string;
+  proxyPort?: number;
+  proxyConnect?: (host: string) => net.Socket;
+  proxyGrace?: number;
 }
 
 interface ModelCredential {
@@ -94,6 +107,8 @@ const fireworksUnusable = "the Fireworks key is not usable on the Mac";
 const upstreamIdleTimeout = 30_000;
 
 const drainTimeout = 60_000;
+
+const proxyGrace = 2000;
 
 const forwardedHeaders = [
   "accept",
@@ -342,6 +357,8 @@ export class Gateway {
   private lastPool: AccountPool | null = null;
   private poolReason: string | null = null;
   private fireworksReason: string | null = null;
+  private proxy: ConnectProxy | null = null;
+  private proxyReason: string | null = null;
   private stopped = false;
   private starting: Promise<void> | null = null;
   private stopping: Promise<void> | null = null;
@@ -431,7 +448,11 @@ export class Gateway {
   refresh(): Promise<void> {
     const next = (async () => {
       await Promise.allSettled([this.syncing]);
-      await this.refreshNow();
+      try {
+        await this.refreshNow();
+      } finally {
+        await this.reconcileProxy();
+      }
     })();
     this.syncing = next;
     return next;
@@ -494,6 +515,80 @@ export class Gateway {
     }
   }
 
+  // A fault here stops neither the gateway nor a sync, which every VM depends
+  // on.
+  private async reconcileProxy(): Promise<void> {
+    const file = this.options.proxyFile;
+    const port = this.options.proxyPort ?? proxyPort;
+    const read =
+      file === undefined
+        ? ({ kind: "missing" } as const)
+        : readProxyUrl(file, port);
+    const mac = this.state.byName(macInstance);
+    let reason: string | null = null;
+    let wanted: { key: string; socket: string } | null = null;
+    if (read.kind === "unusable") {
+      reason = `the proxy URL file ${read.reason}`;
+    } else if (read.kind === "missing") {
+      reason = mac === null ? null : "the proxy URL file is missing";
+    } else if (mac === null || !this.listeners.has(mac.id)) {
+      reason = "the Mac is not registered";
+    } else {
+      wanted = { key: read.key, socket: mac.socket };
+    }
+    const running = this.proxy;
+    if (
+      running !== null &&
+      (running.key !== wanted?.key || running.socket !== wanted.socket)
+    ) {
+      this.proxy = null;
+      await running.close();
+    }
+    if (wanted !== null && this.proxy === null && !this.stopped) {
+      const proxy = new ConnectProxy({
+        ...wanted,
+        port,
+        onFailure: () => {
+          if (this.proxy !== proxy) {
+            return;
+          }
+          this.proxy = null;
+          this.proxyReason = "its listener failed";
+          process.stderr.write(
+            "cog: Mac proxy unavailable: its listener failed\n",
+          );
+        },
+        ...(this.options.proxyConnect === undefined
+          ? {}
+          : { connect: this.options.proxyConnect }),
+      });
+      try {
+        await proxy.listen();
+        this.proxy = proxy;
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        reason = `cannot listen on [${proxyAddress}]:${String(port)} (${
+          typeof code === "string" && /^[A-Z0-9_]+$/u.test(code)
+            ? code
+            : "an error"
+        })`;
+      }
+    }
+    if (reason !== null && reason !== this.proxyReason) {
+      process.stderr.write(`cog: Mac proxy unavailable: ${reason}\n`);
+    }
+    this.proxyReason = reason;
+  }
+
+  private proxyStatus(): ProxyStatus {
+    if (this.proxy !== null) {
+      return { state: "listening", reason: null };
+    }
+    return this.proxyReason === null
+      ? { state: "off", reason: null }
+      : { state: "unusable", reason: this.proxyReason };
+  }
+
   private async startAdmin(): Promise<void> {
     if (existsSync(this.options.adminSocket)) {
       rmSync(this.options.adminSocket);
@@ -513,6 +608,10 @@ export class Gateway {
         response
           .writeHead(200, { "content-type": "application/json" })
           .end(JSON.stringify(this.fireworksKeyStatus()));
+      } else if (request.method === "GET" && request.url === "/proxy") {
+        response
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify(this.proxyStatus()));
       } else {
         response.writeHead(404).end();
       }
@@ -598,6 +697,7 @@ export class Gateway {
     // A refresh that is starting a server, and a start() that is opening the
     // admin server, add theirs before the servers to close are collected.
     await Promise.allSettled([this.starting, this.syncing]);
+    this.proxy?.quiesce();
     const serving = [
       ...this.listeners.values(),
       ...(this.admin ? [this.admin] : []),
@@ -623,7 +723,17 @@ export class Gateway {
     for (const server of this.retired.keys()) {
       server.closeAllConnections();
     }
+    // An intercepted tunnel ends when its instance's server closes the
+    // connection, which that server does only for one that is idle. A tunnel
+    // that never became one (a handshake that stopped half-way) would hold the
+    // close back for ever.
+    const cut = setTimeout(() => {
+      void this.proxy?.close();
+    }, this.options.proxyGrace ?? proxyGrace);
     await Promise.all(closes);
+    clearTimeout(cut);
+    await this.proxy?.close(this.options.proxyGrace ?? proxyGrace);
+    this.proxy = null;
     this.listeners.clear();
     this.admin = null;
     await this.awaitHandlers();
@@ -680,8 +790,15 @@ export class Gateway {
     let settlement: Settlement;
     const remaining = bodyIterator(request);
     try {
-      revision = this.state.byId(instanceId)?.revision ?? 0;
+      const registered = this.state.byId(instanceId);
+      revision = registered?.revision ?? 0;
       const host = request.headers.host?.toLowerCase();
+      // The proxy hands over a tunnel that was opened for one host, and the
+      // request inside it names its own. The Mac holds its own Fireworks key
+      // and GitHub credentials, so the gateway lends it neither.
+      if (host !== interceptedHost && registered?.name === macInstance) {
+        throw new PolicyError(`the Mac's proxy serves only ${interceptedHost}`);
+      }
       const target = request.url ?? "";
       const method = request.method ?? "";
       const model = modelHostFor(host);

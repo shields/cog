@@ -45,6 +45,7 @@ import {
   socketName,
 } from "./control.ts";
 import { compareCodeUnits, type Grant } from "./policy.ts";
+import { proxyPort } from "./proxy.ts";
 import { State } from "./state.ts";
 
 const read: Grant = { read: true, pushCogBranches: false };
@@ -101,6 +102,8 @@ test("locations come from COG_ROOT, else from HOME", () => {
     secrets: "/r/secrets",
     admin: "/r/state/admin.sock",
     pool: "/r/secrets/claude-pool",
+    proxy: "/r/secrets/proxy-url",
+    proxyCa: "/r/state/ca.pem",
   });
   assert.deepEqual(locations({ HOME: "/h" }), {
     state: "/h/.local/state/cog",
@@ -108,6 +111,8 @@ test("locations come from COG_ROOT, else from HOME", () => {
     secrets: "/h/.config/secrets/cog",
     admin: "/h/.local/state/cog/admin.sock",
     pool: "/h/.config/secrets/cog/claude-pool",
+    proxy: "/h/.config/secrets/cog/proxy-url",
+    proxyCa: "/h/.local/state/cog/ca.pem",
   });
   assert.throws(() => locations({}), /HOME is not set/);
   assert.throws(() => locations({ HOME: "" }), /HOME is not set/);
@@ -987,6 +992,8 @@ test("the profile refuses the files that only the CLI uses", () => {
     `${tailscale}.1.2.tmp`,
     "cloudflare-admin-token",
     ".cloudflare-admin-token.AbC123",
+    "proxy-url",
+    ".proxy-url.0123456789ab",
     "notes.txt",
     "claude-pool/new",
   ]) {
@@ -1033,11 +1040,24 @@ test("the profile admits the database files and the socket names that the gatewa
   assert.ok(
     binds.some((pattern) => pattern.test(`${directory}/sock/${socket}`)),
   );
+  const connects = profilePatterns(
+    "(allow network-outbound",
+    "STATE",
+    directory,
+  );
+  assert.ok(
+    connects.some((pattern) => pattern.test(`${directory}/sock/${socket}`)),
+  );
   for (const name of ["sock/other.sock", "sock/github-ab.sock.txt", "evil"]) {
-    assert.ok(
-      binds.every((pattern) => !pattern.test(`${directory}/${name}`)),
-      `${name} may be bound`,
-    );
+    for (const [verb, patterns] of [
+      ["bound", binds],
+      ["connected to", connects],
+    ] as const) {
+      assert.ok(
+        patterns.every((pattern) => !pattern.test(`${directory}/${name}`)),
+        `${name} may be ${verb}`,
+      );
+    }
   }
   assert.ok(
     topLevelForms(profile).some(
@@ -1065,6 +1085,7 @@ test("the profile's literal paths are the ones that the code names", () => {
   assert.equal(path.relative(where.state, where.admin), "admin.sock");
   assert.equal(path.relative(where.state, where.sockets), "sock");
   assert.equal(path.relative(where.secrets, where.pool), "claude-pool");
+  assert.equal(path.relative(where.secrets, where.proxy), "proxy-url");
   const forms = topLevelForms(profile).map((form) =>
     form.replaceAll(/\s+/gu, " "),
   );
@@ -1084,9 +1105,12 @@ test("the profile's literal paths are the ones that the code names", () => {
     '(allow file-read* file-write-mode (literal (param "STATE")) (literal (param "SECRETS")))',
     '(allow file-read* (subpath (string-append (param "SECRETS") "/claude-pool")))',
     '(allow file-read* (literal (param "FIREWORKS_KEY")))',
+    '(allow file-read* (literal (string-append (param "SECRETS") "/proxy-url")))',
+    `(allow network-bind network-inbound (local tcp "localhost:${String(proxyPort)}"))`,
   ]) {
     assert.ok(forms.includes(rule), rule);
   }
+  assert.equal(new Control(where).proxyPort, proxyPort);
 });
 
 // A daemon that was killed leaves its socket file behind.

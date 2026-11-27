@@ -16,7 +16,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { required } from "../../gateway/control.ts";
+import { required, type Control } from "../../gateway/control.ts";
+import type { Instance } from "../../gateway/state.ts";
 import { CogError } from "../errors.ts";
 import { gatewayName, validName } from "../names.ts";
 import { say, writeAll } from "../output.ts";
@@ -104,7 +105,15 @@ export async function logs(
   const gateway = context.gateway();
   const asName = gatewayName(selector);
   const lookup = gateway.state.byName(asName) ? asName : selector;
-  const instance = gateway.findInstance(lookup);
+  await printLogs(gateway, gateway.findInstance(lookup), mode, options);
+}
+
+export async function printLogs(
+  gateway: Pick<Control, "logs">,
+  instance: Instance,
+  mode: "--follow" | "--all" | undefined,
+  options: LogsOptions = standardLogs,
+): Promise<void> {
   let seen = new Set<string>();
   const unfinished = new Set<string>();
   const limit = mode === "--all" ? -1 : 100;

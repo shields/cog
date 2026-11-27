@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { Gateway } from "../../gateway/server.ts";
+import { macInstance } from "../../gateway/state.ts";
 import { CogError } from "../errors.ts";
 import { note, say } from "../output.ts";
 import type { Context } from "./context.ts";
@@ -42,8 +43,11 @@ async function serve(args: string[], context: Context): Promise<void> {
     }
     control.ensureSocketDirectory();
     for (const instance of control.disableOutsideSocketDirectory()) {
+      const name = instance.name.replace(/^lima:/, "");
       note(
-        `cog: ${instance.name.replace(/^lima:/, "")} (${instance.id}) was registered by an older cog; its gateway access is disabled; run cog rm ${instance.name.replace(/^lima:/, "")} and make it again with cog new`,
+        instance.name === macInstance
+          ? `cog: the Mac's proxy registration (${instance.id}) was made outside this state directory; its gateway access is disabled; run cog proxy enable`
+          : `cog: ${name} (${instance.id}) was registered by an older cog; its gateway access is disabled; run cog rm ${name} and make it again with cog new`,
       );
     }
     control.removeStaleSockets();
@@ -52,6 +56,8 @@ async function serve(args: string[], context: Context): Promise<void> {
       adminSocket: control.location.admin,
       pool: control.location.pool,
       fireworksKeyFile: context.config.fireworksKeyFile,
+      proxyFile: control.location.proxy,
+      proxyPort: control.proxyPort,
     });
     await gateway.start();
     await stopped;

@@ -125,6 +125,8 @@ function fixture(options: Options = {}) {
         secrets: path.join(root, "secrets"),
         admin: path.join(root, "state", "admin.sock"),
         pool,
+        proxy: path.join(root, "secrets", "proxy-url"),
+        proxyCa: path.join(root, "state", "ca.pem"),
       },
       sync: () => {
         calls.push("sync");

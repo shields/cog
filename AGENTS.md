@@ -244,6 +244,66 @@
   checkout. `gateway/policy.ts` defines both built-in grant profiles.
   `pushCogBranches` enables pushes in a persisted grant. `cog new` reads public
   repositories anonymously and grants read-only access to a private checkout.
+- `gateway/proxy.ts` is the proxy for the Claude Code that runs on the Mac
+  itself, which `cog proxy` (`cog/commands/proxy.ts`) administers. The Mac is
+  one more registered instance, named `mac` (`macInstance`): `State.register`
+  takes that one name without the `lima:` prefix, and every VM command adds the
+  prefix (`gatewayName`), so none of them can change it; only `cog logs mac`
+  reaches it, to read its rows, since `logs` falls back to the name as typed.
+  `cog proxy enable` asks `GET /proxy` first (a 404 is an older daemon, and
+  nothing is written), needs a usable pool, writes `SECRETS/proxy-url` (the
+  whole value for `HTTPS_PROXY`, `http://cog:KEY@[::1]:17443`, KEY being 32
+  random bytes in base64url), registers `mac`, asks `/proxy` again and, unless
+  the answer is `listening`, removes the file and disables the instance. It then
+  copies the CA certificate to `STATE/ca.pem` (`Locations.proxyCa`): the sandbox
+  of the Mac's Claude Code keeps the commands it runs out of
+  `~/.config/secrets`, and Bun warns at each connection when it cannot read the
+  file that `NODE_EXTRA_CA_CERTS` names. `status` prints `off`, or
+  `listening on` with the address and the instance's ID, and fails for
+  `unusable` and for a CA copy that differs; dotfiles' `c` reads that first
+  word. `disable` removes both files before it tells the daemon, so a daemon
+  that cannot be told leaves nothing usable.
+  `Gateway.reconcileProxy` runs after every refresh (the start, `/sync`, each
+  minute), also one that failed for another instance's listener, and keeps a
+  `ConnectProxy` listening while the file is usable and `mac` is active. A fault
+  (an unusable file, no registration, EADDRINUSE) never fails the start or a
+  sync, which every VM depends on: one stderr line per change of reason, the
+  reason in `/proxy`, and another try at the next refresh. The listener is
+  replaced only when the key or the socket changes, so a sync for something else
+  cuts no tunnel.
+  It listens on `::1` alone, and that is what keeps guests out: a guest that
+  removes its firewall reaches the Mac's `127.0.0.1` through 192.168.5.2, and
+  nothing forwards to `::1`. Never bind `127.0.0.1` or a name. The port is a
+  constant (`proxyPort`) and a literal in the profile, pinned together by a
+  test; `COG_PROXY_PORT` moves it for the tests, which must not take the port
+  of a gateway installed on the same Mac, and the installed daemon can bind no
+  other.
+  The request head is parsed by hand: at most 8 KiB within 5 seconds, and at
+  most 64 callers that have not yet shown the key (a program without the key can
+  fill those places and keep the proxy from answering). Only `CONNECT host:443`
+  with exactly one `Proxy-Authorization: Basic` whose decoded value is `cog:KEY`
+  (SHA-256 digests under `timingSafeEqual`) is served, and the credential is
+  judged first, so a caller without it sees 407 for any request that parses, 400
+  for a head that does not, and nothing when a quota or the head timeout drops
+  it. `api.anthropic.com` is piped to the `mac` instance's Unix socket, where
+  the HTTPS server terminates TLS as it does behind a guest's relay, since Bun's
+  `node:https` server cannot be handed an accepted socket. Any other host is
+  connected on port 443 and piped, with no inspection and no audit row.
+  `handle()` refuses every Host but `api.anthropic.com` for the `mac` instance:
+  the request inside a tunnel names its own host, and the others would lend the
+  Mac's Fireworks key or a GitHub token to whoever holds the proxy's key. The
+  sockets are half-open and `pipe` propagates an end. When one side closes, the
+  other is destroyed at once unless `pipe` has ended it, in which case it is
+  destroyed once it has finished writing (`finish`); a close by error or reset
+  drops what the other still holds. A tunnel that carries nothing for 20 minutes
+  is dropped. On shutdown `quiesce()` stops the listener and destroys the
+  tunnels to other hosts; a tunnel to the `mac` instance ends when that
+  instance's server closes the connection, which Bun does only for an idle one,
+  so `proxyGrace` (2 seconds) after the handlers finish the rest are destroyed,
+  or a tunnel that connected and sent nothing would hold `stop()` until launchd
+  kills the daemon. After the servers close, `close(grace)` waits that long
+  again for the tunnels to empty, because a server that answers and closes
+  (`Connection: close`) leaves the end of its answer in the pipe.
 - Names: the push namespace is `cog/VM-ID/*`; the markers are
   `/etc/cog-throwaway` and `/etc/cog-gateway`; the base is `cog-base`
   (`COG_BASE`); the guest socket is `/tmp/cog-github.sock` and the host
@@ -285,6 +345,7 @@
   to be listed and given a mode (`STATE/sock` also to be made), since the
   daemon `chmod`s them and fsyncs them. In STATE: `state.sqlite` with `-wal`,
   `-shm` and `-journal`, `sock/github-<hex and dashes>.sock` and `admin.sock`.
+  `SECRETS/proxy-url` is read-only, and `STATE/ca.pem` is the CLI's alone.
   A new file that the daemon makes in SECRETS or STATE needs a rule in the
   profile and a case in the tests that match the code's names against the
   profile (the tests in `gateway/control.test.ts` whose titles start with
@@ -314,20 +375,24 @@
   does not cover) and the `syscall-*` operations; the profile cannot name
   a remote host, so port 443 anywhere and any DNS name stay open, and it cannot
   hide the daemon's own database, CA key and tokens from the daemon. The
-  listeners are allowed only on `STATE/sock/github-<hex and dashes>.sock` and
-  `STATE/admin.sock`, outbound connections go to that socket, port 443 and
-  the resolver, and those to the Mac's own addresses are denied after the
-  allow of port 443. Before it unloads the running agent, `install.sh` runs the
-  staged binary's `help` under the staged profile from `/`. A change to the
-  profile or to the paths it names needs the matching change in `install.sh` and
-  the README.
+  listeners are allowed only on `STATE/sock/github-<hex and dashes>.sock`,
+  `STATE/admin.sock` and `(local tcp "localhost:17443")` for the proxy, outbound
+  connections go to the admin socket, the VM sockets (for the proxy's pipe),
+  port 443 and the resolver, and those to the Mac's own addresses are denied
+  after the allow of port 443. `localhost` is the only local address that
+  Seatbelt names besides `*`, and it also admits a bind of `127.0.0.1` or of
+  every address, so the code's `::1` with `ipv6Only` is what keeps guests out.
+  Before it unloads the running agent, `install.sh` runs the staged binary's
+  `help` under the staged profile from `/`. A change to the profile or to the
+  paths it names needs the matching change in `install.sh` and the README.
 - `guest/throwaway.sh` requires `--claude-settings FILE`, since cog has no
   `.claude/settings.json`; the tests use `tests/fixtures/claude-settings.json`.
 
 ## Secrets
 
-No secret may reach an argument list, an environment, a log or a message. The
-Codex login goes to `guest/setup-secrets NAME` on stdin, and so do the
+No secret may reach an argument list, an environment, a log or a message,
+except the Mac proxy's key in the environment of the Mac's Claude Code (below).
+The Codex login goes to `guest/setup-secrets NAME` on stdin, and so do the
 placeholder `cog` for Claude and, when the Mac has a Fireworks key file, for
 Fireworks; a Lima guest holds no real Claude token or Fireworks key. The
 gateway reads the Fireworks key on the Mac for each credentialed request, and
@@ -356,6 +421,12 @@ reads `/dev/null` unless a pipe or file is meant for it, or it is the final
 shell, so that none swallows what was typed for the shell; `tests/test_cog.zsh`
 holds a line in cog's stdin and checks that only the final shell reads it.
 `cog base` never reads cog's stdin, including during staging.
+The proxy URL holds a key. cog writes it with `writeSecretFile` and never
+prints it, passes it or puts it in an environment. dotfiles' `c` exports it as
+`HTTPS_PROXY` to the Mac's Claude Code, whose children outside its sandbox
+inherit it: that is the one cog secret in an environment, because a client
+takes a proxy credential in no other way. The key keeps other users of the Mac
+out and nothing more; the bind to `::1` is what keeps guests out.
 `cog new` ends, when Claude or Fireworks is wired, with `sh -c 'exec zsh -i -c
 "$1" 2>/dev/null' sh SCRIPT` through `lima.shellOutput`, with stdin from
 `/dev/null`. The one-line script starts with a bare `print`, which ends any
@@ -402,6 +473,9 @@ containing `git_guard.py`, the five `git push` deny rules, at least one of which
 must be present) needs the same change in dotfiles. The marker lists in
 `cog/commands/base.ts` and `cloudflare/context.sh` must include every dotfiles
 file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`.
+On the Mac, dotfiles' `c` reads `SECRETS/proxy-url`, `STATE/ca.pem` and the
+first word of `cog proxy status` (`listening`), and exports the placeholder
+`cog`; a change to any of the four needs the same change there.
 
 ## Tests
 
@@ -455,16 +529,28 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   one that never finishes costs its id in memory and a place in that statement.
 - `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
   refresh, live grants, audit and the HTTPS Unix socket. `cog/*.test.ts` cover
-  the CLI and foundation modules, including a real `gateway serve` that
-  disables older registrations, clears stale sockets and removes its own, one
-  that is signalled while it issues the certificates, and
+  the CLI and foundation modules, including a real `gateway serve` that disables
+  older registrations, clears stale sockets and removes its own, one that is
+  signalled while it issues the certificates, one that starts the Mac's proxy
+  from its URL file on the port that `COG_PROXY_PORT` names, and
   `cog/account.test.ts` signals `cog account add` and `rename` through a hook in
   the write; the no-echo prompt runs under a pseudo-terminal and needs `stty`.
 - `gateway/cert.test.ts` checks strict verification and the identifiers on
   both OpenSSL 3 and LibreSSL; a real TLS handshake from Python is not tested.
   `gateway/server.test.ts` counts connections per keep-alive agent, one host
   for each, since Bun's `https.Agent` keys sockets by servername.
-- No automated test runs the real profile, which needs macOS.
+- `gateway/proxy.test.ts` covers the parser, the credential check and a
+  `ConnectProxy` against TCP and Unix-socket stubs; the proxy section at the end
+  of `gateway/server.test.ts` covers the gateway with it (the `mac` instance,
+  `/proxy`, reconciling at a sync and by the minute timer, shutdown with tunnels
+  open), and `cog/proxy.test.ts` runs the real CLI against an in-process
+  gateway. Each takes a free port on `::1` and never 17443. `onFailure`, for a
+  listener that fails after it began to listen, has no test.
+- No automated test runs the real profile, which needs macOS. For the proxy
+  rules, run a scratch daemon as described above without `COG_PROXY_PORT`
+  (the profile's port is literal), `cog proxy enable` against it, and check a
+  request to `https://api.anthropic.com/__cog__/health` and one to another
+  host through it.
 - No automated test covers a live launchd install, real GitHub authorization,
   network isolation and the relay in a VM, live Tailscale enrollment or a
   Herdr phone connection, agent behavior under the installed
