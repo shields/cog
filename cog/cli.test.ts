@@ -892,6 +892,131 @@ test("gateway serve disables older registrations, clears stale sockets and remov
   }
 }, 60_000);
 
+test("a second gateway serve is refused and leaves the first daemon's sockets answering", async () => {
+  const root = mkdtempSync("/tmp/cog-");
+  const environment = {
+    ...process.env,
+    COG_ROOT: root,
+    HOME: path.join(root, "home"),
+  };
+  const service = spawn(process.execPath, [main, "gateway", "serve"], {
+    env: environment,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let serviceError = "";
+  service.stderr.on("data", (chunk: Buffer) => {
+    serviceError += chunk.toString();
+  });
+  const control = new Control(locations(environment), {
+    ...controlOptions(environment),
+    actor: "tester",
+  });
+  try {
+    assert.equal(await daemonHealthy(control, service), true, serviceError);
+    const vm = await control.register("lima:first");
+    // No registration owns this file, so a serve that reached
+    // removeStaleSockets would delete it.
+    const stray = path.join(path.dirname(vm.socket), "github-ff-99.sock");
+    writeFileSync(stray, "");
+    const second = spawnSync(process.execPath, [main, "gateway", "serve"], {
+      env: environment,
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    assert.deepEqual(
+      { status: second.status, signal: second.signal },
+      { status: 1, signal: null },
+      second.stderr,
+    );
+    assert.equal(
+      second.stderr,
+      `cog: a gateway is already running: ${path.join(root, "state", "admin.sock")} accepts connections\n`,
+    );
+    assert.equal(service.exitCode, null);
+    assert.equal(existsSync(stray), true);
+    await control.health();
+    assert.equal(statSync(vm.socket).isSocket(), true);
+    const status = await new Promise<number>((resolve, reject) => {
+      const request = https.request({
+        socketPath: vm.socket,
+        servername: "api.github.com",
+        rejectUnauthorized: false,
+        method: "GET",
+        path: "/__cog__/health",
+        agent: false,
+        headers: { host: "api.github.com" },
+      });
+      request.once("error", reject);
+      request.once("response", (incoming) => {
+        incoming.resume();
+        resolve(incoming.statusCode ?? 0);
+      });
+      request.end();
+    });
+    assert.equal(status, 200);
+  } finally {
+    control.close();
+    if (service.exitCode === null && service.signalCode === null) {
+      const exited = once(service, "exit");
+      service.kill("SIGTERM");
+      await exited;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+// A daemon that was killed leaves its socket file behind.
+function leaveDeadSocket(file: string): void {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      'import net from "node:net";net.createServer().listen(process.argv[1],()=>{process.kill(process.pid,"SIGKILL")})',
+      file,
+    ],
+    { timeout: 20_000 },
+  );
+  assert.equal(result.signal, "SIGKILL");
+  assert.equal(existsSync(file), true);
+}
+
+test("gateway serve starts over an admin socket file that nothing listens on", async () => {
+  const root = mkdtempSync("/tmp/cog-");
+  onTestFinished(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+  const environment = {
+    ...process.env,
+    COG_ROOT: root,
+    HOME: path.join(root, "home"),
+  };
+  const leftover = path.join(root, "state", "admin.sock");
+  mkdirSync(path.dirname(leftover), { recursive: true });
+  leaveDeadSocket(leftover);
+  const service = spawn(process.execPath, [main, "gateway", "serve"], {
+    env: environment,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let serviceError = "";
+  service.stderr.on("data", (chunk: Buffer) => {
+    serviceError += chunk.toString();
+  });
+  const control = new Control(locations(environment), {
+    ...controlOptions(environment),
+    actor: "tester",
+  });
+  try {
+    assert.equal(await daemonHealthy(control, service), true, serviceError);
+  } finally {
+    control.close();
+    if (service.exitCode === null && service.signalCode === null) {
+      const exited = once(service, "exit");
+      service.kill("SIGTERM");
+      await exited;
+    }
+  }
+}, 60_000);
+
 test("gateway serve that is signalled while it issues the certificates ends cleanly and leaves no lock", async () => {
   const root = mkdtempSync("/tmp/cog-");
   const shims = path.join(root, "shims");

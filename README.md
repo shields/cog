@@ -41,12 +41,12 @@ the CLI uses sit in the same secrets directory and are out of its reach, though
 it can list the names in the two directories. It listens only on those sockets
 and reads `~/.config/secrets/FIREWORKS_API_KEY`, the `openssl` configuration
 and the system libraries. It runs only itself and `openssl`, and connects only
-to port 443 on other hosts, never on the Mac's own addresses, and to the name
-resolver. It cannot read the rest of your home directory, stat anything
-outside those paths except a symbolic link, run any other program, connect to
-other ports or sockets, list other processes or read their arguments and
-environment, read NVRAM variables or the serial number, or post
-notifications. It never touches the Lima directory: the sockets are on the
+to port 443 on other hosts, never on the Mac's own addresses, to the name
+resolver and to its own admin socket. It cannot read the rest of your home
+directory, stat anything outside those paths except a symbolic link, run any
+other program, connect to other ports or sockets, list other processes or read
+their arguments and environment, read NVRAM variables or the serial number, or
+post notifications. It never touches the Lima directory: the sockets are on the
 internal disk because the Lima directory may be on an external volume, where
 macOS asks for consent to access files on a removable volume for each newly
 built gateway, and the gateway waits for the answer before it can listen.
@@ -87,6 +87,13 @@ and the next install then refuses to start until `./install.sh --uninstall`
 removes them. SIGKILL and SIGQUIT also leave the `.build.*` directory in
 `~/.local/share/cog` and the `.cog.*` directory in `~/Library/LaunchAgents`;
 `--uninstall` removes those too.
+
+The installer also gives up, replacing and restoring nothing, when a gateway
+that launchd did not start answers on the admin socket once the previous agent
+is gone, such as a `cog gateway serve` left running in a terminal: the new
+gateway would exit as already running while that one answered the readiness
+check, and the installer would report the new build as ready. Its message says
+to stop that gateway and install again.
 
 A VM made before the sockets moved to `~/.local/state/cog/sock` (its socket was
 in its Lima directory) loses gateway access. When the gateway starts it
@@ -277,6 +284,20 @@ registered, and a leaf that lacks either identifier is replaced under its CA. A
 CA that openssl cannot read is an error that names the files to remove, never
 a reason to replace it. A VM made before that trusts the old CA and fails to
 verify the gateway: run `cog rm NAME` and make it again with `cog new`.
+
+Before it creates or removes anything, `cog gateway serve` connects to the
+admin socket. If anything accepts there, whatever it answers, it exits with
+`a gateway is already running` and changes nothing, so a second run by hand
+cannot cut the LaunchAgent's daemon off from its sockets. A missing socket
+file, or one that nothing listens on, lets it start, and so does a gateway that
+has stopped accepting for long enough to fill its queue of waiting connections,
+which macOS refuses in the same way; any other error from the connection is
+reported and also stops it, among them ENOTSOCK from a leftover file that is
+not a socket, which stays until you remove it. This is a check, not a lock: a
+second run passes it if its check comes before the first has bound the admin
+socket, which the gateway does last, after the certificates, the database and
+the listener for each VM (tens of milliseconds, or longer when it generates
+keys). launchd never starts two.
 
 A guest's HTTPS requests for `github.com` and `api.github.com` go to a relay on
 `127.0.0.1:443` in the guest, which sends them through the per-VM Unix socket
@@ -827,6 +848,7 @@ follows a file across the move.
 `make setup lint build test` is what CI runs, after `make ci-tools`. `make
 build` checks the TypeScript and compiles `build/cog`. To use that binary
 without installing it, run `./build/cog gateway serve` in a separate terminal
-before running `./build/cog new`. `make test-zsh` builds its own test executable
-and tests it with a real gateway daemon and stub Lima commands. See AGENTS.md
-for the layout and the rules for changing the code.
+before running `./build/cog new`, and stop it before running `./install.sh`,
+which refuses to install while it answers. `make test-zsh` builds its own test
+executable and tests it with a real gateway daemon and stub Lima commands. See
+AGENTS.md for the layout and the rules for changing the code.

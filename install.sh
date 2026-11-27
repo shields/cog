@@ -90,10 +90,14 @@ unload() {
     fi
 }
 
+gateway_answers() {
+    "$1" gateway health >/dev/null 2>&1 </dev/null
+}
+
 wait_healthy() {
     local attempt
     for ((attempt = 0; attempt < 100; ++attempt)); do
-        if "$binary" gateway health >/dev/null 2>&1 </dev/null; then
+        if gateway_answers "$binary"; then
             return 0
         fi
         sleep 0.1
@@ -311,6 +315,16 @@ done
 [[ ! -f $plist ]] || had_previous=1
 swap_failure="stopping the previous gateway failed"
 unload
+unset COG_ROOT COG_BASE
+# No agent is loaded now, so a gateway that answers on the admin socket was not
+# started by launchd. A new gateway would exit as already running and launchd
+# would start it again every ten seconds, while the probe after the swap, and
+# the one in a rollback, would be answered by the other gateway and report
+# success; so nothing is replaced or restored.
+if gateway_answers "$build_dir/cog"; then
+    stopping=0
+    die "a gateway that launchd did not start answers on $HOME/.local/state/cog/admin.sock; stop it and run install.sh again (nothing was replaced and no agent is loaded)"
+fi
 swapping=1
 stopping=0
 swap_failure="installing the new build failed"
@@ -322,7 +336,6 @@ if [[ $link_is_ours == 0 ]]; then
 fi
 launchctl bootstrap "$domain" "$plist"
 
-unset COG_ROOT COG_BASE
 swap_failure="the new build did not become healthy"
 if wait_healthy; then
     swapping=0

@@ -22,6 +22,13 @@
   the `.cog.*` one in `~/Library/LaunchAgents`; `--uninstall` removes them
   before its `rmdir` of the share directory, which still fails on any other
   file. State is not rolled back.
+  An answer to the staged binary's `gateway health` once the label is released
+  is also a plain `die` with no rollback, since `stopping` is cleared first: no
+  agent is loaded then, so the answer is from a gateway that launchd did not
+  start, such as the hand-run `cog gateway serve` of the README's Development
+  section. The new daemon would exit as already running
+  (`Control.daemonListening`), and every later probe, the rollback's included,
+  would be answered by that gateway and read as ready.
 - **Setup**: `make setup` installs the locked Bun and uv dependencies.
 - **Checks**: `make lint build test`. `COG_FAIL_ON_SKIP=1` makes any skipped
   pytest test fail the run, so a test that needs a tool needs it added to
@@ -85,16 +92,32 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   failure in the caller's process (the socket path's length, the certificates,
   the socket directory, the database), and `cog new` shows that message, since
   the daemon's log holds nothing about it; a failure of the sync that follows
-  is the daemon's, and the error points at its log. `cog gateway serve` first
-  makes the directory, disables each enabled registration whose socket is not
-  directly inside it (through `State.disable`, as `cog gateway disable` does)
-  with one stderr line per VM, and removes files there named like a socket that
-  no enabled registration owns. Bun unlinks a listener's socket file when its
-  server closes, so retiring a VM and `stop()` need no removal of their own.
-  Such a VM stays removable: `cog rm` of a VM whose registration is already
-  disabled deletes it when the Lima VM still forwards to the socket that was
-  registered (`State.retiredSocket`, `lima.hasGatewaySocket`), and otherwise
-  answers `VM is not active`.
+  is the daemon's, and the error points at its log. Once the check below finds
+  no daemon, `cog gateway serve` makes the directory, disables each enabled
+  registration whose socket is not directly inside it (through `State.disable`,
+  as `cog gateway disable` does) with one stderr line per VM, and removes files
+  there named like a socket that no enabled registration owns. Bun unlinks a
+  listener's socket file when its server closes, so retiring a VM and `stop()`
+  need no removal of their own. Such a VM stays removable: `cog rm` of a VM
+  whose registration is already disabled deletes it when the Lima VM still
+  forwards to the socket that was registered (`State.retiredSocket`,
+  `lima.hasGatewaySocket`), and otherwise answers `VM is not active`.
+  `cog gateway serve` first asks `Control.daemonListening`, which connects to
+  `STATE/admin.sock` and refuses (`a gateway is already running`) when anything
+  accepts, whatever it answers or fails to answer; ENOENT and ECONNREFUSED (a
+  killed daemon leaves its file) mean none, and any other error throws rather
+  than starts, since a second daemon removes the first one's sockets; a
+  leftover file that is not a socket is one such error (ENOTSOCK) and stays
+  until it is removed by hand. macOS also answers ECONNREFUSED when a
+  listener's queue of waiting connections is full, so a daemon that has
+  stopped accepting for long enough to fill it reads as none. It is a check,
+  not a lock: a second serve passes it if its check runs before the first has
+  bound `admin.sock`, which the daemon does last, after the certificates, the
+  database and the listener for each VM (tens of milliseconds, or longer when
+  it generates RSA 3072 keys). launchd never starts two. The profile allows
+  `network-outbound` to the literal admin socket for this probe; without the
+  rule Bun reports the denied connect as ECONNREFUSED, which reads as no
+  daemon, so the tests that pin the profile's rules are what guard it.
   `gateway/cert.ts` gives the CA a Subject Key Identifier and the leaf a
   Subject Key Identifier and an Authority Key Identifier, so the set passes
   `openssl verify -x509_strict` (Python 3.13+ verifies strictly by default).
@@ -244,15 +267,15 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   `-shm` and `-journal`, `sock/github-<hex and dashes>.sock` and `admin.sock`.
   A new file that the daemon makes in SECRETS or STATE needs a rule in the
   profile and a case in the tests that match the code's names against the
-  profile (the last tests in `gateway/control.test.ts`), or it fails in
-  production with EPERM that no Linux CI run shows. The CLI is not sandboxed,
-  so a file that only it uses needs no rule, and a name that only fits the
-  record pattern needs a deny. Unreadable files give EPERM and nothing in the
-  system log (macOS 27 records no sandbox denials), so find the rule that a
-  failure needs by removing candidates from a copy of the profile and running a
-  scratch daemon under `/usr/bin/sandbox-exec` with `COG_ROOT` in a short
-  `/tmp` directory; the Bash tool's own sandbox forbids `sandbox-exec`, Unix
-  sockets and process inspection.
+  profile (the tests in `gateway/control.test.ts` whose titles start with
+  `the profile`), or it fails in production with EPERM that no Linux CI run
+  shows. The CLI is not sandboxed, so a file that only it uses needs no rule,
+  and a name that only fits the record pattern needs a deny. Unreadable files
+  give EPERM and nothing in the system log (macOS 27 records no sandbox
+  denials), so find the rule that a failure needs by removing candidates from a
+  copy of the profile and running a scratch daemon under `/usr/bin/sandbox-exec`
+  with `COG_ROOT` in a short `/tmp` directory; the Bash tool's own sandbox
+  forbids `sandbox-exec`, Unix sockets and process inspection.
   The profile reads links with `(allow file-read-metadata (vnode-type SYMLINK))`
   because the daemon opens `~/.local/state/cog`, `~/.config/secrets/cog` and
   the Fireworks key unresolved, and the kernel reads each link on the way; with
@@ -272,11 +295,12 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   a remote host, so port 443 anywhere and any DNS name stay open, and it cannot
   hide the daemon's own database, CA key and tokens from the daemon. The
   listeners are allowed only on `STATE/sock/github-<hex and dashes>.sock` and
-  `STATE/admin.sock`, and outbound connections to the Mac's own addresses are
-  denied after the allow of port 443. Before it unloads the running agent,
-  `install.sh` runs the staged binary's `help` under the staged profile from
-  `/`. A change to the profile or to the paths it names needs the matching
-  change in `install.sh` and the README.
+  `STATE/admin.sock`, outbound connections go to that socket, port 443 and
+  the resolver, and those to the Mac's own addresses are denied after the
+  allow of port 443. Before it unloads the running agent, `install.sh` runs the
+  staged binary's `help` under the staged profile from `/`. A change to the
+  profile or to the paths it names needs the matching change in `install.sh` and
+  the README.
 - `guest/throwaway.sh` requires `--claude-settings FILE`, since cog has no
   `.claude/settings.json`; the tests use `tests/fixtures/claude-settings.json`.
 
@@ -389,6 +413,10 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   Mac's bash 3.2 but which CI's bash 5 ignores. The stub scripts run
   under `/bin/bash` 3.2 on a Mac, where `set -e` ignores a failing `[[ ]]`, so
   each guard ends in `|| exit 1`.
+  The `health` stub also answers with no agent loaded while a `stray` file
+  exists, as a gateway that launchd did not start does, and a first install and
+  a reinstall must then stop at the first probe, before `bootstrap`, with
+  nothing replaced.
   It also reads the profile's text, since CI cannot run it: it starts from
   `(deny default)` and `system.sb`, a list pins every allow, no rule grants all
   of STATE or SECRETS, the deny for `tailscale-oauth.json` follows the

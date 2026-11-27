@@ -15,6 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
@@ -388,6 +389,41 @@ export class Control {
 
   async health(): Promise<void> {
     await adminCall(this.location.admin, "/health", "GET");
+  }
+
+  // Whether anything accepts a connection on the admin socket, whatever it
+  // answers. A missing file or one that nothing listens on (a killed daemon
+  // leaves it) is no daemon. macOS refuses a connection to a listener whose
+  // queue of waiting connections is full with the same ECONNREFUSED, so such
+  // a daemon reads as none. Any other error throws, since reading it as "no
+  // daemon" would let a second daemon remove the sockets of the first. Bun
+  // reports a connection that the Seatbelt profile denies as ECONNREFUSED, so
+  // the profile's rule for this connect is what keeps a denial from reading as
+  // "no daemon".
+  async daemonListening(): Promise<boolean> {
+    const socket = this.location.admin;
+    return await new Promise<boolean>((resolve, reject) => {
+      const connection = net.connect({ path: socket });
+      const finish = (listening: boolean): void => {
+        connection.destroy();
+        resolve(listening);
+      };
+      connection.once("connect", () => {
+        finish(true);
+      });
+      connection.once("error", (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ECONNREFUSED") {
+          finish(false);
+        } else {
+          connection.destroy();
+          reject(
+            new Error(
+              `cannot tell whether a gateway listens on ${socket}: ${error.code ?? "error"}`,
+            ),
+          );
+        }
+      });
+    });
   }
 
   async pool(): Promise<PoolStatus> {

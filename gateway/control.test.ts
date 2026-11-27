@@ -1072,6 +1072,7 @@ test("the profile's literal paths are the ones that the code names", () => {
   for (const head of [
     "(allow file-read* file-write*",
     "(allow network-bind network-inbound",
+    "(allow network-outbound",
   ]) {
     assert.ok(
       forms.some((form) => form.startsWith(head) && form.includes(admin)),
@@ -1086,4 +1087,82 @@ test("the profile's literal paths are the ones that the code names", () => {
   ]) {
     assert.ok(forms.includes(rule), rule);
   }
+});
+
+// A daemon that was killed leaves its socket file behind.
+function leaveDeadSocket(file: string): void {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      'import net from "node:net";net.createServer().listen(process.argv[1],()=>{process.kill(process.pid,"SIGKILL")})',
+      file,
+    ],
+    { timeout: 20_000 },
+  );
+  assert.equal(result.signal, "SIGKILL");
+  assert.equal(existsSync(file), true);
+}
+
+test("daemonListening is true for a listener that answers nothing and for one that answers garbage", async () => {
+  for (const reply of [undefined, "garbage"]) {
+    const directory = root();
+    const where = locations({ COG_ROOT: directory });
+    mkdirSync(where.state, { recursive: true });
+    const control = new Control(where, controlOptions({ COG_ROOT: directory }));
+    const accepted: net.Socket[] = [];
+    const server = net.createServer((connection) => {
+      accepted.push(connection);
+      if (reply !== undefined) {
+        connection.end(reply);
+      }
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(where.admin, resolve);
+    });
+    try {
+      assert.equal(await control.daemonListening(), true);
+    } finally {
+      control.close();
+      for (const connection of accepted) {
+        connection.destroy();
+      }
+      server.close();
+    }
+  }
+});
+
+test("daemonListening is false with no socket file and with one that nothing listens on", async () => {
+  const directory = root();
+  const where = locations({ COG_ROOT: directory });
+  mkdirSync(where.state, { recursive: true });
+  const control = new Control(where, controlOptions({ COG_ROOT: directory }));
+  onTestFinished(() => {
+    control.close();
+  });
+  assert.equal(await control.daemonListening(), false);
+  leaveDeadSocket(where.admin);
+  assert.equal(await control.daemonListening(), false);
+});
+
+test("daemonListening throws for an error that does not say no daemon", async () => {
+  const directory = root();
+  const where = locations({ COG_ROOT: directory });
+  mkdirSync(where.state, { recursive: true });
+  const control = new Control(where, controlOptions({ COG_ROOT: directory }));
+  onTestFinished(() => {
+    control.close();
+  });
+  writeFileSync(where.admin, "");
+  chmodSync(where.admin, 0o000);
+  // Linux checks write permission before it checks for a socket, and root
+  // passes, so the connect is refused and reads as no daemon.
+  if (process.platform === "linux" && process.getuid?.() === 0) {
+    assert.equal(await control.daemonListening(), false);
+    return;
+  }
+  await assert.rejects(
+    control.daemonListening(),
+    /^Error: cannot tell whether a gateway listens on .*admin\.sock: (EACCES|ENOTSOCK|EPERM)$/u,
+  );
 });

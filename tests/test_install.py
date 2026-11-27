@@ -143,6 +143,7 @@ sys.exit(not (
         [[ $# == 2 && $* == 'gateway health' &&
             -z ${COG_ROOT+x}${COG_BASE+x} ]] || exit 1
         printf 'health\n' >> "$TEST_STATE/calls"
+        [[ ! -f $TEST_STATE/stray ]] || exit 0
         [[ -f $TEST_STATE/loaded && ! -f $TEST_STATE/unhealthy &&
             ! -f $TEST_STATE/unhealthy-${TEST_BUILD:-none} ]] || exit 1
         ;;
@@ -289,6 +290,7 @@ def test_first_install(installation: Installation) -> None:
         "lint",
         "sandbox-exec",
         f"print {SERVICE}",
+        "health",
         f"bootstrap {DOMAIN} {installation.plist}",
         "health",
     ]
@@ -352,6 +354,7 @@ def test_reinstall_replaces_the_binary_after_the_label_is_released(
         f"print {SERVICE}",
         "sleep 0.1",
         f"print {SERVICE}",
+        "health",
         f"bootstrap {DOMAIN} {installation.plist}",
         "health",
     ]
@@ -393,7 +396,7 @@ def test_health_timeout_names_the_error_log(installation: Installation) -> None:
     result = installation.run()
     assert result.returncode == 1
     assert str(installation.logs / f"{LABEL}.err") in result.stderr
-    assert installation.calls.count("health") == 100
+    assert installation.calls.count("health") == 101
 
 
 def test_bad_plist_leaves_the_running_install_alone(installation: Installation) -> None:
@@ -585,6 +588,7 @@ GRANTS = [
     form("allow", "file-read*", f'(subpath (string-append {SECRETS} "/claude-pool"))'),
     form("allow", "file-read*", '(literal (param "FIREWORKS_KEY"))'),
     form("allow", "network-bind", "network-inbound", SOCKET, ADMIN),
+    form("allow", "network-outbound", ADMIN),
     form("allow", "network-outbound", '(remote tcp "*:443")'),
     form("allow", "network-outbound", '(literal "/private/var/run/mDNSResponder")'),
     form(
@@ -933,7 +937,7 @@ def test_unhealthy_new_build_restores_the_previous_gateway(
     bootstraps = [c for c in calls if c.startswith("bootstrap")]
     assert bootstraps == [f"bootstrap {DOMAIN} {installation.plist}"] * 2
     assert calls.count(f"bootout {SERVICE}") == 2
-    assert calls.count("health") == 101
+    assert calls.count("health") == 102
     assert calls[-1] == "health"
     assert os.access(installation.binary, os.X_OK)
     assert installation.link.readlink() == installation.binary
@@ -1013,6 +1017,47 @@ def test_failed_bootout_of_the_previous_agent_starts_it_again(
     assert calls[-2:] == [f"bootstrap {DOMAIN} {installation.plist}", "health"]
 
 
+STRAY = "a gateway that launchd did not start answers on"
+
+
+def test_a_gateway_that_launchd_did_not_start_blocks_a_first_install(
+    installation: Installation,
+) -> None:
+    (installation.root / "stray").touch()
+    result = installation.run()
+    assert result.returncode == 1
+    assert STRAY in result.stderr
+    assert str(installation.home / ".local/state/cog/admin.sock") in result.stderr
+    assert "ready" not in result.stdout
+    assert "restored" not in result.stderr
+    assert installation.calls[-2:] == [f"print {SERVICE}", "health"]
+    assert not any(call.startswith("bootstrap") for call in installation.calls)
+    assert installed(installation) == []
+    assert not installation.link.is_symlink()
+    assert list(installation.plist.parent.iterdir()) == []
+
+
+def test_a_gateway_that_launchd_did_not_start_blocks_a_reinstall(
+    installation: Installation,
+) -> None:
+    previous = install_two_builds(installation)
+    (installation.root / "stray").touch()
+    offset = len(installation.calls)
+    result = installation.run()
+    assert result.returncode == 1
+    assert STRAY in result.stderr
+    assert "restored" not in result.stderr
+    assert snapshot(installation) == previous
+    assert not any(path.exists() for path in kept_copies(installation))
+    assert not (installation.root / "loaded").exists()
+    calls = installation.calls[offset:]
+    assert calls.count(f"bootout {SERVICE}") == 1
+    assert calls[-1] == "health"
+    assert not any(call.startswith("bootstrap") for call in calls)
+    assert not list(installation.binary.parent.glob(".build.*"))
+    assert not list(installation.plist.parent.glob(".cog.*"))
+
+
 def test_interrupt_while_waiting_for_the_new_build_is_not_blamed_on_the_build(
     installation: Installation,
 ) -> None:
@@ -1048,7 +1093,7 @@ def test_unhealthy_first_install_restores_nothing(installation: Installation) ->
     assert "did not become healthy" in result.stderr
     assert "restored" not in result.stderr
     assert str(installation.logs / f"{LABEL}.err") in result.stderr
-    assert installation.calls.count("health") == 100
+    assert installation.calls.count("health") == 101
     assert installation.calls.count(f"bootout {SERVICE}") == 0
     assert installation.binary.is_file()
     assert not any(path.exists() for path in kept_copies(installation))

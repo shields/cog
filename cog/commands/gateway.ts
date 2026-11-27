@@ -36,6 +36,11 @@ async function serve(args: string[], context: Context): Promise<void> {
     // sets a umask, since limactl, git and tar run under the caller's.
     process.umask(0o077);
     const control = context.gateway();
+    if (await control.daemonListening()) {
+      throw new CogError(
+        `a gateway is already running: ${control.location.admin} accepts connections`,
+      );
+    }
     control.ensureSocketDirectory();
     for (const instance of control.disableOutsideSocketDirectory()) {
       note(

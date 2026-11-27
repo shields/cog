@@ -76,9 +76,12 @@
 (allow file-read*
   (literal (param "FIREWORKS_KEY")))
 
-;; One listener per VM, in the socket directory, and the admin socket.
+;; One listener per VM, in the socket directory, and the admin socket. Start
+;; connects to the admin socket to find a daemon that already owns it.
 (allow network-bind network-inbound
   (regex (string-append "^" (regex-quote (param "STATE")) "/sock/github-[0-9a-f-]+\\.sock$"))
+  (literal (string-append (param "STATE") "/admin.sock")))
+(allow network-outbound
   (literal (string-append (param "STATE") "/admin.sock")))
 
 ;; Upstream HTTPS, and name resolution through mDNSResponder. Seatbelt can name
