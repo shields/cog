@@ -628,11 +628,22 @@ export class Control {
   }
 
   // The requests and policy changes of a VM, the oldest first.
-  logs(instance: Instance, limit: number): LogRow[] {
+  logs(
+    instance: Instance,
+    limit: number,
+    also: readonly string[] = [],
+  ): LogRow[] {
+    const recent = this.state.logs(instance.id, limit);
+    const listed = new Set(recent.map((entry) => entry.id));
+    const older = this.state.logsById(
+      instance.id,
+      also.filter((id) => !listed.has(id)),
+    );
     return [
-      ...this.state
-        .logs(instance.id, limit)
-        .map((entry) => ({ kind: "request" as const, ...entry })),
+      ...[...recent, ...older].map((entry) => ({
+        kind: "request" as const,
+        ...entry,
+      })),
       ...this.state
         .events(instance.id, limit)
         .map((entry) => ({ kind: "policy" as const, ...entry })),

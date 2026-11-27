@@ -378,7 +378,9 @@ raw queries are not logged. Policy changes are separately audited with the actor
 and old/new revision. Request logs are kept for 30 days and policy events for
 one year; requests fail closed if the audit database cannot be written.
 `cog logs NAME --follow` streams recent entries, and `--all` prints
-the retained history.
+the retained history. With `--follow`, a request still in flight is printed
+with outcome `unknown` and printed again, with its outcome, upstream status and
+duration, when it finishes.
 
 When the gateway answers a request with a refusal or a failure before it has
 received the whole body, it closes that connection after the answer, so a

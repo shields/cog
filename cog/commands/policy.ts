@@ -75,7 +75,24 @@ export function revoke(args: string[], context: Context): void {
   say(`policy revision ${String(revision)}`);
 }
 
-export async function logs(args: string[], context: Context): Promise<void> {
+export interface LogsOptions {
+  readonly pause: () => Promise<void>;
+  readonly emit: (line: string) => void;
+}
+
+const standardLogs: LogsOptions = {
+  pause: () => delay(1000),
+  emit: say,
+};
+
+// A request row that is printed before it finishes is printed again, with its
+// outcome, when it has: a finished row has a duration, which `State.finish`
+// always sets and `State.logDecision` never does.
+export async function logs(
+  args: string[],
+  context: Context,
+  options: LogsOptions = standardLogs,
+): Promise<void> {
   const [selector, mode, ...rest] = args;
   if (
     selector === undefined ||
@@ -89,20 +106,28 @@ export async function logs(args: string[], context: Context): Promise<void> {
   const lookup = gateway.state.byName(asName) ? asName : selector;
   const instance = gateway.findInstance(lookup);
   let seen = new Set<string>();
+  const unfinished = new Set<string>();
   const limit = mode === "--all" ? -1 : 100;
   for (;;) {
-    const entries = gateway.logs(instance, limit);
+    const entries = gateway.logs(instance, limit, [...unfinished]);
     for (const entry of entries) {
-      if (!seen.has(entry.id)) {
-        say(JSON.stringify({ ...entry, vm: instance.name }));
-        seen.add(entry.id);
+      const pending = entry.kind === "request" && unfinished.has(entry.id);
+      if (pending ? entry.durationMs !== null : !seen.has(entry.id)) {
+        options.emit(JSON.stringify({ ...entry, vm: instance.name }));
+        if (entry.kind === "request") {
+          if (entry.durationMs === null) {
+            unfinished.add(entry.id);
+          } else {
+            unfinished.delete(entry.id);
+          }
+        }
       }
     }
     if (mode !== "--follow") {
       return;
     }
     seen = new Set(entries.map((entry) => entry.id));
-    await delay(1000);
+    await options.pause();
   }
 }
 

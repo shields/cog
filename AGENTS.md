@@ -394,6 +394,11 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   of STATE or SECRETS, the deny for `tailscale-oauth.json` follows the
   authorization-record allow, `claude-pool` is read-only, and the process,
   NVRAM, IOKit, notification and local-address denies are present and ordered.
+- `cog/logs.test.ts` drives `cog logs --follow` through the `pause` and `emit`
+  options of `logs()`. A row printed before it finished (no `duration_ms`) is
+  printed again once it has, found each tick by one `json_each` statement
+  (`State.logsById`) even when newer rows pushed it out of the 100-row window;
+  one that never finishes costs its id in memory and a place in that statement.
 - `gateway/*.test.ts` and `cloudflare/*.test.ts` cover the policy, token
   refresh, live grants, audit and the HTTPS Unix socket. `cog/*.test.ts` cover
   the CLI and foundation modules, including a real `gateway serve` that

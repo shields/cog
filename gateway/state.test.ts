@@ -402,6 +402,65 @@ test("pruning finds expired audit rows through an index on their time", () => {
   });
 });
 
+test("rows fetched by ID are found through the ID index, not by reading the VM's history", () => {
+  withState((state) => {
+    const prepared: string[] = [];
+    const prepare = state.db.prepare.bind(state.db);
+    spyOn(state.db, "prepare").mockImplementation((sql: string) => {
+      prepared.push(sql);
+      return prepare(sql);
+    });
+    state.logsById("instance", ["a"]);
+    mock.restore();
+    const lookups = prepared.filter((sql) => sql.includes("json_each"));
+    assert.equal(lookups.length, 1);
+    const plan = state.db
+      .prepare(`EXPLAIN QUERY PLAN ${lookups[0] ?? ""}`)
+      .all()
+      .map((row) => row.detail as string)
+      .join("\n");
+    assert.match(
+      plan,
+      /^SEARCH access_logs USING INDEX sqlite_autoindex_access_logs_1 \(id=\?\)$/m,
+    );
+    assert.doesNotMatch(plan, /access_logs_instance_time/);
+  });
+});
+
+test("rows fetched by ID are the asking VM's, once each, and unknown IDs are ignored", () => {
+  withState((state) => {
+    for (const [id, instanceId] of [
+      ["a", "one"],
+      ["b", "two"],
+      ["c", "one"],
+    ] as const) {
+      state.logDecision({
+        id,
+        instanceId,
+        repository: null,
+        operation: "model.claude",
+        refs: [],
+        allowed: true,
+        reason: "granted",
+        revision: 0,
+      });
+    }
+    state.finish("c", 200, 4, "completed");
+    const fetched = (instanceId: string, wanted: string[]) =>
+      state
+        .logsById(instanceId, wanted)
+        .map((row) => `${row.id} ${String(row.durationMs)}`)
+        .toSorted(compareCodeUnits);
+    assert.deepEqual(fetched("one", ["c", "b", "a", "a", "x"]), [
+      "a null",
+      "c 4",
+    ]);
+    assert.deepEqual(fetched("one", ["b"]), []);
+    assert.deepEqual(fetched("one", []), []);
+    assert.deepEqual(fetched("none", ["a", "b", "c"]), []);
+  });
+});
+
 test("pruning deletes exactly the rows older than the retention periods", () => {
   withState((state) => {
     const now = 1_800_000_000_000;

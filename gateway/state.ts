@@ -455,11 +455,32 @@ export class State {
   }
 
   logs(instanceId: string, limit = 100): AccessLog[] {
+    return this.accessLogs(
+      "WHERE instance_id = ? ORDER BY created_at DESC LIMIT ?",
+      [instanceId, limit],
+    );
+  }
+
+  // The unary plus keeps SQLite on the index of the IDs; without it the
+  // statement reads every row of the VM.
+  logsById(instanceId: string, ids: readonly string[]): AccessLog[] {
+    return ids.length === 0
+      ? []
+      : this.accessLogs(
+          "WHERE +instance_id = ? AND id IN (SELECT value FROM json_each(?))",
+          [instanceId, JSON.stringify(ids)],
+        );
+  }
+
+  private accessLogs(
+    clause: string,
+    parameters: (string | number)[],
+  ): AccessLog[] {
     const rows = this.db
       .prepare(
-        "SELECT id, created_at, instance_id, repository, operation, refs, allowed, reason, revision, upstream_status, duration_ms, outcome FROM access_logs WHERE instance_id = ? ORDER BY created_at DESC LIMIT ?",
+        `SELECT id, created_at, instance_id, repository, operation, refs, allowed, reason, revision, upstream_status, duration_ms, outcome FROM access_logs ${clause}`,
       )
-      .all(instanceId, limit) as unknown as Record<string, unknown>[];
+      .all(...parameters) as unknown as Record<string, unknown>[];
     return rows.map((row) => ({
       id: String(row.id),
       createdAt: Number(row.created_at),
