@@ -437,8 +437,9 @@ test("hop-by-hop headers and Expect are removed", () => {
 });
 
 test("the builders reject a list that does not pair names with values", () => {
-  assert.throws(() => modelRequestHeaders(["Host"], null));
-  assert.throws(() => modelResponseHeaders(["a"]));
+  const message = "header list must alternate names and values";
+  assert.throws(() => modelRequestHeaders(["Host"], null), { message });
+  assert.throws(() => modelResponseHeaders(["a"]), { message });
 });
 
 test("a body-less request is told from one that has a body", () => {

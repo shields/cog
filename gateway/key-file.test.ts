@@ -44,14 +44,16 @@ function fileHolding(content: string | Uint8Array): string {
 }
 
 test("one word of visible ASCII is the key, with whitespace and carriage returns removed", () => {
-  const punctuation = "!\"#$%&'()*+,-./:;<=>?@[]^_`{|}~";
+  const visible = Array.from({ length: 0x7e - 0x21 + 1 }, (_, index) =>
+    String.fromCodePoint(0x21 + index),
+  ).join("");
   const cases: [string, string, string][] = [
     ["bare", marker, marker],
     ["newline", `${marker}\n`, marker],
     ["CRLF", `${marker}\r\n`, marker],
     ["surrounding whitespace", ` \t\n${marker}\v\f \n`, marker],
     ["a carriage return inside", "fw-made\r-up", "fw-made-up"],
-    ["every visible character", punctuation, punctuation],
+    ["every visible character", visible, visible],
     ["the limit", `${"k".repeat(keyFileLimit - 1)}\n`, "k".repeat(4095)],
   ];
   for (const [name, content, expected] of cases) {

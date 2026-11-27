@@ -694,6 +694,13 @@ test("the key identifiers are asked for and not left to openssl's defaults", () 
         "Subject Key Identifier",
       );
       assert.match(subject, /^[0-9A-F:]{20,}$/u);
+      assert.match(
+        identifier(
+          path.join(directory, "github.pem"),
+          "Subject Key Identifier",
+        ),
+        /^[0-9A-F:]{20,}$/u,
+      );
       assert.equal(
         identifier(
           path.join(directory, "github.pem"),
@@ -885,6 +892,13 @@ test("a lock that cannot be created for a reason other than existing is an error
   withDirectory((directory) => {
     chmodSync(directory, 0o500);
     try {
+      if (process.getuid?.() === 0) {
+        assert.equal(
+          ensureCertificates(directory, 200).ca,
+          path.join(directory, "ca.pem"),
+        );
+        return;
+      }
       assert.throws(() => ensureCertificates(directory, 200), {
         code: "EACCES",
         syscall: "mkdir",

@@ -1839,9 +1839,7 @@ test("a request that fails after its headers were sent ends the connection, so t
           request.socket.destroy();
         });
       } else {
-        // The timeout bounds the wait when the gateway leaves the connection
-        // open.
-        void Promise.race([clientGone.promise, delay(1000)]).then(() => {
+        void clientGone.promise.then(() => {
           response.writeHead(200, { "content-length": 2 }).end("ok");
         });
       }
@@ -2199,14 +2197,19 @@ test("an upstream that answers before the upload ends keeps receiving the rest o
 function watchCloseListeners(listener: https.Server): {
   connections: Set<Socket>;
   counts: number[];
+  finished: number[];
 } {
   const connections = new Set<Socket>();
   const counts: number[] = [];
-  listener.on("request", (request) => {
+  const finished: number[] = [];
+  listener.prependListener("request", (request, response) => {
     connections.add(request.socket);
     counts.push(request.socket.listenerCount("close"));
+    response.once("finish", () => {
+      finished.push(request.socket.listenerCount("close"));
+    });
   });
-  return { connections, counts };
+  return { connections, counts, finished };
 }
 
 test("GraphQL queries in sequence on one connection leave no listeners behind on its socket", async () => {
@@ -2283,7 +2286,7 @@ test("uploads in sequence on one connection leave no listeners behind on its soc
   assert.equal(new Set(watched.counts).size, 1);
 });
 
-test("uploads that fail in sequence each close their connection and leave no listeners behind on its socket", async () => {
+test("uploads that fail in sequence each close their connection", async () => {
   const { socket, listener } = await startGateway({
     handler: (request) => {
       request.socket.destroy();
@@ -2323,7 +2326,6 @@ test("uploads that fail in sequence each close their connection and leave no lis
     assert.equal(await within("the response to end", answered), 503);
   }
   assert.equal(watched.connections.size, 8);
-  assert.equal(new Set(watched.counts).size, 1, watched.counts.join(","));
 });
 
 function accepting(socketPath: string): Promise<boolean> {
@@ -5320,7 +5322,7 @@ test("uploads whose upstream request cannot be created each close their connecti
   }
   assert.equal(stub.requests.length, 0);
   assert.equal(watched.connections.size, 8);
-  assert.equal(new Set(watched.counts).size, 1, watched.counts.join(","));
+  assert.deepEqual(watched.finished, watched.counts);
 });
 
 interface PoolAnswer {

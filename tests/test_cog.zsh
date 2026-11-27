@@ -1744,12 +1744,12 @@ for umask_value in 022 000 077; do
 done
 
 # --- 12. a signal at each stage of new and base cleans up ---
-# new_signal_stage SIGNAL STATUS STAGE BLOCK REGISTERED ARGS...: SIGNAL reaches
-# new while the limactl call that contains BLOCK is held. REGISTERED is 1 when
-# the VM is registered with the gateway by then.
+# new_signal_stage SIGNAL STATUS STAGE BLOCK ARGS...: SIGNAL reaches new while
+# the limactl call that contains BLOCK is held. Each such call comes after the
+# VM is registered with the gateway.
 new_signal_stage() {
-    local signal=$1 expected=$2 stage=$3 block=$4 registered=$5 desc delete_call
-    shift 5
+    local signal=$1 expected=$2 stage=$3 block=$4 desc delete_call
+    shift 4
     desc="$signal $stage"
     new_gateway_case test-base
     EXTRA_ENV+=(LIMA_STUB_BLOCK="$block" LIMA_STUB_SNAPSHOT=delete)
@@ -1758,15 +1758,11 @@ new_signal_stage() {
     assert_contains "$desc: new says it removes the VM" "removing t1 after the failure" "$OUT"
     assert_contains "$desc: new deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
     assert_eq "$desc: no instance is left" 0 "$(grep -cx t1 "$STATE/instances" || true)"
-    if (( registered )); then
-        assert_eq "$desc: gateway access is disabled and its grants removed" '{"disabled":true,"grants":{}}' \
-            "$(instance_query t1 '{disabled, grants}')"
-        delete_call=$(grep -n '^delete ' "$STATE/limactl.log" | head -1 | cut -d: -f1)
-        assert_eq "$desc: access is disabled before the VM is deleted" true \
-            "$(jq -r '.instances[0].disabled' "$STATE/snapshots/$delete_call.json")"
-    else
-        assert_eq "$desc: nothing was registered" null "$(instance_query t1 .id)"
-    fi
+    assert_eq "$desc: gateway access is disabled and its grants removed" '{"disabled":true,"grants":{}}' \
+        "$(instance_query t1 '{disabled, grants}')"
+    delete_call=$(grep -n '^delete ' "$STATE/limactl.log" | head -1 | cut -d: -f1)
+    assert_eq "$desc: access is disabled before the VM is deleted" true \
+        "$(jq -r '.instances[0].disabled' "$STATE/snapshots/$delete_call.json")"
     assert_eq "$desc: the daemon stays silent" "" "$(<"$STATE/gateway.err")"
     assert_no_secret_leak "$desc"
 }
@@ -1774,14 +1770,14 @@ new_signal_stage() {
 for entry in HUP:129 INT:130 TERM:143; do
     signal=${entry%%:*}
     expected=${entry#*:}
-    new_signal_stage "$signal" "$expected" "while the Lima config is edited" "edit --tty=false --set" 1 --repo shields/dotfiles
-    new_signal_stage "$signal" "$expected" "after the registration" "start --tty=false t1" 1 --repo shields/dotfiles
-    new_signal_stage "$signal" "$expected" "during the model gateway wiring" "setup-model-gateway" 1 --repo shields/other
-    new_signal_stage "$signal" "$expected" "during the Anthropic probe" "https://api.anthropic.com/__cog__/health" 1 --repo shields/other
-    new_signal_stage "$signal" "$expected" "during the repository clone" "git clone" 1 --repo shields/other
-    new_signal_stage "$signal" "$expected" "during the Claude placeholder install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" 1 --repo shields/other
-    new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" 1 --repo shields/other
-    new_signal_stage "$signal" "$expected" "during the guest shell check" "exec zsh -i -c" 1 --repo shields/other
+    new_signal_stage "$signal" "$expected" "while the Lima config is edited" "edit --tty=false --set" --repo shields/dotfiles
+    new_signal_stage "$signal" "$expected" "after the registration" "start --tty=false t1" --repo shields/dotfiles
+    new_signal_stage "$signal" "$expected" "during the model gateway wiring" "setup-model-gateway" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the Anthropic probe" "https://api.anthropic.com/__cog__/health" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the repository clone" "git clone" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the Claude placeholder install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the guest shell check" "exec zsh -i -c" --repo shields/other
 done
 
 new_gateway_case test-base

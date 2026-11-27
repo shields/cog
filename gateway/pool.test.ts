@@ -124,6 +124,18 @@ test("names of one and of thirty-two characters, and tokens of the longest lengt
   );
 });
 
+test("a token may hold every visible ASCII character after its prefix", () => {
+  const visible = Array.from({ length: 0x7e - 0x21 + 1 }, (_, index) =>
+    String.fromCodePoint(0x21 + index),
+  ).join("");
+  const token = `sk-ant-oat${visible}`;
+  const directory = makePool({ a: token, b: `${token}\n` });
+  assert.deepEqual(accountsOf(loadPool(directory)), [
+    { name: "a", token },
+    { name: "b", token },
+  ]);
+});
+
 test("entries whose names start with a dot are ignored, whatever they are", () => {
   const directory = makePool({
     ok: goodToken,
@@ -377,6 +389,29 @@ test("an unreadable account file is refused by its code, not its content", () =>
     read.mockRestore();
   });
   assert.equal(reason(loadPool(directory)), "account bad cannot be read (EIO)");
+});
+
+test("a pool directory that cannot be examined or listed is refused by its code, not read as a pool that is not configured", () => {
+  const base = scratch();
+  writeFileSync(path.join(base, "file"), goodToken);
+  assert.equal(
+    reason(loadPool(path.join(base, "file", "claude-pool"))),
+    "the Claude pool directory cannot be read (ENOTDIR)",
+  );
+  const directory = makePool({ a: goodToken });
+  const list = spyOn(fs, "readdirSync").mockImplementation(() => {
+    throw Object.assign(
+      new Error(`EPERM: operation not permitted, scandir ${marker}`),
+      { code: "EPERM" },
+    );
+  });
+  onTestFinished(() => {
+    list.mockRestore();
+  });
+  assert.equal(
+    reason(loadPool(directory)),
+    "the Claude pool directory cannot be read (EPERM)",
+  );
 });
 
 const start = 1_800_000_000_000;
@@ -957,7 +992,9 @@ test("a single-account pool always returns its account, and an empty one has non
   );
   pool.observe("only", 200, utilization("1"), start);
   assert.equal(pool.choose("vm-1", start).name, "only");
-  assert.throws(() => new AccountPool([], null).choose("vm-1", start));
+  assert.throws(() => new AccountPool([], null).choose("vm-1", start), {
+    message: "the pool has no account",
+  });
 });
 
 test("a reload keeps the state of an account whose name and token are unchanged and forgets the rest", () => {
