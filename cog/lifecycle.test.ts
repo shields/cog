@@ -669,11 +669,6 @@ test.each([
     "",
     "zsh did not run to the end of the check",
   ],
-  [
-    "a failing shell",
-    new CommandFailed("limactl shell", 1),
-    "zsh did not run to the end of the check",
-  ],
 ] as const)(
   "a guest shell with %s fails new and rolls back",
   async (_, output, problem) => {
@@ -691,6 +686,19 @@ test.each([
     ]);
   },
 );
+
+test("a guest shell check that limactl cannot run fails new and rolls back without blaming the dotfiles", async () => {
+  const { calls, context, failures } = fixture();
+  failures.guestCheck = new CommandFailed("limactl shell", 255);
+  await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
+    message:
+      "cannot check vm's shell for Claude through the gateway (limactl shell failed with status 255); run cog new again, and if it fails the same way, the dotfiles in the base may break zsh, so update the dotfiles checkout and run cog base again",
+  });
+  assert.deepEqual(calls.slice(-2), [
+    ["disable", "lima:vm"],
+    ["remove", "vm"],
+  ]);
+});
 
 test.each([
   ["cog", ["ca", "done"]],

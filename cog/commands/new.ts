@@ -466,7 +466,7 @@ export async function newVM(
     }
 
     if (models.length > 0) {
-      let words: string[] | undefined;
+      let words: string[];
       try {
         words = (
           await lima.shellOutput(name, guestExportsCheck(!noClaude))
@@ -475,8 +475,11 @@ export async function newVM(
         if (!(error instanceof CommandFailed)) {
           throw error;
         }
+        throw new CogError(
+          `cannot check ${name}'s shell for ${wired} through the gateway (${error.message}); run cog new again, and if it fails the same way, the dotfiles in the base may break zsh, so update the dotfiles checkout and run cog base again`,
+        );
       }
-      const problems = words?.includes("done")
+      const problems = words.includes("done")
         ? (["ca", "token"] as const)
             .filter((word) => words.includes(word))
             .map((word) => guestExportsMissing[word])

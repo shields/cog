@@ -1595,6 +1595,8 @@ new_gateway_case test-base
 EXTRA_ENV+=(LIMA_STUB_FAIL="exec zsh -i -c" LIMA_STUB_SNAPSHOT=delete)
 run_cog new t1 --repo shields/dotfiles
 assert_eq "a failing guest shell check stops new" 1 "$RC"
+assert_contains "a failing guest shell check says that limactl failed, not that the dotfiles lack the exports" \
+    "(limactl shell failed with status 1); run cog new again" "$OUT"
 assert_contains "a failing guest shell check says to run cog base again" "run cog base again" "$OUT"
 assert_contains "a failing guest shell check deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 

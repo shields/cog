@@ -342,8 +342,10 @@ file that is the same inode as `/etc/ssl/certs/ca-certificates.crt`), `token`
 (`CLAUDE_CODE_OAUTH_TOKEN` is not exported, or is not `cog`; this clause is
 left out with `--no-claude-token`) and `done`; no value leaves the guest. A
 missing `done` or a failing `limactl` is a `CogError`, which the rollback
-handles by disabling and deleting the VM. The `2>/dev/null` belongs on the
-`exec`, since zsh's startup noise comes before the script runs.
+handles by disabling and deleting the VM. Only a missing `done` blames the
+dotfiles; a failing `limactl` (the connection to the VM dropped, say) says so
+with its status, since it shows nothing about them. The `2>/dev/null` belongs on
+the `exec`, since zsh's startup noise comes before the script runs.
 
 Tailscale enrollment uses a dedicated Mac OAuth client with `auth_keys` write
 access for `tag:cog` join keys and at least `devices:core:read` to verify SSH.

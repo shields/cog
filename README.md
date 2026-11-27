@@ -449,7 +449,10 @@ placeholder `cog`. Only the words `ca`, `token` and `done` leave the guest,
 never a value. If it fails, the VM is deleted and its registration disabled,
 with a message of the form `NAME's shell is not set up for Claude through the
 gateway: PROBLEMS; the base was built from dotfiles that lack this, so update
-the dotfiles checkout and run cog base again`.
+the dotfiles checkout and run cog base again`. When `limactl` cannot run the
+check at all, as when the connection to the VM drops, the VM is deleted in the
+same way, and the message gives its status and says to run `cog new` again,
+since that failure shows nothing about the dotfiles.
 
 ### The Claude pool
 
