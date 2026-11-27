@@ -183,9 +183,9 @@ async function fireworksWired(
 }
 
 // Lima expands "{{" in a host socket and passes the path to ssh, which expands
-// "%" and "${" in it and reads ":" as the end of the path, so a path that holds
-// one would name a different socket or none.
-const limaUnsafe = /\{\{|[%$:]/u;
+// "%" and "${" in it, reads ":" as the end of the path and drops a "\" as an
+// escape, so a path that holds one would name a different socket or none.
+const limaUnsafe = /\{\{|[%$:\\]/u;
 
 function requireLimaSafe(location: string): void {
   const found = limaUnsafe.exec(location)?.[0];

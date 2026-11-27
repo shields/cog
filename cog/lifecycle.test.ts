@@ -872,6 +872,7 @@ test.each([
   ["%", "/state/%h/sock"],
   ["$", "/state/${HOME}/sock"],
   [":", "/state/a:b/sock"],
+  ["\\", String.raw`/state/a\b/sock`],
 ] as const)(
   "new refuses a state directory with %s in it, before cloning",
   async (character, sockets) => {

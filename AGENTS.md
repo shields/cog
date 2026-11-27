@@ -85,7 +85,7 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   `State` refuses to register `lima:cog-base` and the VM that `COG_BASE`
   names. `register(name)` makes `STATE/sock` (mode 700) and registers
   `STATE/sock/github-UUID.sock`; `cog new` refuses a state directory whose path
-  contains `{{`, `%`, `$` or `:`, which Lima or ssh would read as something
+  contains `{{`, `%`, `$`, `:` or `\`, which Lima or ssh would read as something
   else, and a socket that is not directly in that directory or is not named
   `github-[0-9a-f-]+.sock`, and writes the absolute path as the forward's
   `hostSocket`. `Control.register` raises `RegistrationFailedHere` for a
