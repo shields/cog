@@ -496,7 +496,9 @@ gateway reads it at its next reload (`cog new`, a VM's registration, or another
 `add` or `rm`), and only then does `cog pool status` list it; `add` again
 reports that the account exists. A SIGKILL or a power loss can leave a temporary
 named `.NAME.` and 12 hex digits; `add` and `rm` delete such a file once it is
-over a minute old.
+over a minute old. If the entry is linked and the temporary then cannot be
+removed, `add` exits non-zero, says that the token is saved and names the
+temporary, which you remove by hand, and does not tell the gateway to reload.
 
 ### The rest
 

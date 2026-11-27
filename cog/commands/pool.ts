@@ -265,13 +265,6 @@ function writeEntry(
     descriptor = undefined;
     io.close(written);
     io.link(temporary, entry);
-    try {
-      unlinkSync(temporary);
-    } catch (error) {
-      if (code(error) !== "ENOENT") {
-        throw error;
-      }
-    }
   } catch (error) {
     const unclosed = descriptor;
     if (unclosed !== undefined) {
@@ -286,6 +279,15 @@ function writeEntry(
       throw exists(name);
     }
     throw new CogError(`cannot write account ${name} (${code(error)})`);
+  }
+  try {
+    unlinkSync(temporary);
+  } catch (error) {
+    if (code(error) !== "ENOENT") {
+      throw new CogError(
+        `the token for ${name} is saved in ${directory}, but its temporary file ${temporary} cannot be removed (${code(error)}); remove it by hand`,
+      );
+    }
   }
 }
 

@@ -319,7 +319,10 @@ with mode 600 by a dot-named temporary and a link, so the loader never sees a
 partial entry. `writeAccount` runs that write inside `holdingSignals`, which
 records SIGHUP, SIGINT and SIGTERM and removes its handlers in a `finally`; a
 signal that arrived ends the command with `Interrupted(129|130|143)` after the
-write, over any write error and without the gateway reload. `add` and `rm` call
+write, over any write error and without the gateway reload. A failure to unlink
+the temporary after the link (ENOENT is none) is not a failed write: the entry
+is complete, so `writeEntry` says that the token is saved and names the
+temporary, and the gateway is not asked to reload. `add` and `rm` call
 `removeStrayTemporaries`, which deletes regular files named
 `.NAME.<12 hex>` over 60 seconds old without reading them (`rm` skips the name
 it was given); the loader already skips every dot name. `rm`, like `add`,

@@ -465,6 +465,26 @@ test("add that finds its temporary file gone after the link still saves the acco
   assert.deepEqual(calls, ["sync", "pool"]);
 });
 
+test("add that cannot remove its temporary file after the link says that the token is saved, and names the file", async () => {
+  const { pool, calls, context, io } = fixture();
+  seed(pool, { alpha });
+  io.afterLink = (temporary) => {
+    unlinkSync(temporary);
+    mkdirSync(temporary);
+  };
+  const before = listeners();
+  const message = await failure(poolCommand(["add", "work"], context, io));
+  assert.match(
+    message,
+    /^the token for work is saved in .+, but its temporary file .+\.work\.[0-9a-f]{12} cannot be removed \((?:EPERM|EISDIR)\); remove it by hand$/,
+  );
+  noToken(message);
+  assert.equal(readFileSync(path.join(pool, "work"), "utf8"), `${typed}\n`);
+  assert.equal(statSync(path.join(pool, "work")).mode & 0o777, 0o600);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(listeners(), before);
+});
+
 test("add that fails and is interrupted ends as interrupted and leaves no temporary", async () => {
   const { pool, context, io } = fixture();
   seed(pool, { alpha });
