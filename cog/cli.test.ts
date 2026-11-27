@@ -138,39 +138,56 @@ test("CLI grants and edits apply live and disabled VM logs stay addressable by I
         encoding: "utf8",
         timeout: 30_000,
       });
-    const unusable = attempt(["pool", "status"]);
+    const unusable = attempt(["account", "status"]);
     assert.equal(unusable.status, 1);
     assert.equal(unusable.stdout, "");
     assert.equal(
       unusable.stderr,
       "cog: the Claude pool is not usable: account work is accessible to group or other\n",
     );
-    assert.equal(attempt(["pool", "list"]).status, 1);
+    assert.equal(attempt(["account", "list"]).status, 1);
     chmodSync(accountFile, 0o600);
-    assert.equal(call(["pool", "list"]), "work\n");
+    assert.equal(call(["account", "list"]), "claude work\n");
     const typed = path.join(root, "typed");
     writeFileSync(typed, "sk-ant-oat01-cli-test-added\n");
-    const added = attempt(["pool", "add", "bravo"], {
+    const added = attempt(["account", "add", "claude", "bravo"], {
       COG_PROMPT_INPUT: typed,
     });
     assert.equal(added.status, 0, added.stderr);
     assert.match(added.stdout, /the token for bravo is saved in .*2 account/);
     assert.ok(!added.stdout.includes("cli-test"));
-    assert.equal(call(["pool", "list"]), "bravo\nwork\n");
-    const lines = call(["pool", "status"]).trim().split("\n");
+    assert.equal(call(["account", "list"]), "claude bravo\nclaude work\n");
+    const lines = call(["account", "status"]).trim().split("\n");
     assert.deepEqual(
       lines,
       ["bravo", "work"].map(
-        (name) => `${name}; not held; no rate-limit reading`,
+        (name) => `claude ${name}; not held; no rate-limit reading`,
       ),
     );
-    const again = attempt(["pool", "add", "bravo"], {
+    const again = attempt(["account", "add", "claude", "bravo"], {
       COG_PROMPT_INPUT: typed,
     });
     assert.equal(again.status, 1);
-    assert.match(again.stderr, /run cog pool rm bravo first/);
-    assert.match(call(["pool", "rm", "bravo"]), /account bravo is removed/);
-    assert.equal(call(["pool", "list"]), "work\n");
+    assert.match(again.stderr, /run cog account rm claude bravo first/);
+    assert.match(
+      call(["account", "rename", "claude", "work", "main"]),
+      /account work is renamed to main in .*2 account/,
+    );
+    assert.equal(call(["account", "list"]), "claude bravo\nclaude main\n");
+    assert.deepEqual(
+      call(["account", "status"]).trim().split("\n"),
+      ["bravo", "main"].map(
+        (name) => `claude ${name}; not held; no rate-limit reading`,
+      ),
+    );
+    assert.match(
+      call(["account", "rm", "claude", "bravo"]),
+      /account bravo is removed/,
+    );
+    assert.equal(call(["account", "list"]), "claude main\n");
+    const refused = attempt(["pool", "list"]);
+    assert.equal(refused.status, 2);
+    assert.match(refused.stderr, /^usage: cog base /);
     const instance = await control.register("lima:trial");
     assert.match(instance.id, /^[0-9a-f-]{36}$/);
     assert.match(instance.socket, /\/state\/sock\/github-[0-9a-f-]{36}\.sock$/);
@@ -619,7 +636,7 @@ test("help prints the usage to stdout and exits 0", () => {
     assert.match(result.stdout, /cog gateway serve\|health\|disable NAME/);
     assert.match(
       result.stdout,
-      /cog pool add NAME \| rm NAME \| list \| status/,
+      /cog account add claude NAME \| rm claude NAME \| rename claude OLD NEW \| list \| status/,
     );
     assert.match(result.stdout, /cog-base/);
   }
@@ -657,8 +674,15 @@ test("lifecycle verbs reject invalid arguments before using a VM", () => {
     ],
     [["new", "invalid name"], "invalid VM name: invalid name"],
     [["grant"], "usage: cog grant NAME [OWNER/REPO] [--profile read|cog]"],
-    [["pool"], "usage: cog pool add NAME | rm NAME | list | status"],
-    [["pool", "add", "Bad"], /^cog: the account name must be/],
+    [
+      ["account"],
+      "usage: cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status",
+    ],
+    [["account", "add", "claude", "Bad"], /^cog: the account name must be/],
+    [
+      ["account", "add", "work"],
+      'unknown provider "work"; claude is the only provider',
+    ],
     [["rm"], "usage: cog rm NAME"],
     [["list", "x"], "usage: cog list"],
   ] as const) {

@@ -138,7 +138,7 @@ this `PATH` order does not hold.
 cog base [--dotfiles DIR] [MODULE...]
 cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]
 cog grant NAME [OWNER/REPO] [--profile read|cog]
-cog pool add NAME | rm NAME | list | status
+cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status
 cog tailscale config CLIENT-ID
 cog rm NAME
 cog list
@@ -147,7 +147,7 @@ cog list
 `cog base` builds the base VM `cog-base` once, and again to refresh it; it takes
 tens of minutes. `cog new` makes a VM from a clone of the base, installs the
 secrets and the repository, and opens a shell in it. `cog grant` adds a
-repository grant to a running VM. `cog pool` keeps the Claude accounts that
+repository grant to a running VM. `cog account` keeps the Claude accounts that
 every VM uses through the gateway. `cog rm` disables the VM's GitHub access and
 deletes it, and refuses the base. `cog list` is `limactl list`. `ssh lima-NAME`
 also works, through `~/.lima/*/ssh.config`.
@@ -431,11 +431,11 @@ forwards the request.
 `cog new` has the gateway read the pool again and asks it for the pool state
 before it clones anything, and fails with what to do when the pool has no
 account, is not usable, or the running gateway is too old to answer. Add an
-account with `cog pool add NAME`, or pass `--no-claude-token`, which skips the
-pool check, the mapping and the placeholder, so that the VM reaches Anthropic
-directly and you can run `claude auth login` in it. `cog new` no longer reads or
-asks for a token, and leaves `~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN` on the
-Mac alone.
+account with `cog account add claude NAME`, or pass `--no-claude-token`, which
+skips the pool check, the mapping and the placeholder, so that the VM reaches
+Anthropic directly and you can run `claude auth login` in it. `cog new` no
+longer reads or asks for a token, and leaves
+`~/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN` on the Mac alone.
 
 A base built by an older cog lacks `setup-model-gateway`. Run `cog base` again
 before `cog new`; `new` fails and deletes the VM when the script is missing or
@@ -459,31 +459,50 @@ since that failure shows nothing about the dotfiles.
 
 The gateway can hold several Claude accounts, and their tokens stay on the Mac.
 Make one token for each account with `claude setup-token`, then add it with
-`cog pool add NAME` (NAME is 1 to 32 lowercase letters, digits and hyphens,
-starting with a letter or digit). It asks for the token without echo, stores it
-in `~/.config/secrets/cog/claude-pool/NAME` (directory 0700, file 0600), and
-tells the running gateway to reload the directory. `cog pool rm NAME` removes an
-account and reloads. `cog pool list` prints the names, and works without the
-gateway. `cog pool status` asks the gateway for each account's hold and, for
-each rate-limit window, its utilization and the time that reading lasts until
-(UTC, the window's reset when the provider gave one). It fails with the reason
-when the pool is configured but unusable.
+`cog account add claude NAME` (NAME is 1 to 32 lowercase letters, digits and
+hyphens, starting with a letter or digit; name an account after what it is,
+such as `personal` or `work`, rather than a number). `claude` is the provider
+and the only one; every verb that changes an account takes it. The command asks
+for the token without echo, stores it in
+`~/.config/secrets/cog/claude-pool/NAME` (directory 0700, file 0600), and tells
+the running gateway to reload the directory. `cog account rm claude NAME`
+removes an account and reloads. `cog account rename claude OLD NEW` gives an
+account another name without a new token: it links the file to NEW, refusing
+to replace an existing entry, then removes OLD, never opening the file, so its
+content, mode and owner stay, and it reloads. `cog account list` prints one
+line, `claude NAME`, for each account, and works without the gateway.
+`cog account status` asks the gateway for each account's hold and, for each
+rate-limit window, its utilization and the time that reading lasts until (UTC,
+the window's reset when the provider gave one). It fails with the reason when
+the pool is configured but unusable.
+
+The gateway keys an account's hold and rate-limit readings by name, so a renamed
+account starts with none, and the audit rows of earlier requests keep the old
+name. Each VM's account order is a hash of the VM's ID and the account names, so
+VMs may move to a different account once. Between the link and the removal the
+directory holds two entries with one token, which the loader accepts as two
+accounts; a crash in that instant leaves both. The gateway reloads only when
+asked, so it sees them only if another command triggers a reload before you
+finish, and then counts the account twice. `cog account list` shows both names,
+and running the rename again reports that OLD and NEW are one file; finish with
+`cog account rm claude OLD`.
 
 `add` refuses a name that exists, so run `rm` first to replace a token. When the
-gateway cannot be reached, `add` and `rm` exit non-zero and say that the change
-is on disk; start the gateway and run `cog pool status`. A gateway from an older
-install does not know the pool: run `./install.sh` again. One bad entry makes
-the whole pool unusable, so use these commands rather than editing the
-directory; `rm` also takes the file name of a stray entry that is not an
+gateway cannot be reached, `add`, `rm` and `rename` exit non-zero and say that
+the change is on disk; start the gateway and run `cog account status`. A gateway
+from an older install does not know the pool: run `./install.sh` again. One bad
+entry makes the whole pool unusable, so use these commands rather than editing
+the directory; `rm` also takes the file name of a stray entry that is not an
 account, such as a copied file. The gateway reads the directory when it starts
-and when `add`, `rm`, `cog new`, `cog gateway disable` or a VM's registration
-asks it to, so an entry that you fixed by hand counts after one of those.
+and when `add`, `rm`, `rename`, `cog new`, `cog gateway disable` or a VM's
+registration asks it to, so an entry that you fixed by hand counts after one of
+those.
 
 Every `cog new` VM uses the pool, and the gateway keeps each VM on one account
 until the rate-limit headers show it near its limit. A 401 from the provider
 holds that account for ten minutes, and a request that a VM sends can draw one,
-so `cog pool status` may show a hold on a working account. A held account gets
-no request while another is free, so the hold lasts its ten minutes unless
+so `cog account status` may show a hold on a working account. A held account
+gets no request while another is free, so the hold lasts its ten minutes unless
 every account is held and a request then succeeds on it. Use only the
 inference-only token that `claude setup-token` makes, because the gateway
 forwards any path with it.
@@ -494,18 +513,27 @@ On the Mac, Claude Code's sandbox keeps the commands it runs from reading
 `.claude/settings.json`; that setting covers no other program, and cog neither
 sets nor checks it.
 
-`cog pool add` holds SIGHUP, SIGINT and SIGTERM while it writes the entry, so
+`cog account add` holds SIGHUP, SIGINT and SIGTERM while it writes the entry, so
 the token file is either complete (mode 600) with no temporary beside it, or
 absent. A signal that arrives meanwhile takes effect afterwards: the command
 exits 129, 130 or 143 and prints `cog: interrupted`, without telling the gateway
-to reload even though the token is saved. `cog pool list` shows the account. The
-gateway reads it at its next reload (`cog new`, a VM's registration, or another
-`add` or `rm`), and only then does `cog pool status` list it; `add` again
-reports that the account exists. A SIGKILL or a power loss can leave a temporary
-named `.NAME.` and 12 hex digits; `add` and `rm` delete such a file once it is
-over a minute old. If the entry is linked and the temporary then cannot be
-removed, `add` exits non-zero, says that the token is saved and names the
-temporary, which you remove by hand, and does not tell the gateway to reload.
+to reload even though the token is saved. `cog account list` shows the account.
+The gateway reads it at its next reload (`cog new`, a VM's registration, or
+another `add`, `rm` or `rename`), and only then does `cog account status` list
+it; `add` again reports that the account exists. A SIGKILL or a power loss can
+leave a temporary named `.NAME.` and 12 hex digits; `add`, `rm` and `rename`
+delete such a file once it is over a minute old. If the entry is linked and the
+temporary then cannot be removed, `add` exits non-zero, says that the token is
+saved and names the temporary, which you remove by hand, and does not tell the
+gateway to reload.
+
+`cog account rename` holds the same signals from the link to the removal of OLD.
+A signal that arrives meanwhile takes effect afterwards: the command exits 129,
+130 or 143 without telling the gateway to reload, `cog account list` shows NEW
+while `cog account status` keeps showing OLD until the next reload, and running
+the rename again says that there is no account OLD. If the removal of OLD failed
+too, `cog: interrupted` is all that is shown and `cog account list` shows both
+names; finish with `cog account rm claude OLD`.
 
 ### The rest
 
@@ -658,8 +686,8 @@ Automated tests use stubs for launchd and Lima and do not deploy to Cloudflare.
 They do not verify real launchd startup, VM network isolation, the guest relay,
 agent behavior with managed settings, live GitHub authorizations, a Wrangler
 deploy or an agent image build. After installing, run `cog base`, add a Claude
-account with `cog pool add NAME` and run `cog new t1 --repo OWNER/REPO` for a
-public repository. Then check:
+account with `cog account add claude NAME` and run `cog new t1 --repo
+OWNER/REPO` for a public repository. Then check:
 
 - The installed gateway starts under its Seatbelt profile
   (`launchctl print gui/$UID/dev.msrl.cog.gateway` lists

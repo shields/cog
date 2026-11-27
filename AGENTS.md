@@ -210,10 +210,23 @@ read|cog`; the gateway (`gatewayName`) stores `lima:NAME`. The gateway commands
   `cannot be read` says to run `./install.sh` again if the file or link moved,
   and a 404 (an older daemon) says to run `./install.sh`. `adminRequest` rejects
   an answer over its size limit rather than parsing a truncated one.
-  `cog/commands/pool.ts` holds `cog pool`, whose `add` and `rm` change that
-  directory and ask the daemon to reload (`rm` takes any plain file name there,
-  so a stray entry that disables the pool can be removed); `GET /pool` on the
-  admin socket
+  `cog/commands/account.ts` holds `cog account`, whose `add`, `rm` and `rename`
+  take the provider word `claude` (the only one; any other word is a `CogError`
+  that quotes the word only when an account may have that name, so that a token
+  typed there is not echoed) and change that directory and ask the daemon to
+  reload (`rm` takes any plain file name there, so a stray entry that disables
+  the pool can be removed). `rename OLD NEW` never opens the token file: under
+  `holdingSignals` it `linkSync`s OLD to NEW, which fails with EEXIST rather
+  than replace an entry, and unlinks OLD. The loader accepts the two names in
+  between as two accounts with one token, and a reload happens only on request,
+  so a crash there leaves both; running `rename` again then says that the two
+  are one file (same device and inode, read as bigints) and to `rm` OLD, and a
+  failed unlink says the same and is not undone. An unlink that finds OLD gone
+  is an error too: another command took it, and NEW holds the token. A signal
+  that arrives meanwhile ends the command as it does for `add`: after the work,
+  with no reload, and over a failed unlink, whose message is then not shown.
+  `list` prints `claude NAME` and `status` prefixes each line with `claude`.
+  `GET /pool` on the admin socket
   (`Control.pool`) reports the state and each account's hold and readings, never
   a token, and `list` reads the directory with the loader.
   Bun's HTTP server groups response header lines of one name next to the first
@@ -316,25 +329,25 @@ Fireworks; a Lima guest holds no real Claude token or Fireworks key. The
 gateway reads the Fireworks key on the Mac for each credentialed request, and
 `cog new` never opens the file and learns its state from the gateway.
 The CA goes to `setup-github-gateway`'s stdin. `cog new` needs a usable Claude
-pool, checked before the clone, unless `--no-claude-token`. `cog pool add`
-reads a pool token with the no-echo prompt and creates the file exclusively
-with mode 600 by a dot-named temporary and a link, so the loader never sees a
-partial entry. `writeAccount` runs that write inside `holdingSignals`, which
-records SIGHUP, SIGINT and SIGTERM and removes its handlers in a `finally`; a
-signal that arrived ends the command with `Interrupted(129|130|143)` after the
-write, over any write error and without the gateway reload. A failure to unlink
-the temporary after the link (ENOENT is none) is not a failed write: the entry
-is complete, so `writeEntry` says that the token is saved and names the
-temporary, and the gateway is not asked to reload. `add` and `rm` call
-`removeStrayTemporaries`, which deletes regular files named
-`.NAME.<12 hex>` over 60 seconds old without reading them (`rm` skips the name
-it was given); the loader already skips every dot name. `rm`, like `add`,
-refuses a pool location that is not a real directory.
-`cog new` upgrades the agents before it installs any secret. Rollback starts
-after a successful clone and ends before opening the interactive shell. A setup
-failure or signal in that interval disables the registration and deletes the VM.
-The staged dotfiles tree, its history and `guest/` are scanned with gitleaks
-before anything enters a guest. Every `limactl` call
+pool, checked before the clone, unless `--no-claude-token`. `cog account add
+claude` reads a pool token with the no-echo prompt and creates the file
+exclusively with mode 600 by a dot-named temporary and a link, so the loader
+never sees a partial entry. `writeAccount` runs that write inside
+`holdingSignals`, which records SIGHUP, SIGINT and SIGTERM and removes its
+handlers in a `finally`; a signal that arrived ends the command with
+`Interrupted(129|130|143)` after the write, over any write error and without the
+gateway reload. A failure to unlink the temporary after the link (ENOENT is
+none) is not a failed write: the entry is complete, so `writeEntry` says that
+the token is saved and names the temporary, and the gateway is not asked to
+reload. `add`, `rm` and `rename` call `removeStrayTemporaries`, which
+deletes regular files named `.NAME.<12 hex>` over 60 seconds old without reading
+them (`rm` skips the name it was given); the loader already skips every dot
+name. `rm` and `rename`, like `add`, refuse a pool location that is not a real
+directory. `cog new` upgrades the agents before it installs any secret.
+Rollback starts after a successful clone and ends before opening the interactive
+shell. A setup failure or signal in that interval disables the registration and
+deletes the VM. The staged dotfiles tree, its history and `guest/` are scanned
+with gitleaks before anything enters a guest. Every `limactl` call
 reads `/dev/null` unless a pipe or file is meant for it, or it is the final
 shell, so that none swallows what was typed for the shell; `tests/test_cog.zsh`
 holds a line in cog's stdin and checks that only the final shell reads it.
@@ -441,8 +454,8 @@ file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`
   the CLI and foundation modules, including a real `gateway serve` that
   disables older registrations, clears stale sockets and removes its own, one
   that is signalled while it issues the certificates, and
-  `cog/pool.test.ts` signals `cog pool add` through a hook in the write; the
-  no-echo prompt runs under a pseudo-terminal and needs `stty`.
+  `cog/account.test.ts` signals `cog account add` and `rename` through a hook in
+  the write; the no-echo prompt runs under a pseudo-terminal and needs `stty`.
 - `gateway/cert.test.ts` checks strict verification and the identifiers on
   both OpenSSL 3 and LibreSSL; a real TLS handshake from Python is not tested.
   `gateway/server.test.ts` counts connections per keep-alive agent, one host

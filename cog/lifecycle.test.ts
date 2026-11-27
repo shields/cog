@@ -526,11 +526,11 @@ test("new asks no one for a Claude token and fails before any VM work when the p
   for (const [pool, message] of [
     [
       "unconfigured",
-      "the Claude pool has no account; run cog pool add NAME, or pass --no-claude-token",
+      "the Claude pool has no account; run cog account add claude NAME, or pass --no-claude-token",
     ],
     [
       "unusable",
-      "the Claude pool is not usable: account work is broken; fix that (cog pool rm NAME removes an account), or pass --no-claude-token",
+      "the Claude pool is not usable: account work is broken; fix that (cog account rm claude NAME removes an account), or pass --no-claude-token",
     ],
     [
       "old",

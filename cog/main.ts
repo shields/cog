@@ -19,7 +19,7 @@ import { gatewayCommand } from "./commands/gateway.ts";
 import type { Context } from "./commands/context.ts";
 import { grant, list, remove } from "./commands/lifecycle.ts";
 import { newVM } from "./commands/new.ts";
-import { poolCommand } from "./commands/pool.ts";
+import { accountCommand } from "./commands/account.ts";
 import { authorize, edit, logs, revoke, show } from "./commands/policy.ts";
 import { dotfilesRepo, loadConfig, type Config, type Env } from "./config.ts";
 import { CogError, exitStatus } from "./errors.ts";
@@ -53,8 +53,8 @@ function usage(config: Config): string {
                               the removal of a VM's registration
        cog cloud config|authorize|new|list|show|start|logs|events|grant|revoke|rm
                               administer Cloudflare containers
-       cog pool add NAME | rm NAME | list | status
-                              keep Claude pool tokens in the gateway, one per account
+       cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status
+                              keep Claude accounts in the gateway's pool
        cog rm NAME            delete a VM (${base} is refused)
        cog list               list the VMs
 
@@ -79,10 +79,10 @@ the shell there. --no-repo skips repository selection. To enable pushes to
 cog/VM-ID/*, run cog grant NAME OWNER/REPO --profile cog on the Mac.
 
 new gives the VM no Claude credential: its Claude Code reaches Anthropic through
-the gateway, which uses an account from the pool that cog pool add keeps, and the
-VM holds only a placeholder. new fails when the pool has no usable account.
---no-claude-token skips the placeholder and the mapping, for a VM that will use
-claude auth login.
+the gateway, which uses an account from the pool that cog account add claude
+keeps, and the VM holds only a placeholder. new fails when the pool has no
+usable account. --no-claude-token skips the placeholder and the mapping, for a
+VM that will use claude auth login.
 
 new copies this Mac's Codex login, ${codexAuthFile}, into the VM, and
 fails when there is none: run codex login here first, with
@@ -148,8 +148,8 @@ async function dispatch(
     case "gateway":
       await gatewayCommand(args, context);
       return 0;
-    case "pool":
-      await poolCommand(args, context);
+    case "account":
+      await accountCommand(args, context);
       return 0;
     case "cloud":
       say(JSON.stringify(await cloudCommand(args, context.config), null, 2));

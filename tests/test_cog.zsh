@@ -698,7 +698,7 @@ assert_contains "help names --no-codex-auth" "--no-codex-auth" "$OUT"
 assert_contains "help says where Codex keeps its login" 'cli_auth_credentials_store = "file"' "$OUT"
 assert_eq "help does not list claude-token" 0 "$(grep -c 'cog claude-token' <<<"$OUT" || true)"
 assert_contains "help says the VM holds only a placeholder" "holds only a placeholder" "$OUT"
-assert_contains "help lists pool" "cog pool add NAME | rm NAME | list | status" "$OUT"
+assert_contains "help lists account" "cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status" "$OUT"
 assert_contains "help names the Fireworks key file" ".config/secrets/FIREWORKS_API_KEY" "$OUT"
 assert_contains "help describes the Mac gateway" "Credentials" "$OUT"
 run_cog
@@ -1449,7 +1449,7 @@ POOL_SEED=none
 start_gateway
 run_cog new t1 --no-repo --no-codex-auth
 assert_eq "an unconfigured Claude pool stops new" 1 "$RC"
-assert_contains "an unconfigured pool says to add an account" "the Claude pool has no account; run cog pool add NAME, or pass --no-claude-token" "$OUT"
+assert_contains "an unconfigured pool says to add an account" "the Claude pool has no account; run cog account add claude NAME, or pass --no-claude-token" "$OUT"
 assert_eq "an unconfigured pool changes no VM" 0 "$(grep -vc '^list ' "$STATE/limactl.log" || true)"
 assert_eq "an unconfigured pool registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
 assert_no_secret_leak "new with an unconfigured Claude pool"
@@ -1459,7 +1459,7 @@ POOL_SEED=unusable
 start_gateway
 run_cog new t1 --no-repo --no-codex-auth
 assert_eq "an unusable Claude pool stops new" 1 "$RC"
-assert_contains "an unusable pool gives its reason" "the Claude pool is not usable: account work is accessible to group or other; fix that (cog pool rm NAME removes an account), or pass --no-claude-token" "$OUT"
+assert_contains "an unusable pool gives its reason" "the Claude pool is not usable: account work is accessible to group or other; fix that (cog account rm claude NAME removes an account), or pass --no-claude-token" "$OUT"
 assert_eq "an unusable pool changes no VM" 0 "$(grep -vc '^list ' "$STATE/limactl.log" || true)"
 assert_eq "an unusable pool registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
 assert_no_secret_leak "new with an unusable Claude pool"

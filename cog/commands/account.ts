@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import {
+  type BigIntStats,
   chmodSync,
   closeSync,
   fchmodSync,
@@ -42,19 +43,39 @@ import { say, writeAll } from "../output.ts";
 import { toBytes } from "../secrets.ts";
 import type { Context } from "./context.ts";
 
-export type PoolContext = Pick<Context, "config" | "prompt"> & {
+export type AccountContext = Pick<Context, "config" | "prompt"> & {
   readonly gateway: () => Pick<Control, "location" | "sync" | "pool">;
 };
 
-export interface PoolIo {
+export interface AccountIo {
   readonly say: (text: string) => void;
   readonly link: (existing: string, created: string) => void;
   readonly close: (descriptor: number) => void;
 }
 
-const realIo: PoolIo = { say, link: linkSync, close: closeSync };
+const realIo: AccountIo = { say, link: linkSync, close: closeSync };
 
-const usage = "usage: cog pool add NAME | rm NAME | list | status";
+const usage =
+  "usage: cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status";
+
+const provider = "claude";
+
+function withProvider(args: string[]): string[] {
+  const [word, ...rest] = args;
+  if (word === undefined) {
+    throw new CogError(usage);
+  }
+  if (word !== provider) {
+    // A word that no account name can be may be a token typed where the
+    // provider goes, so it is not echoed.
+    throw new CogError(
+      accountName.test(word)
+        ? `unknown provider ${JSON.stringify(word)}; ${provider} is the only provider`
+        : `unknown provider; ${provider} is the only provider`,
+    );
+  }
+  return rest;
+}
 
 function code(error: unknown): string {
   return typeof error === "object" &&
@@ -96,9 +117,11 @@ function existingEntry(name: string | undefined, rest: string[]): string {
   return name;
 }
 
-function lstatOrNull(file: string): Stats | null {
+function lstatOrNull(file: string, bigint: true): BigIntStats | null;
+function lstatOrNull(file: string): Stats | null;
+function lstatOrNull(file: string, bigint = false): Stats | BigIntStats | null {
   try {
-    return lstatSync(file, { bigint: false });
+    return lstatSync(file, { bigint });
   } catch (error) {
     if (code(error) === "ENOENT") {
       return null;
@@ -109,7 +132,13 @@ function lstatOrNull(file: string): Stats | null {
 
 function exists(name: string): CogError {
   return new CogError(
-    `account ${name} already exists; run cog pool rm ${name} first`,
+    `account ${name} already exists; run cog account rm ${provider} ${name} first`,
+  );
+}
+
+function taken(name: string): CogError {
+  return new CogError(
+    `account ${name} already exists; choose another name, or run cog account rm ${provider} ${name} first`,
   );
 }
 
@@ -152,11 +181,12 @@ function attempt(cleanup: () => void): void {
 
 const heldSignals = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 } as const;
 
-// The write is synchronous, so a signal handler cannot run inside it; the
-// handlers keep the default action from killing the process between the
-// temporary's creation and its unlink, and the signal takes effect afterwards.
-// A signal that arrives during the write is dispatched on a later turn of the
-// event loop, so the handlers stay until one has passed.
+// The work is synchronous, so a signal handler cannot run inside it; the
+// handlers keep the default action from killing the process between its first
+// and its last step (a temporary's creation and its unlink, or a rename's link
+// and its unlink), and the signal takes effect afterwards. A signal that
+// arrives during the work is dispatched on a later turn of the event loop, so
+// the handlers stay until one has passed.
 async function holdingSignals(work: () => void): Promise<void> {
   const received: { status: number | null } = { status: null };
   const handlers = new Map<string, () => void>();
@@ -234,7 +264,7 @@ function removeStrayTemporaries(directory: string, keep = ""): void {
 // name starts with a dot, which the loader skips, so a crash cannot leave an
 // entry that disables the pool. The link fails rather than replace an entry.
 async function writeAccount(
-  io: PoolIo,
+  io: AccountIo,
   directory: string,
   name: string,
   token: string,
@@ -245,7 +275,7 @@ async function writeAccount(
 }
 
 function writeEntry(
-  io: PoolIo,
+  io: AccountIo,
   directory: string,
   name: string,
   token: string,
@@ -292,7 +322,7 @@ function writeEntry(
 }
 
 async function reload(
-  context: PoolContext,
+  context: AccountContext,
   saved: string,
   options: { mayBeEmpty: boolean },
 ): Promise<PoolStatus> {
@@ -303,7 +333,7 @@ async function reload(
     status = await gateway.pool();
   } catch (error) {
     throw new CogError(
-      `${saved}, but the gateway could not reload it: ${error instanceof Error ? error.message : "unknown error"}; check it with cog pool status`,
+      `${saved}, but the gateway could not reload it: ${error instanceof Error ? error.message : "unknown error"}; check it with cog account status`,
     );
   }
   if (
@@ -319,10 +349,10 @@ async function reload(
 
 async function add(
   args: string[],
-  context: PoolContext,
-  io: PoolIo,
+  context: AccountContext,
+  io: AccountIo,
 ): Promise<void> {
-  const [first, ...rest] = args;
+  const [first, ...rest] = withProvider(args);
   const name = validAccount(first, rest);
   const directory = context.gateway().location.pool;
   const missing = directoryIsMissing(directory);
@@ -363,10 +393,10 @@ async function add(
 
 async function remove(
   args: string[],
-  context: PoolContext,
-  io: PoolIo,
+  context: AccountContext,
+  io: AccountIo,
 ): Promise<void> {
-  const [first, ...rest] = args;
+  const [first, ...rest] = withProvider(args);
   const name = existingEntry(first, rest);
   const directory = context.gateway().location.pool;
   const entry = path.join(directory, name);
@@ -393,14 +423,105 @@ async function remove(
   );
 }
 
-function list(args: string[], context: PoolContext, io: PoolIo): void {
+async function rename(
+  args: string[],
+  context: AccountContext,
+  io: AccountIo,
+): Promise<void> {
+  const [from, to, ...rest] = withProvider(args);
+  if (from === undefined || to === undefined || rest.length > 0) {
+    throw new CogError(usage);
+  }
+  const oldName = validAccount(from, []);
+  const newName = validAccount(to, []);
+  if (oldName === newName) {
+    throw new CogError("the old and the new name are the same");
+  }
+  const directory = context.gateway().location.pool;
+  if (directoryIsMissing(directory)) {
+    throw new CogError(`there is no account ${oldName}`);
+  }
+  removeStrayTemporaries(directory);
+  const oldEntry = path.join(directory, oldName);
+  const newEntry = path.join(directory, newName);
+  const source = lstatOrNull(oldEntry, true);
+  if (source === null) {
+    throw new CogError(`there is no account ${oldName}`);
+  }
+  if (!source.isFile()) {
+    throw notRegular(oldName, oldEntry);
+  }
+  const target = lstatOrNull(newEntry, true);
+  if (target !== null) {
+    if (!target.isFile()) {
+      throw notRegular(newName, newEntry);
+    }
+    if (target.dev === source.dev && target.ino === source.ino) {
+      throw new CogError(
+        `accounts ${oldName} and ${newName} are one file, left by a rename that did not finish; run cog account rm ${provider} ${oldName} to finish it`,
+      );
+    }
+    throw taken(newName);
+  }
+  await holdingSignals(() => {
+    renameEntry(io, directory, oldName, newName);
+  });
+  const saved = `account ${oldName} is renamed to ${newName} in ${directory}`;
+  const after = await reload(context, saved, { mayBeEmpty: false });
+  io.say(
+    `cog: ${saved}; the pool has ${String(after.accounts.length)} account(s)`,
+  );
+}
+
+// The link fails rather than replace an entry that a concurrent add has just
+// made, and the token file is never opened. A failed unlink leaves both names
+// on one file, which the loader accepts as two accounts, and is not undone: the
+// entry that the unlink could not remove is the one that the user is told to
+// remove. An unlink that finds OLD gone means that another command changed it
+// between the two steps, and says so.
+function renameEntry(
+  io: AccountIo,
+  directory: string,
+  oldName: string,
+  newName: string,
+): void {
+  const oldEntry = path.join(directory, oldName);
+  const newEntry = path.join(directory, newName);
+  try {
+    io.link(oldEntry, newEntry);
+  } catch (error) {
+    if (code(error) === "EEXIST") {
+      throw taken(newName);
+    }
+    if (code(error) === "ENOENT") {
+      throw new CogError(`there is no account ${oldName}`);
+    }
+    throw new CogError(
+      `cannot rename account ${oldName} (${code(error)}); nothing was changed`,
+    );
+  }
+  try {
+    unlinkSync(oldEntry);
+  } catch (error) {
+    if (code(error) === "ENOENT") {
+      throw new CogError(
+        `account ${oldName} was removed by another command while it was renamed to ${newName}; ${newName} holds its token, so check cog account list`,
+      );
+    }
+    throw new CogError(
+      `account ${oldName} is also named ${newName} now, since ${oldName} cannot be removed (${code(error)}); both names hold the token, so run cog account rm ${provider} ${oldName} when it can be removed`,
+    );
+  }
+}
+
+function list(args: string[], context: AccountContext, io: AccountIo): void {
   if (args.length > 0) {
     throw new CogError(usage);
   }
   const loaded = loadPool(context.gateway().location.pool);
   if (loaded.usable) {
     for (const { name } of loaded.accounts) {
-      io.say(name);
+      io.say(`${provider} ${name}`);
     }
     return;
   }
@@ -428,13 +549,13 @@ function describeAccount(account: AccountSnapshot): string {
           ({ bucket, utilization, expires }) =>
             `${bucket} ${String(Math.round(utilization * 100))}% until ${utc(expires)}`,
         );
-  return [account.name, held, ...readings].join("; ");
+  return [`${provider} ${account.name}`, held, ...readings].join("; ");
 }
 
 async function status(
   args: string[],
-  context: PoolContext,
-  io: PoolIo,
+  context: AccountContext,
+  io: AccountIo,
 ): Promise<void> {
   if (args.length > 0) {
     throw new CogError(usage);
@@ -448,7 +569,9 @@ async function status(
     );
   }
   if (answer.state === "unconfigured") {
-    io.say(`${unconfiguredReason}; add an account with: cog pool add NAME`);
+    io.say(
+      `${unconfiguredReason}; add an account with: cog account add claude NAME`,
+    );
     return;
   }
   if (answer.state === "unusable") {
@@ -461,10 +584,10 @@ async function status(
   }
 }
 
-export async function poolCommand(
+export async function accountCommand(
   args: string[],
-  context: PoolContext,
-  io: PoolIo = realIo,
+  context: AccountContext,
+  io: AccountIo = realIo,
 ): Promise<void> {
   const [verb, ...rest] = args;
   switch (verb) {
@@ -473,6 +596,9 @@ export async function poolCommand(
       return;
     case "rm":
       await remove(rest, context, io);
+      return;
+    case "rename":
+      await rename(rest, context, io);
       return;
     case "list":
       list(rest, context, io);

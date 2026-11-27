@@ -147,12 +147,12 @@ async function requireUsablePool(
   }
   if (status.state === "unconfigured") {
     throw new CogError(
-      `the Claude pool has no account; run cog pool add NAME, ${skip}`,
+      `the Claude pool has no account; run cog account add claude NAME, ${skip}`,
     );
   }
   if (status.state === "unusable") {
     throw new CogError(
-      `the Claude pool is not usable: ${status.reason ?? "unknown reason"}; fix that (cog pool rm NAME removes an account), ${skip}`,
+      `the Claude pool is not usable: ${status.reason ?? "unknown reason"}; fix that (cog account rm claude NAME removes an account), ${skip}`,
     );
   }
 }
