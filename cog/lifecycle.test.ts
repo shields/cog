@@ -561,7 +561,7 @@ test("new stops before any VM work when the gateway cannot read the pool again",
   failures.syncFails = true;
   await assert.rejects(newVM(["vm", "--no-repo", "--no-codex-auth"], context), {
     message:
-      "cannot make the gateway read the Claude pool again: gateway administration failed",
+      "cannot make the gateway read the Claude pool again: gateway administration failed; see ~/Library/Logs/dev.msrl.cog.gateway.err",
   });
   assert.deepEqual(calls, [
     ["health"],

@@ -134,7 +134,7 @@ async function requireUsablePool(
     await gateway.sync();
   } catch (error) {
     throw new CogError(
-      `cannot make the gateway read the Claude pool again: ${reason(error)}`,
+      `cannot make the gateway read the Claude pool again: ${reason(error)}; see ~/Library/Logs/dev.msrl.cog.gateway.err`,
     );
   }
   let status: PoolStatus;
