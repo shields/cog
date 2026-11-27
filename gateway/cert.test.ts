@@ -115,7 +115,10 @@ function assertConsistent(certificates: Certificates): void {
     leaf.checkPrivateKey(createPrivateKey(readFileSync(certificates.key))),
     "the leaf key does not match the leaf certificate",
   );
-  assert.equal(leaf.subjectAltName, "DNS:github.com, DNS:api.github.com");
+  assert.equal(
+    leaf.subjectAltName,
+    "DNS:github.com, DNS:api.github.com, DNS:api.anthropic.com, DNS:api.fireworks.ai",
+  );
   assert.deepEqual(leaf.keyUsage, [serverAuth]);
   assert.equal(leaf.publicKey.asymmetricKeyDetails?.modulusLength, 3072);
 }
@@ -171,6 +174,115 @@ function issueLeaf(directory: string, days: number): void {
     path.join(directory, "github.pem"),
   );
   rmSync(request);
+}
+
+// OpenSSL 3 adds a Subject Key Identifier and an Authority Key Identifier
+// unless told not to; LibreSSL never does and rejects "none".
+function isLibreSSL(): boolean {
+  return spawnSync("openssl", ["version"], {
+    encoding: "utf8",
+  }).stdout.startsWith("LibreSSL");
+}
+
+function identifierLines(
+  identifiers: boolean | "subject-only" | "authority-only",
+): string {
+  const withheld = isLibreSSL() ? "" : "none";
+  const subject =
+    identifiers === true || identifiers === "subject-only" ? "hash" : withheld;
+  const authority =
+    identifiers === true || identifiers === "authority-only"
+      ? "keyid"
+      : withheld;
+  return `${subject === "" ? "" : `subjectKeyIdentifier=${subject}\n`}${authority === "" ? "" : `authorityKeyIdentifier=${authority}\n`}`;
+}
+
+function issueLeafNamed(
+  directory: string,
+  names: string[],
+  days = 365,
+  identifiers: boolean | "subject-only" | "authority-only" = true,
+): void {
+  const request = path.join(directory, "named.csr");
+  const extensions = path.join(directory, "named.ext");
+  openssl(
+    "req",
+    "-new",
+    "-key",
+    path.join(directory, "github-key.pem"),
+    "-subj",
+    "/CN=github.com",
+    "-out",
+    request,
+  );
+  writeFileSync(
+    extensions,
+    `subjectAltName=${names.map((name) => `DNS:${name}`).join(",")}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n${identifierLines(identifiers)}`,
+  );
+  openssl(
+    "x509",
+    "-req",
+    "-in",
+    request,
+    "-CA",
+    path.join(directory, "ca.pem"),
+    "-CAkey",
+    path.join(directory, "ca-key.pem"),
+    "-CAserial",
+    path.join(directory, "ca.srl"),
+    "-CAcreateserial",
+    "-days",
+    String(days),
+    "-sha256",
+    "-extfile",
+    extensions,
+    "-out",
+    path.join(directory, "github.pem"),
+  );
+  rmSync(request);
+  rmSync(extensions);
+}
+
+function strictlyVerifies(directory: string): boolean {
+  return (
+    spawnSync(
+      "openssl",
+      [
+        "verify",
+        "-x509_strict",
+        "-CAfile",
+        path.join(directory, "ca.pem"),
+        path.join(directory, "github.pem"),
+      ],
+      { encoding: "utf8" },
+    ).status === 0
+  );
+}
+
+function issueBareAuthority(directory: string): void {
+  openssl(
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:3072",
+    "-nodes",
+    "-keyout",
+    path.join(directory, "ca-key.pem"),
+    "-out",
+    path.join(directory, "ca.pem"),
+    "-days",
+    "3650",
+    "-sha256",
+    "-subj",
+    "/CN=cog",
+    "-addext",
+    "basicConstraints=critical,CA:TRUE",
+    "-addext",
+    "keyUsage=critical,keyCertSign,cRLSign",
+    ...(isLibreSSL() ? [] : ["-addext", "subjectKeyIdentifier=none"]),
+  );
+  chmodSync(path.join(directory, "ca-key.pem"), 0o600);
+  issueLeafNamed(directory, everyName, 365, false);
 }
 
 function listing(directory: string): string[] {
@@ -234,16 +346,91 @@ test("a valid CA and leaf are reused without rewriting any file", () => {
   });
 });
 
+const everyName = [
+  "github.com",
+  "api.github.com",
+  "api.anthropic.com",
+  "api.fireworks.ai",
+];
+
+test("a leaf with more than half of its year left is reused", () => {
+  withIssued((directory) => {
+    issueLeafNamed(directory, everyName, 184);
+    const before = snapshot(directory);
+    assertConsistent(ensureCertificates(directory));
+    assert.deepEqual(snapshot(directory), before);
+  });
+});
+
 test("a leaf inside the renewal window is reissued under the same CA", () => {
   withIssued((directory) => {
-    issueLeaf(directory, 29);
-    assert.ok(daysLeft(directory) < 30);
+    issueLeafNamed(directory, everyName, 181);
+    assert.ok(daysLeft(directory) < 182);
     const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
     const certificates = ensureCertificates(directory);
     assert.deepEqual(snapshot(directory, ["ca.pem", "ca-key.pem"]), authority);
     assert.ok(daysLeft(directory) > 360);
     assertConsistent(certificates);
     assertKeysPrivate(directory);
+  });
+});
+
+for (const names of [
+  ["github.com", "api.github.com"],
+  ["github.com", "api.github.com", "other.example"],
+  ["github.com", "api.github.com", "api.anthropic.com"],
+  ["github.com", "api.github.com", "api.fireworks.ai"],
+  ["github.com", "api.anthropic.com"],
+  ["api.github.com", "api.anthropic.com"],
+  ["other.example"],
+  ["api.anthropic.com"],
+]) {
+  test(`a leaf that names only ${names.join(", ")} is reissued once, under the same CA`, () => {
+    withIssued((directory) => {
+      issueLeafNamed(directory, names);
+      assert.ok(daysLeft(directory) > 360);
+      const before = read(directory, "github.pem");
+      const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
+      const certificates = ensureCertificates(directory);
+      assert.deepEqual(
+        snapshot(directory, ["ca.pem", "ca-key.pem"]),
+        authority,
+      );
+      assert.notEqual(read(directory, "github.pem"), before);
+      assertConsistent(certificates);
+      assertKeysPrivate(directory);
+      const issued = snapshot(directory);
+      assert.deepEqual(ensureCertificates(directory), certificates);
+      assert.deepEqual(snapshot(directory), issued);
+      assert.deepEqual(strays(directory), []);
+    });
+  });
+}
+
+test("a leaf with no names at all is reissued under the same CA", () => {
+  withIssued((directory) => {
+    issueLeaf(directory, 365);
+    assert.ok(daysLeft(directory) > 360);
+    const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
+    assertConsistent(ensureCertificates(directory));
+    assert.deepEqual(snapshot(directory, ["ca.pem", "ca-key.pem"]), authority);
+  });
+});
+
+test("a leaf that names more than the required hosts is kept as it is", () => {
+  withIssued((directory) => {
+    issueLeafNamed(directory, [
+      "github.com",
+      "api.github.com",
+      "api.anthropic.com",
+      "api.fireworks.ai",
+      "other.example",
+      "extra.example",
+    ]);
+    const before = snapshot(directory);
+    const certificates = ensureCertificates(directory);
+    assert.deepEqual(snapshot(directory), before);
+    assert.equal(certificates.cert, path.join(directory, "github.pem"));
   });
 });
 
@@ -384,6 +571,8 @@ test("a leaf that does not verify once it is issued is an error", () => {
       "basicConstraints=critical,CA:TRUE",
       "-addext",
       "keyUsage=critical,digitalSignature",
+      "-addext",
+      "subjectKeyIdentifier=hash",
     );
     assert.throws(
       () => ensureCertificates(directory),
@@ -451,6 +640,75 @@ test("private keys and an in-directory serial file do not depend on openssl's de
       } finally {
         process.chdir(original);
       }
+    });
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(shims, { recursive: true, force: true });
+  }
+});
+
+// OpenSSL 3 adds the key identifiers by default, and the build that the
+// launchd service resolves does not, so a request that leaves them to the
+// defaults passes here and fails there.
+const withoutDefaultIdentifiers = (
+  real: string,
+): string => String.raw`#!${process.execPath}
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const asked = (text) => text.includes("subjectKeyIdentifier=");
+if (args[0] === "req" && args.includes("-x509") && !args.some(asked)) {
+  args.push("-addext", "subjectKeyIdentifier=none");
+}
+if (args[0] === "x509" && args.includes("-req")) {
+  const index = args.indexOf("-extfile") + 1;
+  let text = readFileSync(args[index], "utf8");
+  for (const name of ["subjectKeyIdentifier", "authorityKeyIdentifier"]) {
+    if (!text.includes(name + "=")) text += name + "=none\n";
+  }
+  writeFileSync(args[index] + ".defaults", text);
+  args[index] += ".defaults";
+}
+const { status, error } = spawnSync(${JSON.stringify(real)}, args, { stdio: "inherit" });
+if (error) throw error;
+process.exit(status ?? 1);
+`;
+
+test("the key identifiers are asked for and not left to openssl's defaults", () => {
+  const shims = mkdtempSync(path.join(tmpdir(), "cog-cert-defaults-"));
+  const originalPath = process.env.PATH;
+  if (!isLibreSSL()) {
+    writeFileSync(
+      path.join(shims, "openssl"),
+      withoutDefaultIdentifiers(realOpenssl()),
+      { mode: 0o755 },
+    );
+  }
+  process.env.PATH = `${shims}${path.delimiter}${originalPath ?? ""}`;
+  try {
+    withDirectory((directory) => {
+      ensureCertificates(directory);
+      const subject = identifier(
+        path.join(directory, "ca.pem"),
+        "Subject Key Identifier",
+      );
+      assert.match(subject, /^[0-9A-F:]{20,}$/u);
+      assert.match(
+        identifier(
+          path.join(directory, "github.pem"),
+          "Subject Key Identifier",
+        ),
+        /^[0-9A-F:]{20,}$/u,
+      );
+      assert.equal(
+        identifier(
+          path.join(directory, "github.pem"),
+          "Authority Key Identifier",
+        ),
+        subject,
+      );
+      assert.ok(strictlyVerifies(directory));
     });
   } finally {
     process.env.PATH = originalPath;
@@ -634,6 +892,13 @@ test("a lock that cannot be created for a reason other than existing is an error
   withDirectory((directory) => {
     chmodSync(directory, 0o500);
     try {
+      if (process.getuid?.() === 0) {
+        assert.equal(
+          ensureCertificates(directory, 200).ca,
+          path.join(directory, "ca.pem"),
+        );
+        return;
+      }
       assert.throws(() => ensureCertificates(directory, 200), {
         code: "EACCES",
         syscall: "mkdir",
@@ -643,5 +908,123 @@ test("a lock that cannot be created for a reason other than existing is an error
       chmodSync(directory, 0o700);
     }
     assert.deepEqual(readdirSync(directory), []);
+  });
+});
+
+test("a freshly issued set passes strict verification", () => {
+  withDirectory((directory) => {
+    ensureCertificates(directory);
+    assert.ok(strictlyVerifies(directory));
+  });
+});
+
+function identifier(certificate: string, name: string): string {
+  const { stdout } = spawnSync(
+    "openssl",
+    ["x509", "-noout", "-text", "-in", certificate],
+    { encoding: "utf8" },
+  );
+  const found = new RegExp(
+    String.raw`X509v3 ${name}:[^\n]*\n\s+(?:keyid:)?([0-9A-Fa-f:]+)`,
+    "u",
+  ).exec(stdout);
+  return found?.[1]?.toUpperCase() ?? "";
+}
+
+test("the leaf's Authority Key Identifier is the CA's Subject Key Identifier", () => {
+  withIssued((directory) => {
+    const subject = identifier(
+      path.join(directory, "ca.pem"),
+      "Subject Key Identifier",
+    );
+    assert.match(subject, /^[0-9A-F:]{20,}$/u);
+    assert.equal(
+      identifier(
+        path.join(directory, "github.pem"),
+        "Authority Key Identifier",
+      ),
+      subject,
+    );
+  });
+});
+
+test("a CA without a Subject Key Identifier is replaced, and the leaf with it", () => {
+  withIssued((directory) => {
+    issueBareAuthority(directory);
+    const before = snapshot(directory, ["ca.pem", "ca-key.pem", "github.pem"]);
+    const certificates = ensureCertificates(directory);
+    const after = snapshot(directory, ["ca.pem", "ca-key.pem", "github.pem"]);
+    assert.notEqual(after["ca.pem"], before["ca.pem"]);
+    assert.notEqual(after["ca-key.pem"], before["ca-key.pem"]);
+    assert.notEqual(after["github.pem"], before["github.pem"]);
+    assert.ok(strictlyVerifies(directory));
+    assertConsistent(certificates);
+    assertKeysPrivate(directory);
+    assert.deepEqual(strays(directory), []);
+  });
+});
+
+test("a CA that openssl cannot read is an error that names the files to remove, and nothing is rewritten", () => {
+  withIssued((directory) => {
+    writeFileSync(path.join(directory, "ca.pem"), "not a certificate\n");
+    const before = snapshot(directory);
+    assert.throws(
+      () => ensureCertificates(directory),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message.startsWith(
+          `openssl cannot read ${path.join(directory, "ca.pem")}: `,
+        ) &&
+        error.message.endsWith(
+          `; remove ${path.join(directory, "ca.pem")} and ${path.join(directory, "ca-key.pem")} to issue a new CA`,
+        ),
+    );
+    assert.deepEqual(snapshot(directory), before);
+    assert.deepEqual(strays(directory), []);
+  });
+});
+
+test("a leaf without key identifiers under a good CA is reissued and the CA is kept", () => {
+  withIssued((directory) => {
+    issueLeafNamed(directory, everyName, 365, false);
+    const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
+    const before = read(directory, "github.pem");
+    const certificates = ensureCertificates(directory);
+    assert.deepEqual(snapshot(directory, ["ca.pem", "ca-key.pem"]), authority);
+    assert.notEqual(read(directory, "github.pem"), before);
+    assert.ok(strictlyVerifies(directory));
+    assertConsistent(certificates);
+  });
+});
+
+test("a leaf with a Subject Key Identifier but no Authority Key Identifier is reissued and the CA is kept", () => {
+  withIssued((directory) => {
+    issueLeafNamed(directory, everyName, 365, "subject-only");
+    const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
+    const before = read(directory, "github.pem");
+    const certificates = ensureCertificates(directory);
+    assert.deepEqual(snapshot(directory, ["ca.pem", "ca-key.pem"]), authority);
+    assert.notEqual(read(directory, "github.pem"), before);
+    assertConsistent(certificates);
+  });
+});
+
+test("a leaf with an Authority Key Identifier but no Subject Key Identifier is reissued and the CA is kept", () => {
+  withIssued((directory) => {
+    issueLeafNamed(directory, everyName, 365, "authority-only");
+    const authority = snapshot(directory, ["ca.pem", "ca-key.pem"]);
+    const before = read(directory, "github.pem");
+    const certificates = ensureCertificates(directory);
+    assert.deepEqual(snapshot(directory, ["ca.pem", "ca-key.pem"]), authority);
+    assert.notEqual(read(directory, "github.pem"), before);
+    assertConsistent(certificates);
+  });
+});
+
+test("a set that passes strict verification is reused untouched", () => {
+  withIssued((directory) => {
+    const before = snapshot(directory);
+    ensureCertificates(directory);
+    assert.deepEqual(snapshot(directory), before);
   });
 });

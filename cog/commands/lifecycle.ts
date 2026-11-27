@@ -23,11 +23,6 @@ import {
 } from "../names.ts";
 import { note, say } from "../output.ts";
 import { capture, run } from "../proc.ts";
-import {
-  requireRegularOrAbsent,
-  toBytes,
-  writeSecretFile,
-} from "../secrets.ts";
 import { deleteTailscale } from "../tailscale.ts";
 import type { LifecycleContext } from "./context.ts";
 
@@ -68,20 +63,15 @@ export async function list(
   await context.lima.list();
 }
 
-export async function claudeToken(
+export async function disable(
   args: readonly string[],
-  context: Pick<LifecycleContext<never>, "config" | "prompt">,
+  context: LifecycleContext<never, "disable">,
 ): Promise<void> {
-  if (args.length !== 0) {
-    throw new CogError("usage: cog claude-token");
+  const [name, ...extra] = args;
+  if (name === undefined || extra.length > 0) {
+    throw new CogError("usage: cog disable NAME");
   }
-  const { claudeTokenFile, promptInput } = context.config;
-  requireRegularOrAbsent(claudeTokenFile);
-  const token = await context.prompt(promptInput);
-  writeSecretFile(claudeTokenFile, toBytes(`${token}\n`));
-  say(
-    `cog: the Claude token is in ${claudeTokenFile}; cog new installs it from there`,
-  );
+  await context.gateway().disable(gatewayName(validName(name)));
 }
 
 export async function remove(
@@ -99,6 +89,15 @@ export async function remove(
   }
   const lima = context.lima;
   const gateway = context.gateway();
+  // A registration that is already disabled leaves only the name, which a VM
+  // made outside cog may have taken, so the VM must still forward to the socket
+  // that was registered.
+  const retired = gateway.state.retiredSocket(gatewayName(name));
+  if (retired !== null && (await lima.hasGatewaySocket(name, retired))) {
+    await lima.remove(name);
+    say(`cog: ${name} is deleted; its GitHub grants were already disabled.`);
+    return;
+  }
   const record = await gateway.disable(gatewayName(name), { forRemoval: true });
   if (record) {
     if (await lima.hasGatewaySocket(name, record.socket)) {

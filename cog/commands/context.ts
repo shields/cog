@@ -30,7 +30,7 @@ export interface Context {
 export type LifecycleContext<
   L extends keyof Lima,
   G extends keyof Control = never,
-> = Pick<Context, "config" | "prompt"> & {
+> = Pick<Context, "config"> & {
   readonly lima: Pick<Lima, L>;
   readonly gateway: () => Pick<Control, G>;
 };

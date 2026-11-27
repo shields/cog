@@ -39,7 +39,9 @@ export type Operation =
   | "api.read"
   | "identity.read"
   | "graphql.read"
-  | "public.read";
+  | "public.read"
+  | "model.claude"
+  | "model.fireworks";
 
 export interface RequestInfo {
   host: string;

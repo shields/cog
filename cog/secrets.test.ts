@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import {
   chmodSync,
   existsSync,
@@ -27,16 +28,12 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, onTestFinished, test } from "bun:test";
+import { describe, onTestFinished, spyOn, test } from "bun:test";
 import { compareCodeUnits } from "../gateway/policy.ts";
 import { CogError } from "./errors.ts";
 import {
-  fireworksKeyPresent,
   promptClaudeToken,
-  readClaudeTokenFile,
   readCodexAuth,
-  readFireworksKey,
-  requireRegularOrAbsent,
   setOneWord,
   toBytes,
   writeSecretFile,
@@ -128,105 +125,6 @@ describe("setOneWord", () => {
   });
 });
 
-describe("the Claude token file", () => {
-  const read = (content: string): string => {
-    const file = path.join(directory(), "token");
-    writeFileSync(file, content);
-    return readClaudeTokenFile(file);
-  };
-
-  test("holds one word, which may be followed by newlines", () => {
-    assert.equal(read(`${marker}\n`), marker);
-    assert.equal(read(`  ${marker}\r\n\n\n`), marker);
-  });
-
-  test("two words, from any separator, are refused without quoting them", () => {
-    for (const content of [
-      `${marker} other`,
-      `${marker}\nsecond-line`,
-      `${marker}\tsecond`,
-      `other ${marker}`,
-    ]) {
-      const text = message(() => read(content));
-      assert.match(text, /holds more than one token; run cog claude-token/);
-      assert.equal(text.includes(marker), false);
-    }
-  });
-
-  test("an empty file says so", () => {
-    assert.match(
-      message(() => read(" \n")),
-      / is empty; run cog claude-token to replace it, or pass --no-claude-token$/,
-    );
-  });
-
-  test("a directory, a missing file and a dangling link are not regular files", () => {
-    const dir = directory();
-    const dangling = path.join(dir, "dangling");
-    symlinkSync(path.join(dir, "nothing"), dangling);
-    for (const file of [dir, path.join(dir, "missing"), dangling]) {
-      assert.equal(
-        message(() => readClaudeTokenFile(file)),
-        `${file} is not a regular file; remove it, or pass --no-claude-token`,
-      );
-    }
-  });
-
-  test("a file that cannot be read says so", () => {
-    if (process.getuid?.() === 0) {
-      return;
-    }
-    const file = path.join(directory(), "token");
-    writeFileSync(file, marker, { mode: 0o000 });
-    chmodSync(file, 0o000);
-    assert.equal(
-      message(() => readClaudeTokenFile(file)),
-      `cannot read ${file}; run cog claude-token to replace it, or pass --no-claude-token`,
-    );
-  });
-
-  test("a link to a file is followed", () => {
-    const dir = directory();
-    writeFileSync(path.join(dir, "real"), `${marker}\n`);
-    symlinkSync(path.join(dir, "real"), path.join(dir, "link"));
-    assert.equal(readClaudeTokenFile(path.join(dir, "link")), marker);
-  });
-});
-
-describe("the Fireworks key file", () => {
-  test("presence counts a dangling link, which then fails the read", () => {
-    const dir = directory();
-    const dangling = path.join(dir, "dangling");
-    symlinkSync(path.join(dir, "nothing"), dangling);
-    assert.equal(fireworksKeyPresent(dangling), true);
-    assert.equal(fireworksKeyPresent(path.join(dir, "missing")), false);
-    assert.equal(
-      message(() => readFireworksKey(dangling)),
-      `${dangling} is not a regular file; remove it`,
-    );
-  });
-
-  test("one word is the key, and more than one is refused without quoting it", () => {
-    const file = path.join(directory(), "key");
-    writeFileSync(file, `${marker}\n`);
-    assert.equal(fireworksKeyPresent(file), true);
-    assert.equal(readFireworksKey(file), marker);
-    for (const content of [`${marker} x`, `x\n${marker}`]) {
-      writeFileSync(file, content);
-      const text = message(() => readFireworksKey(file));
-      assert.equal(
-        text,
-        `${file} holds more than one word; put only the key in it`,
-      );
-    }
-    writeFileSync(file, "\n");
-    assert.equal(
-      message(() => readFireworksKey(file)),
-      `${file} is empty; put the key in it, or remove it`,
-    );
-  });
-});
-
 describe("the Codex login", () => {
   const login = (content: string | Uint8Array): string => {
     const dir = directory();
@@ -265,7 +163,7 @@ describe("the Codex login", () => {
       const text = login(content);
       assert.match(
         text,
-        / is not a JSON object; run codex login on this Mac again, or pass --no-codex-auth$/,
+        / is not a JSON object; run codex login on this Mac again, or pass --no-codex$/,
       );
       assert.equal(text.includes(marker), false);
     }
@@ -286,13 +184,13 @@ describe("the Codex login", () => {
     );
     assert.equal(
       message(() => readCodexAuth(dir)),
-      `${dir} is not a regular file; remove it, or pass --no-codex-auth`,
+      `${dir} is not a regular file; remove it, or pass --no-codex`,
     );
     const empty = path.join(dir, "empty");
     writeFileSync(empty, "");
     assert.equal(
       message(() => readCodexAuth(empty)),
-      `${empty} is empty; run codex login on this Mac again, or pass --no-codex-auth`,
+      `${empty} is empty; run codex login on this Mac again, or pass --no-codex`,
     );
   });
 
@@ -305,22 +203,9 @@ describe("the Codex login", () => {
     chmodSync(locked, 0o000);
     assert.equal(
       message(() => readCodexAuth(locked)),
-      `cannot read ${locked}; run codex login on this Mac again, or pass --no-codex-auth`,
+      `cannot read ${locked}; run codex login on this Mac again, or pass --no-codex`,
     );
   });
-});
-
-test("an existing token target must be a regular file", () => {
-  const dir = directory();
-  requireRegularOrAbsent(path.join(dir, "absent"));
-  writeFileSync(path.join(dir, "file"), "x");
-  requireRegularOrAbsent(path.join(dir, "file"));
-  assert.equal(
-    message(() => {
-      requireRegularOrAbsent(dir);
-    }),
-    `${dir} is not a regular file; remove it first`,
-  );
 });
 
 describe("the typed token", () => {
@@ -350,17 +235,11 @@ describe("the typed token", () => {
     }
   });
 
-  test("an empty line says what to do, with the caller's addition", async () => {
-    assert.equal(
-      await rejection(() => typed("\n")),
-      "the Claude token is empty; run claude setup-token in another terminal and paste its output",
-    );
-    const file = path.join(directory(), "prompt");
-    writeFileSync(file, "");
-    assert.equal(
-      await rejection(() => promptClaudeToken(file, ", or pass X")),
-      "the Claude token is empty; run claude setup-token in another terminal and paste its output, or pass X",
-    );
+  test("an empty line says what to do", async () => {
+    const empty =
+      "the Claude token is empty; run claude setup-token in another terminal and paste its output";
+    assert.equal(await rejection(() => typed("\n")), empty);
+    assert.equal(await rejection(() => typed("")), empty);
   });
 
   test("a directory reads as an empty line", async () => {
@@ -423,6 +302,31 @@ describe("writeSecretFile", () => {
     const bytes = Uint8Array.from([0xff, 0x00, 0x80, 0x0a]);
     writeSecretFile(file, bytes);
     assert.deepEqual(new Uint8Array(readFileSync(file)), bytes);
+  });
+
+  test("a close that fails after it released the descriptor leaves no temporary file and closes nothing twice", () => {
+    const dir = directory();
+    const file = path.join(dir, "TOKEN");
+    const close = fs.closeSync;
+    let closed = 0;
+    const closing = spyOn(fs, "closeSync").mockImplementation((descriptor) => {
+      closed += 1;
+      close(descriptor);
+      if (closed === 1) {
+        throw Object.assign(new Error(`disk ${marker}`), { code: "EIO" });
+      }
+    });
+    onTestFinished(() => {
+      closing.mockRestore();
+    });
+    assert.equal(
+      message(() => {
+        writeSecretFile(file, toBytes(marker));
+      }),
+      `cannot write ${file}`,
+    );
+    assert.equal(closed, 1);
+    assert.deepEqual(readdirSync(dir), []);
   });
 
   test("a failure leaves no temporary file, keeps the old one and quotes nothing", () => {

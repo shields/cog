@@ -41,12 +41,12 @@ GLOBAL_CONFIG = """\
 """
 
 MARKER_READERS = {
-    ".zshrc": "/etc/cog-throwaway /etc/cog-github-gateway\n",
-    ".zshenv": "/etc/cog-github-gateway\n",
-    ".zsh.d/wt.zsh": "/etc/cog-github-gateway\n",
-    ".codex/hooks/git_guard.py": "/etc/cog-github-gateway\n",
+    ".zshrc": "/etc/cog-throwaway /etc/cog-gateway\n",
+    ".zshenv": "/etc/cog-gateway\n",
+    ".zsh.d/wt.zsh": "/etc/cog-gateway\n",
+    ".codex/hooks/git_guard.py": "/etc/cog-gateway\n",
     "tools/configure_codex.py": "/etc/cog-throwaway\n",
-    "provision.sh": "#!/bin/sh\n# /etc/cog-github-gateway\n",
+    "provision.sh": "#!/bin/sh\n# /etc/cog-gateway\n",
 }
 
 BUNX_STUB = """\
@@ -341,6 +341,22 @@ def test_a_checkout_from_before_the_split_is_refused(world: World) -> None:
     result = world.context(dest)
     assert result.returncode != 0
     assert ".zshenv in the dotfiles checkout does not name" in result.stderr
+    assert not dest.exists()
+
+
+def test_a_checkout_that_reads_the_earlier_marker_path_is_refused(
+    world: World,
+) -> None:
+    earlier = "/etc/cog-" + "github-gateway"
+    _ = (world.dotfiles / ".zshenv").write_text(f"{earlier}\n")
+    world.commit(world.dotfiles)
+    dest = world.base / "ctx"
+    result = world.context(dest)
+    assert result.returncode != 0
+    assert (
+        ".zshenv in the dotfiles checkout does not name /etc/cog-gateway"
+        in result.stderr
+    )
     assert not dest.exists()
 
 

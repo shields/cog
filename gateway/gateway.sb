@@ -1,0 +1,106 @@
+;; Copyright © 2026 Michael Shields
+;;
+;; Licensed under the Apache License, Version 2.0 (the "License");
+;; you may not use this file except in compliance with the License.
+;; You may obtain a copy of the License at
+;;
+;;     http://www.apache.org/licenses/LICENSE-2.0
+;;
+;; Unless required by applicable law or agreed to in writing, software
+;; distributed under the License is distributed on an "AS IS" BASIS,
+;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+;; See the License for the specific language governing permissions and
+;; limitations under the License.
+
+;; The gateway daemon's profile. install.sh passes BINARY, STATE, SECRETS and
+;; FIREWORKS_KEY as real paths, because Seatbelt matches resolved paths.
+;;
+;; Among the rules that name one operation the last match wins, so each deny
+;; follows the allow it narrows. A rule that names an operation beats a rule
+;; that names a wildcard covering it (file-write*, process-info*), whatever
+;; their order, so a wildcard deny leaves an allow that names an operation in
+;; place. A name that is not an operation or a wildcard is a compile error.
+
+(version 1)
+(deny default)
+(import "system.sb")
+
+;; The gateway runs openssl to issue certificates; nothing else may run.
+(allow process-fork)
+(allow process-exec
+  (literal (param "BINARY"))
+  (literal "/usr/bin/openssl"))
+
+;; openssl reads its configuration here; system.sb covers the rest.
+(allow file-read*
+  (subpath "/private/etc/ssl"))
+
+;; The daemon opens paths such as ~/.local/state/cog and the Fireworks key
+;; link unresolved, while the rules name real paths, so the kernel reads each
+;; link on the way. Nothing else may be statted.
+(allow file-read-metadata
+  (vnode-type SYMLINK))
+
+;; The directories themselves: listed and given mode 700, and the socket
+;; directory made when missing. Creating, replacing or removing anything in
+;; them needs a rule below.
+(allow file-read* file-write-mode
+  (literal (param "STATE"))
+  (literal (param "SECRETS")))
+(allow file-read* file-write-mode file-write-create
+  (literal (string-append (param "STATE") "/sock")))
+
+;; STATE: the database with its SQLite sidecar files, one socket file per VM,
+;; and the admin socket.
+(allow file-read* file-write*
+  (regex (string-append "^" (regex-quote (param "STATE")) "/state\\.sqlite(-wal|-shm|-journal)?$"))
+  (regex (string-append "^" (regex-quote (param "STATE")) "/sock/github-[0-9a-f-]+\\.sock$"))
+  (literal (string-append (param "STATE") "/admin.sock")))
+
+;; SECRETS: the certificates and openssl's serial file, the certificate lock
+;; and work directory, and the GitHub authorization records with the temporary
+;; and lock names that gateway/auth.ts makes. The Claude pool is only read.
+;; Every other file here belongs to the CLI. An authorization record's name,
+;; the base64url of OWNER/REPO and ".json", also fits tailscale-oauth.json, so
+;; the deny follows.
+(allow file-read* file-write*
+  (regex (string-append "^" (regex-quote (param "SECRETS")) "/((ca|ca-key|github|github-key)\\.pem|ca\\.srl)$"))
+  (regex (string-append "^" (regex-quote (param "SECRETS")) "/\\.(lock|issue-[A-Za-z0-9]+(/[^/]+)?)$"))
+  (regex (string-append "^" (regex-quote (param "SECRETS")) "/[A-Za-z0-9_-]+\\.json(\\.[0-9]+\\.[0-9]+\\.tmp|\\.lock)?$")))
+(deny file-read* file-write*
+  (regex (string-append "^" (regex-quote (param "SECRETS")) "/tailscale-oauth\\.json")))
+(allow file-read*
+  (subpath (string-append (param "SECRETS") "/claude-pool")))
+
+;; The key is read for each request and never written.
+(allow file-read*
+  (literal (param "FIREWORKS_KEY")))
+
+;; One listener per VM, in the socket directory, and the admin socket. Start
+;; connects to the admin socket to find a daemon that already owns it.
+(allow network-bind network-inbound
+  (regex (string-append "^" (regex-quote (param "STATE")) "/sock/github-[0-9a-f-]+\\.sock$"))
+  (literal (string-append (param "STATE") "/admin.sock")))
+(allow network-outbound
+  (literal (string-append (param "STATE") "/admin.sock")))
+
+;; Upstream HTTPS, and name resolution through mDNSResponder. Seatbelt can name
+;; a port but not a host or a range, so any remote host on 443 is reachable;
+;; the Mac's own addresses are not.
+(allow network-outbound (remote tcp "*:443"))
+(deny network-outbound (remote ip "localhost:*"))
+(allow network-outbound (literal "/private/var/run/mDNSResponder"))
+(allow mach-lookup
+  (global-name "com.apple.dnssd.service")
+  (global-name "com.apple.SystemConfiguration.DNSConfiguration"))
+
+;; A version 1 profile leaves some operations allowed under (deny default), and
+;; system.sb allows others. Nothing here needs link or clone, NVRAM, IOKit,
+;; notifications, or any view of other processes except its own.
+(deny file-link file-clone)
+(deny nvram* iokit-get-properties iokit-open-service darwin-notification-post)
+(deny mach-lookup (global-name "com.apple.system.notification_center"))
+;; Bun does not start without the pidinfo of its own process.
+(deny process-info*)
+(allow process-info-pidinfo (target self))
+(deny sysctl-read (sysctl-name-prefix "kern.proc"))

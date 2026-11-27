@@ -28,6 +28,7 @@ SHELL_SOURCES = \
 	guest/install-push-instructions.sh \
 	guest/reset-identity.sh \
 	guest/setup-github-gateway \
+	guest/setup-model-gateway \
 	guest/setup-secrets \
 	guest/throwaway.sh \
 	tools/install_ci_tools.sh \

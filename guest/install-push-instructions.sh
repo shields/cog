@@ -33,7 +33,7 @@ Push to GitHub only branches named `cog/VM-ID/NAME`. For example, create your
 branch with `git switch -c cog/VM-ID/fix-login`. Before every push, fetch the
 latest tip of your base branch from its remote and rebase your work onto that
 commit. For the first push, use `git push -u origin HEAD`.
-The GitHub gateway rejects other pushes, branch deletions, and pushes to
+The gateway rejects other pushes, branch deletions, and pushes to
 repositories the user has not granted push access to. It also rejects GitHub
 writes such as creating a pull request, so tell the user which branch you
 pushed.

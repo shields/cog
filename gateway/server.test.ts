@@ -14,14 +14,17 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import http, {
   createServer,
   request as httpRequest,
   type ClientRequest,
   type IncomingHttpHeaders,
+  type IncomingMessage,
   type RequestListener,
+  type ServerResponse,
 } from "node:http";
-import { once, type EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import https from "node:https";
 import {
   connect,
@@ -31,10 +34,13 @@ import {
 } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import {
+  chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,9 +60,10 @@ import {
   setTimeout as delay,
 } from "node:timers/promises";
 import { promisify } from "node:util";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { AppAuth } from "./auth.ts";
-import { Gateway } from "./server.ts";
+import { compareCodeUnits } from "./policy.ts";
+import { Gateway, sendBody } from "./server.ts";
 import { State, type Instance } from "./state.ts";
 
 afterEach(() => {
@@ -150,6 +157,14 @@ interface Forwarded {
   body: Buffer;
 }
 
+const tokens = {
+  alpha: "sk-ant-oat01-made-up-alpha-token",
+  bravo: "sk-ant-oat01-made-up-bravo-token",
+} as const;
+const accountToken = tokens.alpha;
+
+type PoolSpec = Record<string, string> | "missing" | "unset";
+
 const throwaway = mkdtempSync(path.join(tmpdir(), "cog-cert-"));
 const certificate = path.join(throwaway, "cert.pem");
 const key = path.join(throwaway, "key.pem");
@@ -219,14 +234,33 @@ function rawUpstream(connection: (socket: Socket) => void): Server & {
   });
 }
 
+function writePool(directory: string, accounts: Record<string, string>): void {
+  mkdirSync(directory, { recursive: true });
+  chmodSync(directory, 0o700);
+  for (const [name, token] of Object.entries(accounts)) {
+    const file = path.join(directory, name);
+    writeFileSync(file, `${token}\n`);
+    chmodSync(file, 0o600);
+  }
+}
+
 async function startGateway(
   upstreamOptions: {
     handler?: RequestListener;
     tls?: boolean;
     connection?: (socket: Socket) => void;
     githubOrigins?: boolean;
+    models?: {
+      pool?: PoolSpec;
+      anthropic?: string;
+      fireworks?: string;
+      fireworksKeyFile?: string;
+      upstreamIdleTimeout?: number;
+    };
   } | null = null,
 ): Promise<{
+  root: string;
+  poolDirectory: string;
   origin: string;
   socket: string;
   instance: Instance;
@@ -328,6 +362,12 @@ async function startGateway(
     }),
   );
   const origin = `${upstreamOptions?.tls ? "https" : "http"}://127.0.0.1:${String(address.port)}`;
+  const poolDirectory = path.join(root, "claude-pool");
+  const models = upstreamOptions?.models;
+  const poolSpec = models?.pool ?? { alpha: accountToken };
+  if (models && typeof poolSpec === "object") {
+    writePool(poolDirectory, poolSpec);
+  }
   const gateway = new Gateway(state, auth, {
     cert: certificate,
     key,
@@ -336,11 +376,25 @@ async function startGateway(
     apiUpstream: upstreamOptions?.githubOrigins
       ? "https://api.github.com"
       : origin,
+    ...(models && poolSpec !== "unset" ? { pool: poolDirectory } : {}),
+    ...(models?.anthropic === undefined
+      ? {}
+      : { anthropicUpstream: models.anthropic }),
+    ...(models?.fireworks === undefined
+      ? {}
+      : { fireworksUpstream: models.fireworks }),
+    ...(models?.fireworksKeyFile === undefined
+      ? {}
+      : { fireworksKeyFile: models.fireworksKeyFile }),
+    ...(models?.upstreamIdleTimeout === undefined
+      ? {}
+      : { upstreamIdleTimeout: models.upstreamIdleTimeout }),
   });
   const created = spyOn(https, "createServer");
+  const earlier = created.mock.results.length;
   defer(() => gateway.stop());
   await gateway.start();
-  const result = created.mock.results[0];
+  const result = created.mock.results[earlier];
   assert.equal(result?.type, "return");
   const listener = result.value;
   const responses: Promise<void>[] = [];
@@ -355,6 +409,8 @@ async function startGateway(
     await Promise.all(responses);
   };
   return {
+    root,
+    poolDirectory,
     origin,
     socket,
     instance,
@@ -1783,9 +1839,7 @@ test("a request that fails after its headers were sent ends the connection, so t
           request.socket.destroy();
         });
       } else {
-        // The timeout bounds the wait when the gateway leaves the connection
-        // open.
-        void Promise.race([clientGone.promise, delay(1000)]).then(() => {
+        void clientGone.promise.then(() => {
           response.writeHead(200, { "content-length": 2 }).end("ok");
         });
       }
@@ -1952,8 +2006,10 @@ test("a client whose socket is destroyed as the answer is relayed to it is audit
     });
   });
   const { response } = open(socket);
-  const hungUp = assert.rejects(response, { message: "socket hang up" });
-  await within("the client's request to fail", hungUp);
+  assert.equal(
+    (await within("the client's response to end", response)).complete,
+    false,
+  );
   await within("the audit row", audit.first);
   await within("the gateway's response to close", closed());
   assert.deepEqual(auditRows(state, instance), [
@@ -2141,14 +2197,19 @@ test("an upstream that answers before the upload ends keeps receiving the rest o
 function watchCloseListeners(listener: https.Server): {
   connections: Set<Socket>;
   counts: number[];
+  finished: number[];
 } {
   const connections = new Set<Socket>();
   const counts: number[] = [];
-  listener.on("request", (request) => {
+  const finished: number[] = [];
+  listener.prependListener("request", (request, response) => {
     connections.add(request.socket);
     counts.push(request.socket.listenerCount("close"));
+    response.once("finish", () => {
+      finished.push(request.socket.listenerCount("close"));
+    });
   });
-  return { connections, counts };
+  return { connections, counts, finished };
 }
 
 test("GraphQL queries in sequence on one connection leave no listeners behind on its socket", async () => {
@@ -2225,7 +2286,7 @@ test("uploads in sequence on one connection leave no listeners behind on its soc
   assert.equal(new Set(watched.counts).size, 1);
 });
 
-test("uploads that fail in sequence on one connection leave no listeners behind on its socket", async () => {
+test("uploads that fail in sequence each close their connection", async () => {
   const { socket, listener } = await startGateway({
     handler: (request) => {
       request.socket.destroy();
@@ -2264,8 +2325,7 @@ test("uploads that fail in sequence on one connection leave no listeners behind 
     request.end("0000");
     assert.equal(await within("the response to end", answered), 503);
   }
-  assert.equal(watched.connections.size, 1);
-  assert.equal(new Set(watched.counts).size, 1, watched.counts.join(","));
+  assert.equal(watched.connections.size, 8);
 });
 
 function accepting(socketPath: string): Promise<boolean> {
@@ -2817,6 +2877,21 @@ function holdEvent(
   };
 }
 
+test("the runtime removes a VM's socket file when its listener is retired and when the gateway stops", async () => {
+  const { socket, gateway, state } = await startGateway();
+  const added = path.join(path.dirname(socket), "added.sock");
+  state.register("lima:added", added, "tester");
+  await gateway.refresh();
+  assert.equal(existsSync(socket), true);
+  assert.equal(existsSync(added), true);
+  state.disable("lima:work", "tester");
+  await gateway.refresh();
+  assert.equal(existsSync(socket), false);
+  assert.equal(existsSync(added), true);
+  await gateway.stop();
+  assert.equal(existsSync(added), false);
+});
+
 test("stop() waits for the server of a VM that was disabled, and for its idle keep-alive connections to end", async () => {
   const { socket, gateway, state, auth, listener } = await startGateway();
   listener.keepAliveTimeout = 600_000;
@@ -3088,4 +3163,3623 @@ test("stop() cancels the periodic listener refresh", async () => {
   intervals.tick(60_000);
   await nextTurn();
   assert.equal(refresh.mock.calls.length, 1);
+});
+
+interface ModelRequest {
+  method: string;
+  url: string;
+  headers: IncomingHttpHeaders;
+  rawHeaders: string[];
+  body: Buffer;
+  done: boolean;
+  ended: Promise<undefined>;
+  connection: number;
+}
+
+interface ModelStub {
+  origin: string;
+  requests: ModelRequest[];
+  firstChunk: Promise<undefined>;
+  connections: { id: number; closed: Promise<undefined> }[];
+}
+
+function replyOk(
+  _request: IncomingMessage,
+  response: ServerResponse,
+  entry: ModelRequest,
+): void {
+  void entry.ended.then(() => {
+    response
+      .writeHead(200, { "content-type": "application/json" })
+      .end('{"ok":true}');
+  });
+}
+
+async function startModelStub(
+  respond: (
+    request: IncomingMessage,
+    response: ServerResponse,
+    entry: ModelRequest,
+  ) => void = replyOk,
+): Promise<ModelStub> {
+  const requests: ModelRequest[] = [];
+  const connections: ModelStub["connections"] = [];
+  const ids = new Map<Socket, number>();
+  const firstChunk = signal();
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    const ended = signal();
+    const entry: ModelRequest = {
+      method: request.method ?? "",
+      url: request.url ?? "",
+      headers: request.headers,
+      rawHeaders: request.rawHeaders,
+      body: Buffer.alloc(0),
+      done: false,
+      ended: ended.promise,
+      connection: ids.get(request.socket) ?? -1,
+    };
+    request.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+      firstChunk.resolve();
+    });
+    request.once("end", () => {
+      entry.body = Buffer.concat(chunks);
+      entry.done = true;
+      ended.resolve();
+    });
+    requests.push(entry);
+    respond(request, response, entry);
+  });
+  server.keepAliveTimeout = 600_000;
+  server.on("connection", (socket: Socket) => {
+    const closed = signal();
+    const id = connections.length + 1;
+    ids.set(socket, id);
+    connections.push({ id, closed: closed.promise });
+    socket.once("close", closed.resolve);
+  });
+  defer(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return {
+    origin: `http://127.0.0.1:${String(address.port)}`,
+    requests,
+    firstChunk: firstChunk.promise,
+    connections,
+  };
+}
+
+interface ModelReply {
+  status: number;
+  statusMessage: string;
+  headers: IncomingHttpHeaders;
+  rawHeaders: string[];
+  body: Buffer;
+  complete: boolean;
+}
+
+function modelClient(
+  socket: string,
+  method: string,
+  target: string,
+  headers: Record<string, string | string[]> = {},
+  body?: Buffer | string,
+  end = true,
+): {
+  request: ClientRequest;
+  firstData: Promise<undefined>;
+  response: Promise<ModelReply>;
+} {
+  const request = https.request({
+    socketPath: socket,
+    servername: claudeName,
+    rejectUnauthorized: false,
+    method,
+    path: target,
+    agent: false,
+    headers: { host: claudeName, ...headers },
+  });
+  defer(() => {
+    request.destroy();
+  });
+  const firstData = signal();
+  const response = new Promise<ModelReply>((resolve, reject) => {
+    request.once("error", reject);
+    request.once("response", (incoming) => {
+      const chunks: Buffer[] = [];
+      incoming.on("data", (chunk: Buffer) => {
+        chunks.push(chunk);
+        firstData.resolve();
+      });
+      incoming.once("close", () => {
+        resolve({
+          status: incoming.statusCode ?? 0,
+          statusMessage: incoming.statusMessage ?? "",
+          headers: incoming.headers,
+          rawHeaders: incoming.rawHeaders,
+          body: Buffer.concat(chunks),
+          complete: incoming.complete,
+        });
+      });
+    });
+  });
+  if (end) {
+    request.end(body);
+  } else if (body !== undefined) {
+    request.write(body);
+  }
+  return { request, firstData: firstData.promise, response };
+}
+
+const claudeName = "api.anthropic.com";
+const poolHeaders = { authorization: "Bearer cog" };
+
+function claude(
+  socket: string,
+  method: string,
+  target: string,
+  headers: Record<string, string | string[]> = {},
+  body?: Buffer | string,
+): Promise<ModelReply> {
+  return modelClient(socket, method, target, headers, body).response;
+}
+
+function digest(body: Uint8Array): string {
+  return createHash("sha256").update(body).digest("hex");
+}
+
+function headerValues(rawHeaders: readonly string[], name: string): string[] {
+  const found: string[] = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (rawHeaders[index]?.toLowerCase() === name) {
+      found.push(rawHeaders[index + 1] ?? "");
+    }
+  }
+  return found;
+}
+
+function statusOf(reply: string): number {
+  return Number(reply.split(" ", 2)[1]);
+}
+
+function noSecrets(...shown: unknown[]): void {
+  const text = shown
+    .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
+    .join("\n");
+  for (const secret of Object.values(tokens)) {
+    assert.ok(!text.includes(secret), "a secret is shown");
+  }
+  assert.ok(!text.includes("made-up"), "a secret is shown");
+}
+
+function claudeError(reply: ModelReply): { type: string; message: string } {
+  const body = JSON.parse(reply.body.toString()) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).toSorted(compareCodeUnits), [
+    "error",
+    "request_id",
+    "type",
+  ]);
+  assert.equal(body.type, "error");
+  return body.error as { type: string; message: string };
+}
+
+function pairsOf(rawHeaders: readonly string[]): string[] {
+  const lines: string[] = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    lines.push(`${rawHeaders[index] ?? ""}: ${rawHeaders[index + 1] ?? ""}`);
+  }
+  return lines;
+}
+
+function lastRequest(stub: ModelStub): ModelRequest {
+  const last = stub.requests.at(-1);
+  assert.ok(last);
+  return last;
+}
+
+function tokenSeen(entry: ModelRequest): string | undefined {
+  return Object.entries(tokens).find(
+    ([, token]) => entry.headers.authorization === `Bearer ${token}`,
+  )?.[0];
+}
+
+interface KeepAliveAgent {
+  options: { keepAlive?: boolean; timeout?: number };
+}
+
+const bothAccounts = { alpha: tokens.alpha, bravo: tokens.bravo };
+
+test("a request with the placeholder reaches the provider with the token in the Authorization line's place and spelling, and the rest of the list as sent", async () => {
+  const stub = await startModelStub();
+  const stderr = captureStderr();
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const audit = recordFinishes(state);
+  const reply = await exchange(
+    socket,
+    claudeName,
+    "POST /v1/messages?beta=true HTTP/1.1\r\n" +
+      "Host: api.anthropic.com\r\n" +
+      "X-Dup: one\r\n" +
+      "aUtHoRiZaTiOn: Bearer cog\r\n" +
+      "x-dup: two\r\n" +
+      "Anthropic-Beta: a\r\n" +
+      "Cookie: session=guest\r\n" +
+      "X-Forwarded-For: 198.51.100.7\r\n" +
+      "Via: 1.1 guest\r\n" +
+      "User-Agent: claude-cli/2.1 (external, cli)\r\n" +
+      "Connection: close, TE\r\n" +
+      "TE: trailers\r\n" +
+      "Content-Length: 2\r\n" +
+      "X-Same: 1\r\n" +
+      "X-Same: 2\r\n" +
+      "anthropic-beta: b\r\n\r\n{}",
+  );
+  assert.equal(statusOf(reply), 200);
+  assert.equal(stub.requests.length, 1);
+  const [seen] = stub.requests;
+  assert.ok(seen);
+  assert.equal(seen.method, "POST");
+  assert.equal(seen.url, "/v1/messages?beta=true");
+  assert.deepEqual(pairsOf(seen.rawHeaders), [
+    "Host: api.anthropic.com",
+    "X-Dup: one",
+    `aUtHoRiZaTiOn: Bearer ${accountToken}`,
+    "x-dup: two",
+    "Anthropic-Beta: a",
+    "Cookie: session=guest",
+    "X-Forwarded-For: 198.51.100.7",
+    "Via: 1.1 guest",
+    "User-Agent: claude-cli/2.1 (external, cli)",
+    "Content-Length: 2",
+    "X-Same: 1",
+    "X-Same: 2",
+    "anthropic-beta: b",
+    "Connection: keep-alive",
+  ]);
+  assert.equal(seen.body.toString(), "{}");
+  await within("the audit row", audit.first);
+  const [row, ...others] = state.logs(instance.id);
+  assert.deepEqual(others, []);
+  assert.equal(row?.operation, "model.claude");
+  assert.equal(row.repository, null);
+  assert.deepEqual(row.refs, []);
+  assert.equal(row.allowed, true);
+  assert.equal(row.reason, "pool account alpha");
+  assert.equal(row.outcome, "completed");
+  assert.equal(row.upstreamStatus, 200);
+  noSecrets(state.logs(instance.id), stderr, reply);
+  assert.deepEqual(stderr, []);
+});
+
+test("a request with no Authorization goes to the provider as the client sent it, with no credential, and does not need the pool", async () => {
+  const stub = await startModelStub();
+  const stderr = captureStderr();
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: stub.origin, pool: "missing" },
+  });
+  const audit = recordFinishes(state);
+  const reply = await exchange(
+    socket,
+    claudeName,
+    "POST /v1/oauth/token?x=1 HTTP/1.1\r\n" +
+      "Host: api.anthropic.com\r\n" +
+      "X-Dup: one\r\n" +
+      "Cookie: session=guest\r\n" +
+      "x-dup: two\r\n" +
+      "Proxy-Authorization: Basic x\r\n" +
+      "X-Instance: another-vm\r\n" +
+      "Content-Type: application/json\r\n" +
+      "Connection: close\r\n" +
+      "Content-Length: 7\r\n\r\n" +
+      '{"a":1}',
+  );
+  assert.equal(statusOf(reply), 200);
+  const [seen] = stub.requests;
+  assert.ok(seen);
+  assert.deepEqual(pairsOf(seen.rawHeaders), [
+    "Host: api.anthropic.com",
+    "X-Dup: one",
+    "Cookie: session=guest",
+    "x-dup: two",
+    "X-Instance: another-vm",
+    "Content-Type: application/json",
+    "Content-Length: 7",
+    "Connection: keep-alive",
+  ]);
+  assert.equal(seen.url, "/v1/oauth/token?x=1");
+  assert.equal(seen.body.toString(), '{"a":1}');
+  await within("the audit row", audit.first);
+  const [row, ...others] = state.logs(instance.id);
+  assert.deepEqual(others, []);
+  assert.equal(row?.operation, "model.claude");
+  assert.equal(row.allowed, true);
+  assert.equal(row.reason, "no credential");
+  assert.equal(row.outcome, "completed");
+  assert.equal(row.upstreamStatus, 200);
+  noSecrets(state.logs(instance.id), stderr);
+});
+
+test("targets and bodies reach the provider byte for byte on both routes", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const targets = [
+    "/v1/messages",
+    "/v1/messages?a={b}&c='d'|[e]^",
+    '/v1/messages?a=%zz&b=%2F&c=;&d=,&e=@&f=!&g=$&h=(*)&i=~&j="<>`',
+    "/v1/messages?",
+    "/v1/x/",
+    "//x",
+    "/v1/p%2fq/%7e",
+    "/v1/%252e%252e/conversations",
+    "/a/.;/x",
+    '/v1/{x}"<>^`|[]',
+    "/v1/messages?x=/../..//",
+    "/v1/%C3%BC",
+    "/api/claude_cli/bootstrap",
+    `/v1/x?${"q=%41&".repeat(2000)}`,
+  ];
+  const body = Buffer.from(
+    JSON.stringify({ messages: [{ content: "x".repeat(400_000) }] }),
+  );
+  for (const target of targets) {
+    for (const headers of [poolHeaders, {}]) {
+      const reply = await claude(socket, "POST", target, headers, body);
+      assert.equal(reply.status, 200, target);
+    }
+  }
+  assert.deepEqual(
+    stub.requests.map(({ url }) => url),
+    targets.flatMap((target) => [target, target]),
+  );
+  for (const entry of stub.requests) {
+    assert.equal(digest(entry.body), digest(body));
+  }
+  const requested = spyOn(http, "request");
+  await claude(socket, "POST", targets[2] ?? "", poolHeaders, "{}");
+  assert.equal(requested.mock.calls[0]?.[1]?.path, targets[2]);
+});
+
+test("a target that is not in origin form is refused, wherever the HTTP parser lets it through", async () => {
+  const stub = await startModelStub();
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const refused: string[] = [];
+  for (const target of [
+    "http://api.anthropic.com/v1/messages",
+    "*",
+    "api.anthropic.com:443",
+    "v1/messages",
+  ]) {
+    const reply = await exchange(
+      socket,
+      claudeName,
+      rawRequest("POST", target, claudeName, "content-length: 0"),
+    );
+    if (statusOf(reply) === 403) {
+      refused.push(target);
+    } else {
+      assert.equal(statusOf(reply), 400, target);
+    }
+  }
+  assert.ok(refused.length >= 1);
+  assert.equal(stub.requests.length, 0);
+  for (const row of state.logs(instance.id)) {
+    assert.equal(row.operation, "model.claude");
+    assert.equal(row.allowed, false);
+  }
+});
+
+test("the upstream connection is kept alive, reused within a VM and never shared between VMs", async () => {
+  const stub = await startModelStub();
+  const { socket, instance, state, gateway } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const other = state.register(
+    "lima:other",
+    path.join(path.dirname(socket), "other.sock"),
+    "tester",
+  );
+  await gateway.refresh();
+  const otherSocket = other.socket;
+  for (const [vm, headers] of [
+    [socket, poolHeaders],
+    [otherSocket, poolHeaders],
+    [socket, {}],
+    [otherSocket, {}],
+    [socket, poolHeaders],
+    [otherSocket, {}],
+  ] as const) {
+    assert.equal(
+      (await claude(vm, "POST", "/v1/messages", headers, "{}")).status,
+      200,
+    );
+  }
+  const used = (n: number): number => stub.requests[n]?.connection ?? -1;
+  assert.deepEqual(
+    [0, 2, 4].map(used).map((id) => id === used(0)),
+    [true, true, true],
+  );
+  assert.deepEqual(
+    [1, 3, 5].map(used).map((id) => id === used(1)),
+    [true, true, true],
+  );
+  assert.notEqual(used(0), used(1));
+  assert.equal(stub.connections.length, 2);
+  for (const entry of stub.requests) {
+    assert.deepEqual(headerValues(entry.rawHeaders, "connection"), [
+      "keep-alive",
+    ]);
+  }
+  assert.equal(state.logs(instance.id).length, 3);
+});
+
+test("a VM's upstream agent is its own, keeps connections alive, and is destroyed with the VM's listener or the gateway", async () => {
+  const stub = await startModelStub();
+  const { socket, state, gateway } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const other = state.register(
+    "lima:other",
+    path.join(path.dirname(socket), "other.sock"),
+    "tester",
+  );
+  await gateway.refresh();
+  const requested = spyOn(http, "request");
+  await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  await claude(other.socket, "POST", "/v1/messages", poolHeaders, "{}");
+  await claude(socket, "POST", "/v1/messages", {}, "{}");
+  const agents = requested.mock.calls.map(
+    ([, options]) => (options as http.RequestOptions | undefined)?.agent,
+  );
+  const [first, second, third] = agents;
+  assert.ok(first instanceof http.Agent);
+  assert.ok(second instanceof http.Agent);
+  assert.equal(first, third);
+  assert.notEqual(first, second);
+  assert.equal((first as unknown as KeepAliveAgent).options.keepAlive, true);
+  assert.equal((second as unknown as KeepAliveAgent).options.keepAlive, true);
+  assert.equal((first as unknown as KeepAliveAgent).options.timeout, 30_000);
+  assert.equal((second as unknown as KeepAliveAgent).options.timeout, 30_000);
+  assert.equal(stub.connections.length, 2);
+  const [one, two] = stub.connections;
+  assert.ok(one && two);
+  state.disable("lima:work", "tester");
+  await gateway.refresh();
+  await within("the disabled VM's upstream connection to close", one.closed);
+  assert.equal(stub.connections.length, 2);
+  await gateway.stop();
+  await within("the other VM's upstream connection to close", two.closed);
+});
+
+test("a VM that is removed from the active set loses its upstream connections at the next sync", async () => {
+  const stub = await startModelStub();
+  const { socket, state, gateway } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  const [connection] = stub.connections;
+  assert.ok(connection);
+  state.disable("lima:work", "tester");
+  await gateway.refresh();
+  await within("the upstream connection to close", connection.closed);
+  assert.equal(await accepting(socket), false);
+});
+
+for (const route of ["pool", "direct"] as const) {
+  test(`a streamed response on the ${route} route reaches the client as it arrives, before the provider has sent the last event`, async () => {
+    const release = signal();
+    const sent: string[] = [];
+    const stub = await startModelStub((_request, response, entry) => {
+      void entry.ended.then(async () => {
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        });
+        response.write("event: ping\ndata: {}\n\n");
+        sent.push("ping");
+        await release.promise;
+        response.write("event: message_stop\ndata: {}\n\n");
+        sent.push("message_stop");
+        response.end();
+      });
+    });
+    const { socket, instance, state } = await startGateway({
+      models: { anthropic: stub.origin },
+    });
+    const audit = recordFinishes(state);
+    const { firstData, response } = modelClient(
+      socket,
+      "POST",
+      "/v1/messages?beta=true",
+      {
+        ...(route === "pool" ? poolHeaders : {}),
+        accept: "text/event-stream",
+      },
+      '{"stream":true}',
+    );
+    await within("the first event", firstData);
+    assert.deepEqual(sent, ["ping"]);
+    await delay(50);
+    assert.deepEqual(sent, ["ping"]);
+    release.resolve();
+    const reply = await within("the response", response);
+    assert.deepEqual(sent, ["ping", "message_stop"]);
+    assert.equal(reply.status, 200);
+    assert.equal(reply.headers["content-type"], "text/event-stream");
+    assert.equal(reply.headers["cache-control"], "no-cache");
+    assert.equal(
+      reply.body.toString(),
+      "event: ping\ndata: {}\n\nevent: message_stop\ndata: {}\n\n",
+    );
+    assert.equal(reply.complete, true);
+    await within("the audit row", audit.first);
+    assert.deepEqual(auditRows(state, instance), [
+      { outcome: "completed", upstreamStatus: 200 },
+    ]);
+  });
+}
+
+test("the request body is streamed to the provider while the client is still sending it", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const first = Buffer.from('{"messages":[');
+  const rest = Buffer.alloc(2 * 1_048_576, 0x61);
+  const { request, response } = modelClient(
+    socket,
+    "POST",
+    "/v1/messages",
+    { ...poolHeaders, "content-type": "application/json" },
+    first,
+    false,
+  );
+  await within("the first chunk at the provider", stub.firstChunk);
+  const [seen] = stub.requests;
+  assert.ok(seen);
+  assert.equal(seen.done, false);
+  request.write(rest);
+  request.end("]}");
+  const reply = await within("the response", response);
+  assert.equal(reply.status, 200);
+  const sent = Buffer.concat([first, rest, Buffer.from("]}")]);
+  assert.equal(digest(seen.body), digest(sent));
+  assert.equal(seen.headers["transfer-encoding"], "chunked");
+});
+
+test("a request with no body is not given chunked framing, and a POST with none gets Content-Length: 0", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  for (const [method, headers] of [
+    ["GET", ""],
+    ["GET", "authorization: Bearer cog"],
+    ["HEAD", ""],
+    ["DELETE", "authorization: Bearer cog"],
+    ["POST", ""],
+    ["POST", "authorization: Bearer cog"],
+    ["PUT", "authorization: Bearer cog"],
+    ["PATCH", ""],
+  ] as const) {
+    const reply = await exchange(
+      socket,
+      claudeName,
+      rawRequest(method, "/v1/x", claudeName, headers),
+    );
+    assert.equal(statusOf(reply), 200, method);
+  }
+  const seen = stub.requests.map((entry) => ({
+    method: entry.method,
+    length: headerValues(entry.rawHeaders, "content-length"),
+    coding: headerValues(entry.rawHeaders, "transfer-encoding"),
+    body: entry.body.length,
+  }));
+  assert.deepEqual(seen, [
+    { method: "GET", length: [], coding: [], body: 0 },
+    { method: "GET", length: [], coding: [], body: 0 },
+    { method: "HEAD", length: [], coding: [], body: 0 },
+    { method: "DELETE", length: [], coding: [], body: 0 },
+    { method: "POST", length: ["0"], coding: [], body: 0 },
+    { method: "POST", length: ["0"], coding: [], body: 0 },
+    { method: "PUT", length: ["0"], coding: [], body: 0 },
+    { method: "PATCH", length: ["0"], coding: [], body: 0 },
+  ]);
+});
+
+test("a client's Content-Length: 0 is forwarded once, and a chunked body stays chunked upstream", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  await claude(socket, "POST", "/v1/x", { "content-length": "0" }, "");
+  assert.deepEqual(
+    headerValues(stub.requests[0]?.rawHeaders ?? [], "content-length"),
+    ["0"],
+  );
+  const reply = await exchange(
+    socket,
+    claudeName,
+    rawRequest(
+      "POST",
+      "/v1/x",
+      claudeName,
+      "transfer-encoding: chunked",
+      "5\r\nhello\r\n0\r\n\r\n",
+    ),
+  );
+  assert.equal(statusOf(reply), 200);
+  const seen = stub.requests[1];
+  assert.ok(seen);
+  assert.equal(seen.body.toString(), "hello");
+  assert.deepEqual(headerValues(seen.rawHeaders, "transfer-encoding"), [
+    "chunked",
+  ]);
+  assert.deepEqual(headerValues(seen.rawHeaders, "content-length"), []);
+});
+
+test("an error answer reaches the client untouched, headers and duplicate values kept", async () => {
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
+  const error = JSON.stringify({
+    type: "error",
+    error: { type: "rate_limit_error", message: "slow down" },
+  });
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(() => {
+      response
+        .writeHead(429, [
+          "content-type",
+          "application/json",
+          "Retry-After",
+          "10800",
+          "x-should-retry",
+          "false",
+          "anthropic-ratelimit-unified-status",
+          "rejected",
+          "anthropic-ratelimit-unified-reset",
+          reset,
+          "request-id",
+          "req_011",
+          "x-other-request-id",
+          "kept",
+          "X-Dup",
+          "a=1",
+          "x-dup",
+          "b=2",
+          "Connection",
+          "x-hop",
+          "x-hop",
+          "1",
+        ])
+        .end(error);
+    });
+  });
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const audit = recordFinishes(state);
+  const reply = await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal(reply.status, 429);
+  assert.equal(reply.body.toString(), error);
+  assert.deepEqual(
+    pairsOf(reply.rawHeaders).filter(
+      (line) =>
+        !/^(content-length|date|connection|keep-alive|transfer-encoding):/iu.test(
+          line,
+        ),
+    ),
+    [
+      "content-type: application/json",
+      "Retry-After: 10800",
+      "x-should-retry: false",
+      "anthropic-ratelimit-unified-status: rejected",
+      `anthropic-ratelimit-unified-reset: ${reset}`,
+      "request-id: req_011",
+      "x-other-request-id: kept",
+      "X-Dup: a=1",
+      "X-Dup: b=2",
+    ],
+  );
+  assert.equal(reply.headers["x-hop"], undefined);
+  await within("the audit row", audit.first);
+  assert.deepEqual(auditRows(state, instance), [
+    { outcome: "completed", upstreamStatus: 429 },
+  ]);
+});
+
+test("the provider's reason phrase reaches the client", async () => {
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(() => {
+      response.writeHead(529, "Overloaded", {
+        "content-type": "application/json",
+      });
+      response.end("{}");
+    });
+  });
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const reply = await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal(reply.status, 529);
+  assert.equal(reply.statusMessage, "Overloaded");
+});
+
+test("a reason phrase that cannot be relayed is dropped, and the client still gets the status and the body, from the provider and from GitHub", async () => {
+  const answer = (socket: Socket): void => {
+    socket.on("data", () => {
+      socket.write("HTTP/1.1 200 a\u{1}b\r\ncontent-length: 2\r\n\r\nok");
+    });
+  };
+  const provider = rawUpstream(answer);
+  defer(() => {
+    provider.closeAllConnections();
+    provider.close();
+  });
+  await new Promise<void>((resolve) => {
+    provider.listen(0, "127.0.0.1", resolve);
+  });
+  const address = provider.address();
+  assert.ok(address && typeof address !== "string");
+  const { socket } = await startGateway({
+    connection: answer,
+    models: { anthropic: `http://127.0.0.1:${String(address.port)}` },
+  });
+  for (const headers of [poolHeaders, {}]) {
+    const reply = await claude(socket, "POST", "/v1/messages", headers, "{}");
+    assert.equal(reply.status, 200);
+    assert.equal(reply.statusMessage, "OK");
+    assert.equal(reply.body.toString(), "ok");
+  }
+  const github = await send(socket, "GET", "/shields/dotfiles");
+  assert.equal(github.status, 200);
+  assert.equal(github.body, "ok");
+});
+
+test("an upstream that answers 101 Switching Protocols gets a 503 and a gateway-error row, on both routes", async () => {
+  const provider = rawUpstream((socket) => {
+    socket.once("data", () => {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n",
+      );
+    });
+  });
+  defer(() => {
+    provider.closeAllConnections();
+    provider.close();
+  });
+  await new Promise<void>((resolve) => {
+    provider.listen(0, "127.0.0.1", resolve);
+  });
+  const address = provider.address();
+  assert.ok(address && typeof address !== "string");
+  captureStderr();
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: `http://127.0.0.1:${String(address.port)}` },
+  });
+  for (const headers of [poolHeaders, {}]) {
+    const reply = await within(
+      "the answer",
+      claude(socket, "GET", "/v1/models", headers),
+    );
+    assert.equal(reply.status, 503);
+    assert.equal(reply.headers["x-should-retry"], undefined);
+  }
+  assert.deepEqual(
+    state.logs(instance.id).map(({ outcome }) => outcome),
+    ["gateway-error", "gateway-error"],
+  );
+});
+
+test("a client that pipelines body-less requests draws no EventEmitter warning from the relay", async () => {
+  const stub = await startModelStub();
+  const warnings: string[] = [];
+  const onWarning = (warning: Error): void => {
+    warnings.push(warning.message);
+  };
+  process.on("warning", onWarning);
+  defer(() => {
+    process.off("warning", onWarning);
+  });
+  captureStderr();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const request = (close: boolean): string =>
+    `GET /v1/models HTTP/1.1\r\nHost: api.anthropic.com\r\nAuthorization: Bearer cog\r\n${close ? "Connection: close\r\n" : ""}\r\n`;
+  const reply = await exchange(
+    socket,
+    "api.anthropic.com",
+    request(false).repeat(30) + request(true),
+  );
+  assert.equal(reply.match(/^HTTP\/1\.1 200/gm)?.length, 31);
+  assert.deepEqual(warnings, []);
+});
+
+test("a compressed answer reaches the client as the provider's bytes with its content-encoding, on both routes", async () => {
+  const plain = Buffer.from('{"hello":"world"}'.repeat(200));
+  const compressed = gzipSync(plain);
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(() => {
+      response
+        .writeHead(200, {
+          "content-type": "application/json",
+          "content-encoding": "gzip",
+          "content-length": String(compressed.length),
+        })
+        .end(compressed);
+    });
+  });
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  for (const headers of [poolHeaders, {}]) {
+    const reply = await claude(
+      socket,
+      "POST",
+      "/v1/messages",
+      { ...headers, "accept-encoding": "gzip" },
+      "{}",
+    );
+    assert.equal(reply.status, 200);
+    assert.equal(reply.headers["content-encoding"], "gzip");
+    assert.equal(reply.headers["content-length"], String(compressed.length));
+    assert.equal(digest(reply.body), digest(compressed));
+    assert.equal(digest(gunzipSync(reply.body)), digest(plain));
+  }
+  assert.equal(stub.requests[0]?.headers["accept-encoding"], "gzip");
+});
+
+test("a client that leaves mid-stream is audited as interrupted and the upstream connection is closed, not reused", async () => {
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(() => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write("event: ping\ndata: {}\n\n");
+    });
+  });
+  const { socket, instance, state, closed } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const audit = recordFinishes(state);
+  const { request, firstData } = modelClient(
+    socket,
+    "POST",
+    "/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  await within("the first event", firstData);
+  request.destroy();
+  await within("the audit row", audit.first);
+  const [connection] = stub.connections;
+  assert.ok(connection);
+  await within("the upstream connection to close", connection.closed);
+  await within("the gateway's response to close", closed());
+  assert.deepEqual(auditRows(state, instance), [
+    { outcome: "interrupted", upstreamStatus: 200 },
+  ]);
+});
+
+test("a client that leaves mid-upload closes the upstream connection, and the next request opens another", async () => {
+  const stub = await startModelStub();
+  const { socket, state } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const audit = recordFinishes(state);
+  const { request, response } = modelClient(
+    socket,
+    "POST",
+    "/v1/messages",
+    poolHeaders,
+    Buffer.alloc(1000, 0x61),
+    false,
+  );
+  await within("the first chunk at the provider", stub.firstChunk);
+  request.destroy();
+  await Promise.allSettled([response]);
+  await within("the audit row", audit.first);
+  const [connection] = stub.connections;
+  assert.ok(connection);
+  await within("the upstream connection to close", connection.closed);
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", {}, "{}")).status,
+    200,
+  );
+  assert.equal(stub.connections.length, 2);
+  assert.equal(stub.requests.at(-1)?.connection, 2);
+});
+
+test("a provider that fails mid-request is a 503 in the provider's error shape that the client may retry, and a gateway-error row, and nothing secret is reported", async () => {
+  const stub = await startModelStub((request, _response, entry) => {
+    void entry.ended.then(() => {
+      request.socket.destroy();
+    });
+  });
+  const stderr = captureStderr();
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  for (const headers of [poolHeaders, {}]) {
+    const reply = await claude(socket, "POST", "/v1/messages", headers, "{}");
+    assert.equal(reply.status, 503);
+    assert.equal(reply.headers["x-should-retry"], undefined);
+    assert.equal(reply.headers["content-type"], "application/json");
+    assert.deepEqual(claudeError(reply), {
+      type: "api_error",
+      message: "cog gateway: gateway request failed",
+    });
+    noSecrets(reply.body.toString());
+  }
+  assert.deepEqual(
+    state.logs(instance.id).map(({ outcome, operation }) => ({
+      outcome,
+      operation,
+    })),
+    [
+      { outcome: "gateway-error", operation: "model.claude" },
+      { outcome: "gateway-error", operation: "model.claude" },
+    ],
+  );
+  noSecrets(state.logs(instance.id), stderr);
+});
+
+test("refusals are 403s in the provider's error shape that tell the client not to retry, never 401, and carry the gateway's request id", async () => {
+  const stub = await startModelStub();
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const requests: [string, string, Record<string, string | string[]>][] = [
+    ["POST", "/v1/messages", { ...poolHeaders, "x-api-key": "guest-key" }],
+    ["POST", "/v1/messages", { "x-api-key": "guest-key" }],
+    ["POST", "/v1/messages", { "X-Api-Key": "" }],
+    ["POST", "/v1/messages", { authorization: "Bearer guest-token" }],
+    ["POST", "/v1/messages", { authorization: "bearer cog" }],
+    ["POST", "/v1/messages", { authorization: "Bearer  cog" }],
+    ["POST", "/v1/messages", { authorization: "cog" }],
+    ["POST", "/v1/messages", { authorization: "Basic Y29nOg==" }],
+    ["POST", "/v1/messages", { authorization: ["Bearer cog", "Bearer cog"] }],
+    [
+      "POST",
+      "/v1/messages",
+      { authorization: ["Bearer guest-token", "Bearer cog"] },
+    ],
+  ];
+  for (const [method, target, headers] of requests) {
+    const reply = await claude(socket, method, target, headers, "{}");
+    assert.equal(reply.status, 403, JSON.stringify(headers));
+    assert.equal(reply.headers["content-type"], "application/json");
+    assert.equal(reply.headers["x-should-retry"], "false");
+    assert.equal(claudeError(reply).type, "permission_error");
+    assert.match(claudeError(reply).message, /^cog gateway: ./);
+    assert.ok(!reply.body.toString().includes("guest-key"));
+    assert.ok(!reply.body.toString().includes("guest-token"));
+  }
+  const framing = [
+    "content-length: 2\r\ncontent-length: 2",
+    "content-length: 2\r\ntransfer-encoding: chunked",
+  ];
+  for (const extra of framing) {
+    const reply = await exchange(
+      socket,
+      claudeName,
+      rawRequest("POST", "/v1/messages", claudeName, extra, "{}"),
+    );
+    assert.ok([400, 403].includes(statusOf(reply)), extra);
+  }
+  const duplicated = await exchange(
+    socket,
+    claudeName,
+    rawRequest(
+      "POST",
+      "/v1/messages",
+      claudeName,
+      "host: api.anthropic.com\r\ncontent-length: 2",
+      "{}",
+    ),
+  );
+  assert.ok([400, 403].includes(statusOf(duplicated)));
+  assert.equal(stub.requests.length, 0);
+  const rows = state.logs(instance.id);
+  assert.ok(rows.length >= requests.length);
+  for (const row of rows) {
+    assert.equal(row.allowed, false);
+    assert.equal(row.operation, "model.claude");
+    assert.equal(row.repository, null);
+    assert.equal(row.outcome, "denied");
+  }
+  const reply = await claude(socket, "POST", "/v1/messages", {
+    "x-api-key": "k",
+  });
+  const [latest] = state.logs(instance.id);
+  assert.equal(
+    (JSON.parse(reply.body.toString()) as { request_id: string }).request_id,
+    latest?.id,
+  );
+});
+
+test("a GET or HEAD with a body is refused before anything is forwarded", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  for (const [method, headers] of [
+    ["GET", "content-length: 5"],
+    ["GET", "authorization: Bearer cog\r\ncontent-length: 5"],
+    ["HEAD", "content-length: 5"],
+    ["GET", "transfer-encoding: chunked"],
+  ] as const) {
+    const reply = await exchange(
+      socket,
+      claudeName,
+      rawRequest(method, "/v1/models", claudeName, headers, "abcde"),
+    );
+    assert.equal(statusOf(reply), 403, `${method} ${headers}`);
+  }
+  assert.equal(stub.requests.length, 0);
+});
+
+test("a chunked body on a method that the client sends unframed is refused, and the same body with a Content-Length arrives as one request", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const hidden =
+    "GET /v1/models HTTP/1.1\r\nHost: api.anthropic.com\r\nx-api-key: k\r\n\r\n";
+  const chunked = `${hidden.length.toString(16)}\r\n${hidden}\r\n0\r\n\r\n`;
+  for (const method of ["DELETE", "OPTIONS", "TRACE"]) {
+    for (const credential of ["", "authorization: Bearer cog"]) {
+      const reply = await exchange(
+        socket,
+        claudeName,
+        rawRequest(
+          method,
+          "/v1/x",
+          claudeName,
+          ["transfer-encoding: chunked", credential]
+            .filter(Boolean)
+            .join("\r\n"),
+          chunked,
+        ),
+      );
+      assert.equal(statusOf(reply), 403, `${method} ${credential}`);
+    }
+  }
+  assert.equal(stub.requests.length, 0);
+  for (const method of ["DELETE", "OPTIONS"]) {
+    const reply = await exchange(
+      socket,
+      claudeName,
+      rawRequest(
+        method,
+        "/v1/x",
+        claudeName,
+        `content-length: ${String(hidden.length)}`,
+        hidden,
+      ),
+    );
+    assert.equal(statusOf(reply), 200, method);
+  }
+  assert.deepEqual(
+    stub.requests.map(({ method, url, body }) => [
+      method,
+      url,
+      body.toString(),
+    ]),
+    [
+      ["DELETE", "/v1/x", hidden],
+      ["OPTIONS", "/v1/x", hidden],
+    ],
+  );
+});
+
+test("the health path is answered locally, with no credential, whatever the pool's state, and audited like the GitHub one", async () => {
+  captureStderr();
+  for (const pool of [undefined, "missing", "unset", {}] as const) {
+    const stub = await startModelStub();
+    const { socket, instance, state } = await startGateway({
+      models: { anthropic: stub.origin, ...(pool ? { pool } : {}) },
+    });
+    const audit = recordFinishes(state);
+    const reply = await claude(socket, "GET", "/__cog__/health");
+    assert.equal(reply.status, 200, JSON.stringify(pool));
+    assert.equal(reply.body.toString(), "cog ready\n");
+    assert.equal(reply.headers["content-type"], "text/plain");
+    await within("the audit row", audit.first);
+    assert.equal(stub.requests.length, 0);
+    const [row, ...others] = state.logs(instance.id);
+    assert.deepEqual(others, []);
+    assert.equal(row?.operation, "public.read");
+    assert.equal(row.repository, null);
+    assert.equal(row.allowed, true);
+    assert.equal(row.reason, "anonymous read");
+    assert.equal(row.outcome, "completed");
+    assert.equal(row.upstreamStatus, 200);
+  }
+});
+
+test("only the exact health target is answered locally", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  assert.equal(
+    (await claude(socket, "GET", "/__cog__/health?x=1")).status,
+    200,
+  );
+  assert.equal(stub.requests[0]?.url, "/__cog__/health?x=1");
+  assert.equal((await claude(socket, "POST", "/__cog__/health")).status, 200);
+  assert.equal(stub.requests[1]?.method, "POST");
+  assert.equal(stub.requests.length, 2);
+});
+
+const unusablePools: [string, PoolSpec | "empty" | "invalid", string | null][] =
+  [
+    ["no pool setting", "unset", null],
+    ["a pool directory that does not exist", "missing", null],
+    ["a pool directory with no account", "empty", null],
+    [
+      "an account file that is not a token",
+      "invalid",
+      "account alpha must hold a token that starts with sk-ant-oat",
+    ],
+  ];
+
+for (const [name, mode, reason] of unusablePools) {
+  test(`with ${name} the pool route answers 503, while direct requests, health and GitHub are unaffected`, async () => {
+    const stub = await startModelStub();
+    const stderr = captureStderr();
+    const pool: PoolSpec =
+      mode === "empty"
+        ? {}
+        : mode === "invalid"
+          ? { alpha: "sk-wrong-made-up-alpha-token" }
+          : mode;
+    const { socket, instance, state, incoming } = await startGateway({
+      models: { anthropic: stub.origin, pool },
+    });
+    const refused = await claude(
+      socket,
+      "POST",
+      "/v1/messages",
+      poolHeaders,
+      "{}",
+    );
+    assert.equal(refused.status, 503);
+    assert.equal(refused.headers["content-type"], "application/json");
+    assert.equal(refused.headers["x-should-retry"], "false");
+    assert.deepEqual(claudeError(refused), {
+      type: "api_error",
+      message:
+        mode === "unset" || mode === "missing" || mode === "empty"
+          ? "cog gateway: the Claude pool is not configured"
+          : "cog gateway: the Claude pool is not usable",
+    });
+    const [row, ...others] = state.logs(instance.id);
+    assert.deepEqual(others, []);
+    assert.equal(row?.operation, "model.claude");
+    assert.equal(row.allowed, false);
+    assert.equal(row.outcome, "denied");
+    assert.equal(stub.requests.length, 0);
+    assert.equal(
+      (await claude(socket, "POST", "/v1/messages", {}, "{}")).status,
+      200,
+    );
+    assert.equal(stub.requests.length, 1);
+    assert.equal((await claude(socket, "GET", "/__cog__/health")).status, 200);
+    assert.equal((await send(socket, "GET", "/shields/dotfiles")).status, 200);
+    assert.equal(incoming.length, 1);
+    assert.deepEqual(
+      stderr,
+      reason === null ? [] : [`cog: Claude pool unavailable: ${reason}\n`],
+    );
+    noSecrets(state.logs(instance.id), stderr, refused.body.toString());
+  });
+}
+
+test("the pool directory is read again when /sync is requested and not for each request, an account added or removed is seen, and the stderr line is written once per changed reason", async () => {
+  const stub = await startModelStub();
+  const stderr = captureStderr();
+  const { root, poolDirectory, socket, state, instance } = await startGateway({
+    models: { anthropic: stub.origin, pool: { alpha: tokens.alpha } },
+  });
+  const adminSocket = path.join(root, "admin.sock");
+  const post = async (): Promise<ModelReply> =>
+    claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal((await post()).status, 200);
+  assert.equal(tokenSeen(lastRequest(stub)), "alpha");
+  const rank = (name: string): string =>
+    createHash("sha256").update(`${instance.id}\0${name}`).digest("hex");
+  let ahead = "ahead";
+  for (let n = 0; compareCodeUnits(rank(ahead), rank("alpha")) > 0; n += 1) {
+    ahead = `ahead-${String(n)}`;
+  }
+  writeFileSync(path.join(poolDirectory, ahead), tokens.bravo, { mode: 0o600 });
+  assert.equal((await post()).status, 200);
+  assert.equal(tokenSeen(lastRequest(stub)), "alpha");
+  rmSync(path.join(poolDirectory, ahead));
+  writeFileSync(path.join(poolDirectory, "bravo"), tokens.bravo, {
+    mode: 0o600,
+  });
+  assert.equal((await post()).status, 200);
+  assert.equal(tokenSeen(lastRequest(stub)), "alpha");
+  rmSync(path.join(poolDirectory, "alpha"));
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 200);
+  assert.equal(tokenSeen(lastRequest(stub)), "bravo");
+  assert.deepEqual(stderr, []);
+  chmodSync(path.join(poolDirectory, "bravo"), 0o640);
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 503);
+  assert.equal(await requestSync(adminSocket), 200);
+  const open =
+    "cog: Claude pool unavailable: account bravo is accessible to group or other\n";
+  assert.deepEqual(stderr, [open]);
+  chmodSync(path.join(poolDirectory, "bravo"), 0o600);
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 200);
+  assert.deepEqual(stderr, [open]);
+  rmSync(path.join(poolDirectory, "bravo"));
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 503);
+  rmSync(poolDirectory, { recursive: true });
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.deepEqual(stderr, [open]);
+  writePool(poolDirectory, { bravo: tokens.bravo });
+  chmodSync(path.join(poolDirectory, "bravo"), 0o640);
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.deepEqual(stderr, [open, open]);
+  noSecrets(stderr, state.logs(instance.id));
+});
+
+test("one bad entry disables the whole pool, and nothing of the file reaches stderr, the audit or the client", async () => {
+  const stub = await startModelStub();
+  const stderr = captureStderr();
+  const { socket, instance, state } = await startGateway({
+    models: {
+      anthropic: stub.origin,
+      pool: {
+        alpha: tokens.alpha,
+        bravo: `${tokens.bravo}\nsecond-made-up-line`,
+      },
+    },
+  });
+  const reply = await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal(reply.status, 503);
+  assert.equal(stub.requests.length, 0);
+  assert.deepEqual(stderr, [
+    "cog: Claude pool unavailable: account bravo must hold one token of visible ASCII characters\n",
+  ]);
+  noSecrets(state.logs(instance.id), stderr, reply.body.toString());
+});
+
+test("the account a VM uses changes after a response that reports utilization of 0.95, and after a rejected 429", async () => {
+  for (const kind of ["utilization", "rejected"] as const) {
+    const stub = await startModelStub((_request, response, entry) => {
+      void entry.ended.then(() => {
+        const first = stub.requests.length === 1;
+        const reset = String(Math.floor(Date.now() / 1000) + 3600);
+        if (first && kind === "utilization") {
+          response
+            .writeHead(200, {
+              "anthropic-ratelimit-unified-5h-utilization": "0.95",
+              "anthropic-ratelimit-unified-5h-reset": reset,
+            })
+            .end("{}");
+        } else if (first) {
+          response
+            .writeHead(429, {
+              "anthropic-ratelimit-unified-status": "rejected",
+              "anthropic-ratelimit-unified-reset": reset,
+            })
+            .end("{}");
+        } else {
+          response.writeHead(200).end("{}");
+        }
+      });
+    });
+    const { socket } = await startGateway({
+      models: { anthropic: stub.origin, pool: bothAccounts },
+    });
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      statuses.push(
+        (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}"))
+          .status,
+      );
+    }
+    assert.deepEqual(statuses, [
+      kind === "utilization" ? 200 : 429,
+      200,
+      200,
+      200,
+    ]);
+    const used = stub.requests.map(tokenSeen);
+    assert.notEqual(used[0], undefined);
+    assert.notEqual(used[1], used[0], kind);
+    assert.deepEqual(used.slice(1), [used[1], used[1], used[1]], kind);
+  }
+});
+
+test("a response to a request sent before an account was held does not release the hold", async () => {
+  const release = signal();
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
+  const stub = await startModelStub((request, response, entry) => {
+    if (entry.url === "/slow") {
+      void release.promise.then(() => {
+        response.writeHead(200).end("{}");
+      });
+    } else if (entry.url === "/limit") {
+      void entry.ended.then(() => {
+        response
+          .writeHead(429, {
+            "anthropic-ratelimit-unified-status": "rejected",
+            "anthropic-ratelimit-unified-reset": reset,
+          })
+          .end("{}");
+      });
+    } else {
+      replyOk(request, response, entry);
+    }
+  });
+  const { socket } = await startGateway({
+    models: { anthropic: stub.origin, pool: bothAccounts },
+  });
+  const slow = claude(socket, "POST", "/slow", poolHeaders, "{}");
+  await within("the first request at the provider", stub.firstChunk);
+  await delay(20);
+  assert.equal(
+    (await claude(socket, "POST", "/limit", poolHeaders, "{}")).status,
+    429,
+  );
+  release.resolve();
+  assert.equal((await slow).status, 200);
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  const used = stub.requests.map(tokenSeen);
+  assert.equal(used[1], used[0]);
+  assert.notEqual(used[2], used[0]);
+});
+
+function firstAccount(instanceId: string): string | undefined {
+  const rank = (name: string): string =>
+    createHash("sha256").update(`${instanceId}\0${name}`).digest("hex");
+  return Object.keys(bothAccounts).toSorted((a, b) =>
+    compareCodeUnits(rank(a), rank(b)),
+  )[0];
+}
+
+test("a VM stays on its account while the account has quota, and each VM keeps its own order", async () => {
+  const stub = await startModelStub();
+  const { socket, instance, state, gateway } = await startGateway({
+    models: { anthropic: stub.origin, pool: bothAccounts },
+  });
+  const others = Array.from({ length: 8 }, (_unused, index) =>
+    state.register(
+      `lima:vm${String(index)}`,
+      path.join(path.dirname(socket), `vm${String(index)}.sock`),
+      "tester",
+    ),
+  );
+  await gateway.refresh();
+  for (const vm of [instance, ...others]) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await claude(vm.socket, "POST", "/v1/messages", poolHeaders, "{}");
+    }
+    const first = firstAccount(vm.id);
+    assert.deepEqual(stub.requests.slice(-3).map(tokenSeen), [
+      first,
+      first,
+      first,
+    ]);
+  }
+});
+
+test("a stale kept-alive connection is retried once on a fresh one for a request with no body, and a request with a body is not replayed", async () => {
+  let reused = 0;
+  const stub = await startModelStub((request, response, entry) => {
+    if (
+      entry.connection === 1 &&
+      stub.requests.filter((other) => other.connection === 1).length > 1
+    ) {
+      reused += 1;
+      request.socket.destroy();
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  const { socket } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  const retried = await claude(socket, "GET", "/v1/models", poolHeaders);
+  assert.equal(retried.status, 200);
+  assert.equal(reused, 1);
+  assert.deepEqual(
+    stub.requests.map(({ method, connection }) => [method, connection]),
+    [
+      ["POST", 1],
+      ["GET", 1],
+      ["GET", 2],
+    ],
+  );
+  const seen = stub.requests[2];
+  assert.ok(seen);
+  assert.deepEqual(headerValues(seen.rawHeaders, "authorization"), [
+    `Bearer ${accountToken}`,
+  ]);
+  const second = await claude(
+    socket,
+    "POST",
+    "/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(second.status, 200);
+  assert.equal(stub.requests.at(-1)?.connection, 2);
+  const third = await startModelStub((request, response, entry) => {
+    if (
+      third.requests.filter((other) => other.connection === 1).length > 1 &&
+      entry.connection === 1
+    ) {
+      request.socket.destroy();
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  captureStderr();
+  const other = await startGateway({ models: { anthropic: third.origin } });
+  assert.equal(
+    (await claude(other.socket, "POST", "/v1/messages", poolHeaders, "{}"))
+      .status,
+    200,
+  );
+  const failed = await claude(
+    other.socket,
+    "POST",
+    "/v1/messages",
+    poolHeaders,
+    '{"a":1}',
+  );
+  assert.equal(failed.status, 503);
+  assert.equal(third.requests.length, 2);
+  assert.equal(claudeError(failed).type, "api_error");
+});
+
+test("a body-less request that is not safe is not sent again after a reset on a reused connection", async () => {
+  const stub = await startModelStub((request, response, entry) => {
+    if (entry.url === "/reset") {
+      request.socket.destroy();
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  captureStderr();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  for (const method of ["POST", "PATCH", "DELETE", "PUT"]) {
+    assert.equal(
+      (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+      200,
+    );
+    const before = stub.requests.length;
+    const reply = await claude(socket, method, "/reset", poolHeaders);
+    assert.equal(reply.status, 503, method);
+    assert.equal(stub.requests.length, before + 1, method);
+  }
+});
+
+test("a request whose guest left is not sent again after the reset that its own abort causes on a reused connection", async () => {
+  const slowArrived = signal();
+  const stub = await startModelStub((request, response, entry) => {
+    if (entry.url === "/slow") {
+      slowArrived.resolve();
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  captureStderr();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  const { request, response } = modelClient(
+    socket,
+    "GET",
+    "/slow",
+    poolHeaders,
+  );
+  const answered = (async (): Promise<void> => {
+    try {
+      await response;
+    } catch {
+      return;
+    }
+  })();
+  await within("the slow request at the provider", slowArrived.promise);
+  request.destroy();
+  await within("the client's request to end", answered);
+  await delay(500);
+  assert.equal(stub.requests.filter(({ url }) => url === "/slow").length, 1);
+});
+
+test("a request with no body is sent again once after a reset on a reused connection, and not after a reset on the fresh one", async () => {
+  const stub = await startModelStub((request, response, entry) => {
+    if (stub.requests.length === 1) {
+      replyOk(request, response, entry);
+      return;
+    }
+    request.socket.destroy();
+  });
+  captureStderr();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  assert.equal(
+    (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+    200,
+  );
+  assert.equal(
+    (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+    503,
+  );
+  assert.equal(stub.requests.length, 3);
+});
+
+test("a request with no body is sent again after the provider reset an idle connection whose reset the gateway has not yet read", async () => {
+  const peers: Socket[] = [];
+  const stub = await startModelStub((request, response, entry) => {
+    peers.push(request.socket);
+    replyOk(request, response, entry);
+  });
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  // The reset must be in the kernel, and unread by the event loop, when the
+  // agent picks the idle connection, so it is sent from inside request().
+  const forward = http.request;
+  const requested = spyOn(http, "request").mockImplementation(((
+    ...args: Parameters<typeof http.request>
+  ) => {
+    requested.mockImplementation(forward);
+    for (const peer of peers) {
+      peer.resetAndDestroy();
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    return forward(...args);
+  }) as typeof http.request);
+  assert.equal(
+    (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+    200,
+  );
+  assert.equal(requested.mock.calls.length, 2);
+  assert.deepEqual(
+    stub.requests.map(({ method, connection }) => [method, connection]),
+    [
+      ["POST", 1],
+      ["GET", 2],
+    ],
+  );
+});
+
+test("a request with no body is sent again until a fresh connection carries it when every idle connection has gone stale", async () => {
+  const waiting: (() => void)[] = [];
+  let stale = false;
+  const stub = await startModelStub((request, response, entry) => {
+    if (stale && entry.connection <= 2) {
+      request.socket.destroy();
+      return;
+    }
+    if (!stale) {
+      waiting.push(() => {
+        replyOk(request, response, entry);
+      });
+      if (waiting.length === 2) {
+        for (const release of waiting) {
+          release();
+        }
+      }
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const warm = await Promise.all([
+    claude(socket, "GET", "/v1/models", poolHeaders),
+    claude(socket, "GET", "/v1/models", poolHeaders),
+  ]);
+  assert.deepEqual(
+    warm.map(({ status }) => status),
+    [200, 200],
+  );
+  assert.equal(stub.connections.length, 2);
+  stale = true;
+  assert.equal(
+    (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+    200,
+  );
+  assert.deepEqual(
+    stub.requests
+      .slice(2)
+      .map(({ connection }) => connection)
+      .toSorted((a, b) => a - b),
+    [1, 2, 3],
+  );
+});
+
+test("a GitHub request with a body is not sent again after a reset on a reused connection", async () => {
+  const connections: (number | undefined)[] = [];
+  const { socket } = await startGateway({
+    handler: (request, response) => {
+      connections.push(request.socket.remotePort);
+      const first = connections.length === 1;
+      request.resume();
+      request.once("end", () => {
+        if (first) {
+          response.writeHead(200).end("ok");
+        } else {
+          request.socket.destroy();
+        }
+      });
+    },
+  });
+  captureStderr();
+  const negotiation = Buffer.concat([
+    packet(`want ${"1".repeat(40)}\n`),
+    Buffer.from("0000"),
+  ]);
+  const target = "/shields/dotfiles.git/git-upload-pack";
+  assert.equal((await send(socket, "POST", target, negotiation)).status, 200);
+  const failed = await within(
+    "the answer to the second request",
+    send(socket, "POST", target, negotiation),
+  );
+  assert.equal(failed.status, 503);
+  assert.equal(connections.length, 2);
+  assert.equal(connections[1], connections[0]);
+});
+
+test("a response that has begun is not sent again when the provider resets the reused connection in its body", async () => {
+  let requests = 0;
+  const failures: Error[] = [];
+  const provider = rawUpstream((socket) => {
+    socket.on("error", (error) => {
+      failures.push(error);
+    });
+    socket.on("data", () => {
+      requests += 1;
+      if (requests === 1) {
+        socket.write("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}");
+        return;
+      }
+      socket.write("HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\npartial-");
+      setTimeout(() => {
+        socket.resetAndDestroy();
+      }, 50);
+    });
+  });
+  defer(() => {
+    provider.closeAllConnections();
+    provider.close();
+  });
+  await new Promise<void>((resolve) => {
+    provider.listen(0, "127.0.0.1", resolve);
+  });
+  const address = provider.address();
+  assert.ok(address && typeof address !== "string");
+  captureStderr();
+  const { socket } = await startGateway({
+    models: { anthropic: `http://127.0.0.1:${String(address.port)}` },
+  });
+  assert.equal(
+    (await claude(socket, "GET", "/v1/models", poolHeaders)).status,
+    200,
+  );
+  const cut = await within(
+    "the cut response",
+    claude(socket, "GET", "/v1/models", poolHeaders),
+  );
+  assert.equal(cut.status, 200);
+  assert.equal(cut.complete, false);
+  assert.equal(cut.body.toString(), "partial-");
+  await new Promise((resolve) => {
+    setTimeout(resolve, 200);
+  });
+  assert.equal(requests, 2);
+});
+
+test("a disabled VM is refused on both routes and on health, and its socket no longer answers", async () => {
+  const stub = await startModelStub();
+  const { socket, instance, state, gateway } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  const byId = state.byId.bind(state);
+  const refusal = spyOn(state, "byId").mockImplementation((id: string) => {
+    const found = byId(id);
+    return found && { ...found, disabled: true };
+  });
+  const refused = [
+    await claude(socket, "POST", "/v1/messages", poolHeaders, "{}"),
+    await claude(socket, "POST", "/v1/messages", {}, "{}"),
+    await claude(socket, "GET", "/__cog__/health"),
+  ];
+  refusal.mockRestore();
+  for (const reply of refused) {
+    assert.equal(reply.status, 403);
+    assert.equal(reply.headers["x-should-retry"], "false");
+    assert.match(reply.body.toString(), /VM access has been revoked/);
+  }
+  assert.equal(stub.requests.length, 1);
+  assert.deepEqual(
+    state
+      .logs(instance.id)
+      .filter(({ allowed }) => !allowed)
+      .map(({ operation }) => operation),
+    ["model.claude", "model.claude", "model.claude"],
+  );
+  state.disable("lima:work", "tester");
+  await gateway.refresh();
+  assert.equal(await accepting(socket), false);
+});
+
+test("model requests use a 600 s upstream idle timeout on both routes, and GitHub requests keep 60 s", async () => {
+  const stub = await startModelStub();
+  const { socket, origin } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const requested = spyOn(http, "request");
+  assert.equal((await send(socket, "GET", "/shields/dotfiles")).status, 200);
+  await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  await claude(socket, "POST", "/v1/messages", {}, "{}");
+  const timeouts = requested.mock.calls.map(([target, options]) => [
+    String(target instanceof URL ? target.origin : target),
+    (options as http.RequestOptions | undefined)?.timeout,
+  ]);
+  assert.deepEqual(timeouts, [
+    [origin, 60_000],
+    [stub.origin, 600_000],
+    [stub.origin, 600_000],
+  ]);
+});
+
+test("an upstream setting with a path, credentials, a query or a fragment is refused, and the request fails closed", async () => {
+  const stub = await startModelStub();
+  for (const bad of [
+    `${stub.origin}/v1`,
+    `${stub.origin}?x=1`,
+    `${stub.origin}#x`,
+    `http://user:pass@${new URL(stub.origin).host}`,
+    "ftp://127.0.0.1:1",
+  ]) {
+    captureStderr();
+    const { socket, state, instance } = await startGateway({
+      models: { anthropic: bad },
+    });
+    assert.equal(
+      (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+      503,
+      bad,
+    );
+    assert.equal(
+      (await claude(socket, "POST", "/v1/messages", {}, "{}")).status,
+      503,
+      bad,
+    );
+    assert.equal(
+      state.logs(instance.id).every((row) => row.outcome === "gateway-error"),
+      true,
+    );
+  }
+  assert.equal(stub.requests.length, 0);
+});
+
+test("a TLS upstream is reached with its own keep-alive agent per VM", async () => {
+  const seen: { socket: number; host: string | undefined }[] = [];
+  const sockets = new Map<unknown, number>();
+  const upstream = https.createServer(
+    { cert: readFileSync(certificate), key: readFileSync(key) },
+    (request, response) => {
+      if (!sockets.has(request.socket)) {
+        sockets.set(request.socket, sockets.size + 1);
+      }
+      seen.push({
+        socket: sockets.get(request.socket) ?? 0,
+        host: request.headers.host,
+      });
+      request.resume();
+      response.writeHead(200, { "content-length": "2" }).end("ok");
+    },
+  );
+  await new Promise<void>((resolve) => {
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  defer(async () => {
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      upstream.close(() => {
+        resolve();
+      });
+    });
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+  const NativeAgent = https.Agent;
+  const mutable = https as { Agent: unknown };
+  mutable.Agent = class extends NativeAgent {
+    constructor(options?: https.AgentOptions) {
+      super({
+        ...options,
+        ca: readFileSync(certificate),
+        checkServerIdentity: () => {
+          return;
+        },
+      });
+    }
+  };
+  defer(() => {
+    mutable.Agent = NativeAgent;
+  });
+  const { socket, state, gateway } = await startGateway({
+    models: { anthropic: `https://127.0.0.1:${String(address.port)}` },
+  });
+  const other = state.register(
+    "lima:other",
+    path.join(path.dirname(socket), "other.sock"),
+    "tester",
+  );
+  await gateway.refresh();
+  for (const vm of [socket, other.socket, socket, other.socket]) {
+    assert.equal(
+      (await claude(vm, "POST", "/v1/messages", poolHeaders, "{}")).status,
+      200,
+    );
+  }
+  assert.deepEqual(
+    seen.map((entry) => entry.socket),
+    [1, 2, 1, 2],
+  );
+  assert.equal(seen[0]?.host, claudeName);
+});
+
+test("a hold survives a reload that finds the pool unusable in between", async () => {
+  let rejectNext = true;
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
+  const stub = await startModelStub((request, response, entry) => {
+    if (rejectNext) {
+      rejectNext = false;
+      void entry.ended.then(() => {
+        response
+          .writeHead(429, [
+            "content-type",
+            "application/json",
+            "anthropic-ratelimit-unified-status",
+            "rejected",
+            "anthropic-ratelimit-unified-reset",
+            reset,
+          ])
+          .end("{}");
+      });
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  captureStderr();
+  const { root, poolDirectory, socket } = await startGateway({
+    models: {
+      anthropic: stub.origin,
+      pool: { alpha: tokens.alpha, bravo: tokens.bravo },
+    },
+  });
+  const adminSocket = path.join(root, "admin.sock");
+  const post = async (): Promise<ModelReply> =>
+    claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal((await post()).status, 429);
+  const first = tokenSeen(lastRequest(stub));
+  assert.equal((await post()).status, 200);
+  const second = tokenSeen(lastRequest(stub));
+  assert.notEqual(second, first);
+  chmodSync(path.join(poolDirectory, "alpha"), 0o644);
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 503);
+  chmodSync(path.join(poolDirectory, "alpha"), 0o600);
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 200);
+  assert.equal(tokenSeen(lastRequest(stub)), second);
+});
+
+test("a hold is forgotten once every account is removed, with the tokens it belonged to", async () => {
+  let rejectNext = true;
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
+  const stub = await startModelStub((request, response, entry) => {
+    if (rejectNext) {
+      rejectNext = false;
+      void entry.ended.then(() => {
+        response
+          .writeHead(429, [
+            "content-type",
+            "application/json",
+            "anthropic-ratelimit-unified-status",
+            "rejected",
+            "anthropic-ratelimit-unified-reset",
+            reset,
+          ])
+          .end("{}");
+      });
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  captureStderr();
+  const pool = { alpha: tokens.alpha, bravo: tokens.bravo };
+  const { root, poolDirectory, socket } = await startGateway({
+    models: { anthropic: stub.origin, pool },
+  });
+  const adminSocket = path.join(root, "admin.sock");
+  const post = async (): Promise<ModelReply> =>
+    claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal((await post()).status, 429);
+  const first = tokenSeen(lastRequest(stub));
+  assert.equal((await post()).status, 200);
+  assert.notEqual(tokenSeen(lastRequest(stub)), first);
+  rmSync(path.join(poolDirectory, "alpha"));
+  rmSync(path.join(poolDirectory, "bravo"));
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 503);
+  writePool(poolDirectory, pool);
+  assert.equal(await requestSync(adminSocket), 200);
+  assert.equal((await post()).status, 200);
+  assert.equal(tokenSeen(lastRequest(stub)), first);
+});
+
+test("response headers reach the client before the first body byte", async () => {
+  const release = signal();
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(async () => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.flushHeaders();
+      await release.promise;
+      response.end("data: 1\n\n");
+    });
+  });
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const client = modelClient(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  const head = Promise.withResolvers<number>();
+  client.request.once("response", (incoming) => {
+    head.resolve(incoming.statusCode ?? 0);
+  });
+  assert.equal(await within("the response head", head.promise), 200);
+  release.resolve();
+  assert.equal((await client.response).body.toString(), "data: 1\n\n");
+});
+
+test("a reset on a fresh connection is not retried", async () => {
+  const stub = await startModelStub((request) => {
+    request.socket.destroy();
+  });
+  captureStderr();
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const reply = await claude(socket, "GET", "/v1/models", poolHeaders);
+  assert.equal(reply.status, 503);
+  assert.equal(stub.requests.length, 1);
+});
+
+test("an upstream request that times out is destroyed and the client gets 503", async () => {
+  const stub = await startModelStub(() => {
+    return;
+  });
+  captureStderr();
+  const requested = spyOn(http, "request");
+  const { socket } = await startGateway({ models: { anthropic: stub.origin } });
+  const pending = claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  await within("the upstream request", stub.firstChunk);
+  const upstream = requested.mock.results.at(-1)?.value as http.ClientRequest;
+  upstream.emit("timeout");
+  assert.equal((await within("the answer", pending)).status, 503);
+  assert.equal(upstream.destroyed, true);
+});
+
+test("a VM disabled while a request with no body is in flight does not have it sent again", async () => {
+  const slowArrived = signal();
+  const stub = await startModelStub((request, response, entry) => {
+    if (entry.url === "/slow") {
+      slowArrived.resolve();
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  captureStderr();
+  const { socket, state, gateway } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  const pending = (async (): Promise<void> => {
+    try {
+      await claude(socket, "GET", "/slow", poolHeaders);
+    } catch {
+      return;
+    }
+  })();
+  await within("the slow request at the provider", slowArrived.promise);
+  state.disable("lima:work", "tester");
+  await gateway.refresh();
+  await within("the answer", pending);
+  assert.equal(stub.requests.length, 2);
+  assert.equal(stub.connections.length, 1);
+});
+
+test("an upstream connection that has been idle for longer than the idle timeout is closed, and the next request opens another", async () => {
+  const stub = await startModelStub();
+  const { socket } = await startGateway({
+    models: { anthropic: stub.origin, upstreamIdleTimeout: 100 },
+  });
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  const [first] = stub.connections;
+  assert.ok(first);
+  await within("the idle upstream connection to close", first.closed);
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  assert.deepEqual(
+    stub.requests.map(({ connection }) => connection),
+    [1, 2],
+  );
+});
+
+test("the idle timeout does not cut a response that pauses for longer than it", async () => {
+  const stub = await startModelStub((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write("ab");
+    setTimeout(() => {
+      response.end("cd");
+    }, 400);
+  });
+  const { socket } = await startGateway({
+    models: { anthropic: stub.origin, upstreamIdleTimeout: 100 },
+  });
+  const reply = await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal(reply.status, 200);
+  assert.equal(reply.body.toString(), "abcd");
+});
+
+test("a model request that is dispatched once stop() has begun is served with Connection: close", async () => {
+  const stub = await startModelStub();
+  const { socket, gateway, listener } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const held = holdRequests(listener);
+  const agent = new https.Agent({ keepAlive: true });
+  defer(() => {
+    agent.destroy();
+  });
+  const answered = send(
+    socket,
+    "POST",
+    "/v1/messages",
+    Buffer.from("{}"),
+    claudeName,
+    poolHeaders,
+    agent,
+  );
+  await within("the request to be parsed", held.parsed);
+  const stopping = gateway.stop();
+  held.deliver();
+  const response = await within("the response", answered);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.connection, "close");
+  assert.equal(stub.requests.length, 1);
+  await within("stop()", stopping);
+});
+
+test("uploads whose upstream request cannot be created each close their connection and leave no listeners behind on its socket", async () => {
+  const stub = await startModelStub();
+  const { socket, listener } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  captureStderr();
+  spyOn(http, "request").mockImplementation(() => {
+    throw new Error("the upstream request cannot be created");
+  });
+  const watched = watchCloseListeners(listener);
+  const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+  defer(() => {
+    agent.destroy();
+  });
+  for (let round = 0; round < 8; round += 1) {
+    const request = https.request({
+      socketPath: socket,
+      servername: claudeName,
+      rejectUnauthorized: false,
+      agent,
+      method: "POST",
+      path: "/v1/messages",
+      headers: { host: claudeName, ...poolHeaders },
+    });
+    const failed = signal();
+    const answered = new Promise<number>((resolve, reject) => {
+      request.once("error", reject);
+      request.once("response", (incoming) => {
+        failed.resolve();
+        incoming.resume();
+        incoming.once("end", () => {
+          resolve(incoming.statusCode ?? 0);
+        });
+      });
+    });
+    request.write("{");
+    await within("the gateway to answer the failed upload", failed.promise);
+    request.end("}");
+    assert.equal(await within("the response to end", answered), 503);
+  }
+  assert.equal(stub.requests.length, 0);
+  assert.equal(watched.connections.size, 8);
+  assert.deepEqual(watched.finished, watched.counts);
+});
+
+interface PoolAnswer {
+  status: number;
+  type: string | undefined;
+  text: string;
+  json: {
+    state: string;
+    reason: string | null;
+    accounts: {
+      name: string;
+      held: boolean;
+      heldUntil: number | null;
+      buckets: { bucket: string; utilization: number; expires: number }[];
+    }[];
+  };
+}
+
+function requestPool(adminSocket: string, method = "GET"): Promise<PoolAnswer> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      { socketPath: adminSocket, path: "/pool", method, agent: false },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.once("end", () => {
+          const text = Buffer.concat(chunks).toString();
+          resolve({
+            status: response.statusCode ?? 0,
+            type: response.headers["content-type"],
+            text,
+            json: (text === "" ? null : JSON.parse(text)) as PoolAnswer["json"],
+          });
+        });
+      },
+    );
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+const poolStates: [string, PoolSpec, string, string | null][] = [
+  ["unset", "unset", "unconfigured", null],
+  ["missing", "missing", "unconfigured", null],
+  [
+    "invalid",
+    { alpha: "sk-wrong-made-up-alpha-token" },
+    "unusable",
+    "account alpha must hold a token that starts with sk-ant-oat",
+  ],
+  ["empty", {}, "unconfigured", null],
+  ["valid", bothAccounts, "usable", null],
+];
+
+for (const [name, pool, state, reason] of poolStates) {
+  test(`GET /pool answers ${state} with ${name} accounts, and no token`, async () => {
+    const stub = await startModelStub();
+    captureStderr();
+    const { root } = await startGateway({
+      models: { anthropic: stub.origin, pool },
+    });
+    const answer = await requestPool(path.join(root, "admin.sock"));
+    assert.equal(answer.status, 200);
+    assert.equal(answer.type, "application/json");
+    assert.equal(answer.json.state, state);
+    assert.equal(answer.json.reason, reason);
+    assert.deepEqual(
+      answer.json.accounts,
+      state === "usable"
+        ? [
+            { name: "alpha", held: false, heldUntil: null, buckets: [] },
+            { name: "bravo", held: false, heldUntil: null, buckets: [] },
+          ]
+        : [],
+    );
+    noSecrets(answer.text);
+  });
+}
+
+test("the admin socket answers 404 to /pool with another method, and /sync is as before", async () => {
+  const stub = await startModelStub();
+  const { root } = await startGateway({ models: { anthropic: stub.origin } });
+  const adminSocket = path.join(root, "admin.sock");
+  assert.equal((await requestPool(adminSocket, "POST")).status, 404);
+  assert.equal((await requestPool(adminSocket, "DELETE")).status, 404);
+  assert.equal(await requestSync(adminSocket), 200);
+});
+
+test("GET /pool shows a utilization reading and a hold that a pooled response caused, and no token", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  let rejecting = false;
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(() => {
+      response
+        .writeHead(
+          rejecting ? 429 : 200,
+          rejecting
+            ? [
+                "content-type",
+                "application/json",
+                "anthropic-ratelimit-unified-status",
+                "rejected",
+                "anthropic-ratelimit-unified-reset",
+                String(reset),
+              ]
+            : [
+                "content-type",
+                "application/json",
+                "anthropic-ratelimit-unified-5h-utilization",
+                "0.25",
+                "anthropic-ratelimit-unified-5h-reset",
+                String(reset),
+              ],
+        )
+        .end("{}");
+    });
+  });
+  captureStderr();
+  const { root, socket } = await startGateway({
+    models: { anthropic: stub.origin, pool: { alpha: tokens.alpha } },
+  });
+  const adminSocket = path.join(root, "admin.sock");
+  const post = async (): Promise<ModelReply> =>
+    claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal((await post()).status, 200);
+  const reading = await requestPool(adminSocket);
+  assert.deepEqual(reading.json.accounts, [
+    {
+      name: "alpha",
+      held: false,
+      heldUntil: null,
+      buckets: [{ bucket: "5h", utilization: 0.25, expires: reset * 1000 }],
+    },
+  ]);
+  rejecting = true;
+  assert.equal((await post()).status, 429);
+  const held = await requestPool(adminSocket);
+  const [account] = held.json.accounts;
+  assert.ok(account);
+  assert.equal(account.held, true);
+  assert.equal(account.heldUntil, reset * 1000);
+  noSecrets(reading.text, held.text);
+});
+
+test("GET /pool changes only after /sync, keeping the readings of an account that is unchanged", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  const stub = await startModelStub((_request, response, entry) => {
+    void entry.ended.then(() => {
+      response
+        .writeHead(200, [
+          "content-type",
+          "application/json",
+          "anthropic-ratelimit-unified-5h-utilization",
+          "0.5",
+          "anthropic-ratelimit-unified-5h-reset",
+          String(reset),
+        ])
+        .end("{}");
+    });
+  });
+  captureStderr();
+  const { root, poolDirectory, socket } = await startGateway({
+    models: { anthropic: stub.origin, pool: { alpha: tokens.alpha } },
+  });
+  const adminSocket = path.join(root, "admin.sock");
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  writeFileSync(path.join(poolDirectory, "bravo"), tokens.bravo, {
+    mode: 0o600,
+  });
+  const before = await requestPool(adminSocket);
+  assert.deepEqual(
+    before.json.accounts.map(({ name }) => name),
+    ["alpha"],
+  );
+  assert.equal(await requestSync(adminSocket), 200);
+  const added = await requestPool(adminSocket);
+  assert.deepEqual(
+    added.json.accounts.map(({ name, buckets }) => [name, buckets.length]),
+    [
+      ["alpha", 1],
+      ["bravo", 0],
+    ],
+  );
+  rmSync(path.join(poolDirectory, "alpha"));
+  rmSync(path.join(poolDirectory, "bravo"));
+  assert.equal(await requestSync(adminSocket), 200);
+  const emptied = await requestPool(adminSocket);
+  assert.equal(emptied.json.state, "unconfigured");
+  assert.equal(emptied.json.reason, null);
+  assert.deepEqual(emptied.json.accounts, []);
+  noSecrets(before.text, added.text, emptied.text);
+});
+
+const fireworksName = "api.fireworks.ai";
+const keys = {
+  one: "fw-made-up-one",
+  two: "fw-made-up-two",
+} as const;
+
+function fireworks(
+  socket: string,
+  method: string,
+  target: string,
+  headers: Record<string, string | string[]> = {},
+  body?: Buffer | string,
+): Promise<ModelReply> {
+  return modelClient(
+    socket,
+    method,
+    target,
+    { host: fireworksName, ...headers },
+    body,
+  ).response;
+}
+
+function keyFile(content: string | Buffer | null): string {
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-key-"));
+  defer(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const file = path.join(directory, "FIREWORKS_API_KEY");
+  if (content !== null) {
+    writeFileSync(file, content);
+  }
+  return file;
+}
+
+async function startFireworks(
+  content: string | Buffer | null,
+  respond?: Parameters<typeof startModelStub>[0],
+  pool?: PoolSpec,
+): Promise<
+  Awaited<ReturnType<typeof startGateway>> & {
+    file: string;
+    provider: ModelStub;
+    anthropic: ModelStub;
+  }
+> {
+  const provider = await startModelStub(respond);
+  const anthropic = await startModelStub();
+  const file = keyFile(content);
+  const started = await startGateway({
+    models: {
+      anthropic: anthropic.origin,
+      fireworks: provider.origin,
+      fireworksKeyFile: file,
+      pool: pool ?? { alpha: tokens.alpha },
+    },
+  });
+  return { ...started, file, provider, anthropic };
+}
+
+function noKeys(...shown: unknown[]): void {
+  noSecrets(...shown);
+  const text = JSON.stringify(shown);
+  for (const key of Object.values(keys)) {
+    assert.ok(!text.includes(key), "a key is shown");
+  }
+}
+
+const unavailable = "the Fireworks key is not usable on the Mac";
+
+test("a Fireworks request with the placeholder reaches Fireworks with the key in the Authorization line's place and spelling, and the rest of the list as sent", async () => {
+  const { socket, instance, state, provider, anthropic } = await startFireworks(
+    ` ${keys.one}\r\n`,
+  );
+  const stderr = captureStderr();
+  const audit = recordFinishes(state);
+  const reply = await exchange(
+    socket,
+    fireworksName,
+    "POST /inference/v1/messages?beta=true HTTP/1.1\r\n" +
+      "Host: api.fireworks.ai\r\n" +
+      "X-Dup: one\r\n" +
+      "aUtHoRiZaTiOn: Bearer cog\r\n" +
+      "x-dup: two\r\n" +
+      "Cookie: session=guest\r\n" +
+      "User-Agent: claude-cli/2.1 (external, cli)\r\n" +
+      "Connection: close, TE\r\n" +
+      "TE: trailers\r\n" +
+      "Content-Length: 2\r\n" +
+      "X-Same: 1\r\n" +
+      "X-Same: 2\r\n\r\n{}",
+  );
+  assert.equal(statusOf(reply), 200);
+  assert.equal(anthropic.requests.length, 0);
+  const [seen] = provider.requests;
+  assert.ok(seen);
+  assert.equal(seen.method, "POST");
+  assert.equal(seen.url, "/inference/v1/messages?beta=true");
+  assert.deepEqual(pairsOf(seen.rawHeaders), [
+    "Host: api.fireworks.ai",
+    "X-Dup: one",
+    `aUtHoRiZaTiOn: Bearer ${keys.one}`,
+    "x-dup: two",
+    "Cookie: session=guest",
+    "User-Agent: claude-cli/2.1 (external, cli)",
+    "Content-Length: 2",
+    "X-Same: 1",
+    "X-Same: 2",
+    "Connection: keep-alive",
+  ]);
+  assert.equal(seen.body.toString(), "{}");
+  await within("the audit row", audit.first);
+  const [row, ...others] = state.logs(instance.id);
+  assert.deepEqual(others, []);
+  assert.equal(row?.operation, "model.fireworks");
+  assert.equal(row.repository, null);
+  assert.equal(row.allowed, true);
+  assert.equal(row.reason, "fireworks key");
+  assert.equal(row.outcome, "completed");
+  assert.equal(row.upstreamStatus, 200);
+  noKeys(state.logs(instance.id), stderr, reply);
+  assert.deepEqual(stderr, []);
+});
+
+test("a Fireworks request with no Authorization is forwarded as sent, whether or not the key file exists", async () => {
+  for (const content of [keys.one, null]) {
+    const { socket, instance, state, provider } = await startFireworks(content);
+    const audit = recordFinishes(state);
+    const reply = await fireworks(socket, "HEAD", "/inference/api/hello", {
+      "X-Dup": ["one", "two"],
+      Cookie: "session=guest",
+    });
+    assert.equal(reply.status, 200);
+    const [seen] = provider.requests;
+    assert.ok(seen);
+    assert.equal(seen.url, "/inference/api/hello");
+    assert.deepEqual(headerValues(seen.rawHeaders, "authorization"), []);
+    assert.deepEqual(headerValues(seen.rawHeaders, "x-dup"), ["one", "two"]);
+    await within("the audit row", audit.first);
+    const [row, ...others] = state.logs(instance.id);
+    assert.deepEqual(others, []);
+    assert.equal(row?.operation, "model.fireworks");
+    assert.equal(row.allowed, true);
+    assert.equal(row.reason, "no credential");
+  }
+});
+
+test("Fireworks targets reach the provider as written", async () => {
+  const { socket, provider } = await startFireworks(keys.one);
+  const targets = [
+    "/inference/v1/messages?beta=true",
+    "/inference/api/hello",
+    "//x",
+    "/inference/p%2fq/%7e?a={b}&c=%zz",
+  ];
+  for (const target of targets) {
+    for (const headers of [poolHeaders, {}]) {
+      assert.equal(
+        (await fireworks(socket, "POST", target, headers, "{}")).status,
+        200,
+        target,
+      );
+    }
+  }
+  assert.deepEqual(
+    provider.requests.map(({ url }) => url),
+    targets.flatMap((target) => [target, target]),
+  );
+});
+
+test("a Fireworks event stream, its status and its reason phrase reach the client as they come", async () => {
+  const release = signal();
+  const { socket, provider } = await startFireworks(
+    keys.one,
+    (_request, response, entry) => {
+      void entry.ended.then(async () => {
+        response.writeHead(207, "Partly Fine", {
+          "content-type": "text/event-stream",
+          "x-fireworks-note": "kept",
+        });
+        response.write("data: 1\n\n");
+        await release.promise;
+        response.end("data: 2\n\n");
+      });
+    },
+  );
+  const client = modelClient(
+    socket,
+    "POST",
+    "/inference/v1/messages",
+    { host: fireworksName, ...poolHeaders },
+    "{}",
+  );
+  await within("the first event", client.firstData);
+  release.resolve();
+  const reply = await client.response;
+  assert.equal(reply.status, 207);
+  assert.equal(reply.statusMessage, "Partly Fine");
+  assert.equal(reply.headers["x-fireworks-note"], "kept");
+  assert.equal(reply.body.toString(), "data: 1\n\ndata: 2\n\n");
+  assert.equal(provider.requests.length, 1);
+});
+
+test("Fireworks requests that break the rules are refused before anything is forwarded", async () => {
+  const stderr = captureStderr();
+  const { socket, instance, state, provider, anthropic } = await startFireworks(
+    keys.one,
+  );
+  const target = "/inference/v1/messages";
+  const requests: [string, Record<string, string | string[]>][] = [
+    ["POST", { ...poolHeaders, "x-api-key": "k" }],
+    ["POST", { "x-api-key": "k" }],
+    ["POST", { authorization: "Bearer guest" }],
+    ["POST", { authorization: `Bearer ${keys.one}` }],
+    ["POST", { authorization: "bearer cog" }],
+    ["POST", { authorization: ["Bearer cog", "Bearer cog"] }],
+    ["POST", { ...poolHeaders, connection: "host" }],
+    ["POST", { ...poolHeaders, connection: "authorization" }],
+    ["TRACE", poolHeaders],
+  ];
+  for (const [method, headers] of requests) {
+    const reply = await fireworks(socket, method, target, headers, "{}");
+    assert.equal(reply.status, 403, JSON.stringify(headers));
+    assert.equal(reply.headers["x-should-retry"], "false");
+    assert.equal(claudeError(reply).type, "permission_error");
+    noKeys(reply.body.toString());
+  }
+  const raw = [
+    rawRequest(
+      "POST",
+      "http://api.fireworks.ai/x",
+      fireworksName,
+      "content-length: 0",
+    ),
+    rawRequest("POST", "*", fireworksName, "content-length: 0"),
+    rawRequest(
+      "GET",
+      "/x",
+      fireworksName,
+      "transfer-encoding: chunked",
+      "0\r\n\r\n",
+    ),
+    rawRequest(
+      "POST",
+      "/x",
+      fireworksName,
+      "host: api.fireworks.ai\r\ncontent-length: 2",
+      "{}",
+    ),
+    rawRequest(
+      "POST",
+      "/x",
+      fireworksName,
+      "authorization: Bearer cog\r\ncontent-length: 2\r\ncontent-length: 2",
+      "{}",
+    ),
+    rawRequest(
+      "POST",
+      "/x",
+      fireworksName,
+      "authorization: Bearer cog\r\ncontent-length: 2\r\ntransfer-encoding: chunked",
+      "{}",
+    ),
+  ];
+  for (const request of raw) {
+    const reply = await exchange(socket, fireworksName, request);
+    assert.ok([400, 403].includes(statusOf(reply)), request);
+  }
+  assert.equal(provider.requests.length, 0);
+  assert.equal(anthropic.requests.length, 0);
+  const rows = state.logs(instance.id);
+  assert.ok(rows.length >= requests.length);
+  for (const row of rows) {
+    assert.equal(row.allowed, false);
+    assert.equal(row.operation, "model.fireworks");
+    assert.equal(row.outcome, "denied");
+  }
+  noKeys(rows, stderr);
+});
+
+test("the Fireworks health path is answered locally whatever the key file holds", async () => {
+  for (const content of [keys.one, null, "two words"]) {
+    captureStderr();
+    const { socket, instance, state, provider } = await startFireworks(content);
+    const audit = recordFinishes(state);
+    const reply = await fireworks(socket, "GET", "/__cog__/health");
+    assert.equal(reply.status, 200);
+    assert.equal(reply.body.toString(), "cog ready\n");
+    await within("the audit row", audit.first);
+    assert.equal(provider.requests.length, 0);
+    const [row, ...others] = state.logs(instance.id);
+    assert.deepEqual(others, []);
+    assert.equal(row?.operation, "public.read");
+    assert.equal(row.reason, "anonymous read");
+  }
+});
+
+test("the key file is read for each credentialed request, and a missing file stops only those, silently", async () => {
+  const stderr = captureStderr();
+  const { socket, file, provider, instance, state } = await startFireworks(
+    `${keys.one}\n`,
+  );
+  const post = (headers: Record<string, string>): Promise<ModelReply> =>
+    fireworks(socket, "POST", "/inference/v1/messages", headers, "{}");
+  assert.equal((await post(poolHeaders)).status, 200);
+  writeFileSync(file, `${keys.two}\n`);
+  assert.equal((await post(poolHeaders)).status, 200);
+  rmSync(file);
+  const gone = await post(poolHeaders);
+  assert.equal(gone.status, 503);
+  assert.deepEqual(claudeError(gone), {
+    type: "api_error",
+    message: `cog gateway: ${unavailable}`,
+  });
+  assert.equal((await post({})).status, 200);
+  writeFileSync(file, `${keys.one}\n`);
+  assert.equal((await post(poolHeaders)).status, 200);
+  assert.deepEqual(
+    provider.requests.map((entry) => entry.headers.authorization),
+    [
+      `Bearer ${keys.one}`,
+      `Bearer ${keys.two}`,
+      undefined,
+      `Bearer ${keys.one}`,
+    ],
+  );
+  assert.deepEqual(stderr, []);
+  const rows = state.logs(instance.id);
+  assert.deepEqual(
+    rows.map(({ allowed, reason }) => [allowed, reason]).toReversed(),
+    [
+      [true, "fireworks key"],
+      [true, "fireworks key"],
+      [false, unavailable],
+      [true, "no credential"],
+      [true, "fireworks key"],
+    ],
+  );
+  noKeys(rows, stderr);
+});
+
+test("a key file that breaks the reading rule makes credentialed Fireworks requests 503, names no content, and leaves other requests alone", async () => {
+  const bad: [string, string | Buffer][] = [
+    ["an empty file", ""],
+    ["only whitespace", " \r\n\t\n"],
+    ["two words", `${keys.one} ${keys.two}`],
+    ["two lines", `${keys.one}\n${keys.two}\n`],
+    ["a tab inside", `${keys.one}\t${keys.two}`],
+    ["a vertical tab inside", `${keys.one}\v${keys.two}`],
+    ["a control character", `${keys.one}\u{1}`],
+    ["a NUL", `${keys.one}\0`],
+    ["a DEL", `${keys.one}\u{7F}`],
+    ["a non-ASCII byte", Buffer.from([...Buffer.from(keys.one), 0xe9])],
+    ["a UTF-8 character", `${keys.one}é`],
+    ["too many bytes", `${"k".repeat(4096)}\n`],
+    ["too much padding", `${keys.one}${" ".repeat(4100)}`],
+  ];
+  for (const [what, content] of bad) {
+    const stderr = captureStderr();
+    const { socket, provider, instance, state } = await startFireworks(content);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reply = await fireworks(
+        socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      );
+      assert.equal(reply.status, 503, what);
+      assert.deepEqual(claudeError(reply), {
+        type: "api_error",
+        message: `cog gateway: ${unavailable}`,
+      });
+    }
+    assert.equal(provider.requests.length, 0, what);
+    assert.equal(stderr.length, 1, what);
+    assert.match(
+      stderr[0] ?? "",
+      /^cog: Fireworks key file .*FIREWORKS_API_KEY .+\n$/,
+    );
+    for (const row of state.logs(instance.id)) {
+      assert.equal(row.allowed, false);
+      assert.equal(row.operation, "model.fireworks");
+      assert.equal(row.reason, unavailable);
+    }
+    noKeys(state.logs(instance.id), stderr);
+    assert.equal(
+      (await fireworks(socket, "GET", "/inference/api/hello")).status,
+      200,
+    );
+    mock.restore();
+  }
+});
+
+test("a key file that is a directory or a named pipe makes credentialed requests 503 without waiting for it", async () => {
+  captureStderr();
+  const directory = mkdtempSync(path.join(tmpdir(), "cog-key-"));
+  defer(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+  mkdirSync(path.join(directory, "folder"));
+  const pipe = path.join(directory, "pipe");
+  assert.equal(spawnSync("mkfifo", [pipe]).status, 0);
+  for (const file of [path.join(directory, "folder"), pipe]) {
+    const provider = await startModelStub();
+    const { socket } = await startGateway({
+      models: { fireworks: provider.origin, fireworksKeyFile: file },
+    });
+    const reply = await fireworks(
+      socket,
+      "POST",
+      "/inference/v1/messages",
+      poolHeaders,
+      "{}",
+    );
+    assert.equal(reply.status, 503, file);
+    assert.equal(provider.requests.length, 0);
+  }
+});
+
+test("a key file that follows the reading rule is used", async () => {
+  const punctuation = "!\"#$%&'()*+,-./:;<=>?@[]^_`{|}~";
+  const good: [string, string, string][] = [
+    ["a trailing newline", `${keys.one}\n`, keys.one],
+    ["carriage returns", `\r\n ${keys.one} \r\n`, keys.one],
+    ["a carriage return inside", "fw-made\r-up", "fw-made-up"],
+    ["the byte limit", `${"k".repeat(4095)}\n`, "k".repeat(4095)],
+    ["visible punctuation", punctuation, punctuation],
+  ];
+  for (const [what, content, expected] of good) {
+    const { socket, provider } = await startFireworks(content);
+    const reply = await fireworks(
+      socket,
+      "POST",
+      "/inference/v1/messages",
+      poolHeaders,
+      "{}",
+    );
+    assert.equal(reply.status, 200, what);
+    assert.equal(
+      provider.requests[0]?.headers.authorization,
+      `Bearer ${expected}`,
+      what,
+    );
+  }
+  const provider = await startModelStub();
+  const file = keyFile(null);
+  const real = `${file}.real`;
+  writeFileSync(real, `${keys.two}\n`);
+  symlinkSync(real, file);
+  const { socket } = await startGateway({
+    models: { fireworks: provider.origin, fireworksKeyFile: file },
+  });
+  await fireworks(socket, "POST", "/inference/v1/messages", poolHeaders, "{}");
+  assert.equal(
+    provider.requests[0]?.headers.authorization,
+    `Bearer ${keys.two}`,
+  );
+});
+
+test("the stderr line is written once per changed reason, and never for a missing file, a dangling link or an option that was not given", async () => {
+  const stderr = captureStderr();
+  const { socket, file } = await startFireworks(null);
+  const credentialed = async (): Promise<number> =>
+    (
+      await fireworks(
+        socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      )
+    ).status;
+  assert.equal(await credentialed(), 503);
+  symlinkSync(`${file}.nowhere`, file);
+  assert.equal(await credentialed(), 503);
+  rmSync(file);
+  assert.deepEqual(stderr, []);
+  writeFileSync(file, "");
+  await credentialed();
+  await credentialed();
+  assert.equal(stderr.length, 1);
+  writeFileSync(file, "a b");
+  await credentialed();
+  assert.equal(stderr.length, 2);
+  assert.notEqual(stderr[0], stderr[1]);
+  writeFileSync(file, keys.one);
+  assert.equal(await credentialed(), 200);
+  writeFileSync(file, "a b");
+  await credentialed();
+  assert.equal(stderr.length, 3);
+  assert.equal(stderr[2], stderr[1]);
+  noKeys(stderr);
+
+  const quiet = captureStderr();
+  const provider = await startModelStub();
+  const unset = await startGateway({ models: { fireworks: provider.origin } });
+  const reply = await fireworks(
+    unset.socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 503);
+  assert.deepEqual(quiet, []);
+  assert.equal(provider.requests.length, 0);
+});
+
+test("a Fireworks fault does not touch Claude, and a Claude pool fault does not touch Fireworks", async () => {
+  captureStderr();
+  const broken = await startFireworks("two words");
+  assert.equal(
+    (
+      await fireworks(
+        broken.socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      )
+    ).status,
+    503,
+  );
+  const claudeReply = await claude(
+    broken.socket,
+    "POST",
+    "/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(claudeReply.status, 200);
+  assert.equal(broken.anthropic.requests.length, 1);
+  assert.equal(
+    broken.anthropic.requests[0]?.headers.authorization,
+    `Bearer ${accountToken}`,
+  );
+  const fine = await startFireworks(keys.one, undefined, "missing");
+  assert.equal(
+    (await claude(fine.socket, "POST", "/v1/messages", poolHeaders, "{}"))
+      .status,
+    503,
+  );
+  const reply = await fireworks(
+    fine.socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 200);
+  assert.equal(
+    fine.provider.requests[0]?.headers.authorization,
+    `Bearer ${keys.one}`,
+  );
+});
+
+test("a placeholder request never gets the other host's credential or reaches the other host's upstream, whatever its SNI", async () => {
+  const { socket, provider, anthropic } = await startFireworks(keys.one);
+  for (const servername of [claudeName, fireworksName]) {
+    for (const [host, target] of [
+      [fireworksName, "/v1/messages"],
+      [claudeName, "/inference/v1/messages"],
+    ] as const) {
+      const request = https.request({
+        socketPath: socket,
+        servername,
+        rejectUnauthorized: false,
+        method: "POST",
+        path: target,
+        agent: false,
+        headers: { host, ...poolHeaders },
+      });
+      defer(() => {
+        request.destroy();
+      });
+      const answered = once(request, "response");
+      request.end("{}");
+      const [response] = (await within("the answer", answered)) as [
+        IncomingMessage,
+      ];
+      response.resume();
+      assert.equal(response.statusCode, 200);
+    }
+  }
+  assert.equal(provider.requests.length, 2);
+  assert.equal(anthropic.requests.length, 2);
+  for (const entry of provider.requests) {
+    assert.deepEqual(headerValues(entry.rawHeaders, "host"), [fireworksName]);
+    assert.equal(entry.headers.authorization, `Bearer ${keys.one}`);
+  }
+  for (const entry of anthropic.requests) {
+    assert.deepEqual(headerValues(entry.rawHeaders, "host"), [claudeName]);
+    assert.equal(entry.headers.authorization, `Bearer ${accountToken}`);
+  }
+  for (const host of [
+    "api.fireworks.ai:443",
+    "api.fireworks.ai.",
+    "fireworks.ai",
+  ]) {
+    const reply = await fireworks(
+      socket,
+      "POST",
+      "/x",
+      { host, ...poolHeaders },
+      "{}",
+    );
+    assert.equal(reply.status, 403, host);
+  }
+  assert.equal(provider.requests.length, 2);
+  assert.equal(anthropic.requests.length, 2);
+});
+
+test("Fireworks responses are not read for rate limits, so the pool's choice is unchanged", async () => {
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
+  const { socket, anthropic, instance } = await startFireworks(
+    keys.one,
+    (_request, response, entry) => {
+      void entry.ended.then(() => {
+        response
+          .writeHead(429, {
+            "anthropic-ratelimit-unified-status": "rejected",
+            "anthropic-ratelimit-unified-reset": reset,
+          })
+          .end("{}");
+      });
+    },
+    bothAccounts,
+  );
+  const reply = await fireworks(
+    socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 429);
+  await claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  assert.equal(tokenSeen(lastRequest(anthropic)), firstAccount(instance.id));
+});
+
+test("a Fireworks upstream that fails is a retryable 503 and a gateway-error row, with no key reported", async () => {
+  const stderr = captureStderr();
+  const { socket, instance, state } = await startFireworks(
+    keys.one,
+    (request, _response, entry) => {
+      void entry.ended.then(() => {
+        request.socket.destroy();
+      });
+    },
+  );
+  const reply = await fireworks(
+    socket,
+    "POST",
+    "/inference/v1/messages",
+    poolHeaders,
+    "{}",
+  );
+  assert.equal(reply.status, 503);
+  assert.equal(reply.headers["x-should-retry"], undefined);
+  assert.deepEqual(
+    state.logs(instance.id).map(({ outcome, operation }) => ({
+      outcome,
+      operation,
+    })),
+    [{ outcome: "gateway-error", operation: "model.fireworks" }],
+  );
+  noKeys(state.logs(instance.id), stderr, reply.body.toString());
+});
+
+test("Fireworks requests use the 600 s timeout, a safe body-less one is replayed once on a stale connection, and a VM's one agent serves both hosts but no other VM", async () => {
+  const requested = spyOn(http, "request");
+  let reused = 0;
+  const { socket, provider, anthropic, state, gateway } = await startFireworks(
+    keys.one,
+    (request, response, entry) => {
+      if (
+        entry.connection === 1 &&
+        provider.requests.filter((other) => other.connection === 1).length > 1
+      ) {
+        reused += 1;
+        request.socket.destroy();
+        return;
+      }
+      replyOk(request, response, entry);
+    },
+  );
+  assert.equal(
+    (
+      await fireworks(
+        socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await fireworks(socket, "GET", "/inference/v1/models", poolHeaders))
+      .status,
+    200,
+  );
+  assert.equal(reused, 1);
+  assert.deepEqual(
+    provider.requests.map(({ method, connection }) => [method, connection]),
+    [
+      ["POST", 1],
+      ["GET", 1],
+      ["GET", 2],
+    ],
+  );
+  assert.equal(
+    provider.requests[2]?.headers.authorization,
+    `Bearer ${keys.one}`,
+  );
+  assert.equal(
+    (await claude(socket, "POST", "/v1/messages", poolHeaders, "{}")).status,
+    200,
+  );
+  assert.equal(anthropic.connections.length, 1);
+  const calls = requested.mock.calls.map(([target, options]) => ({
+    origin: String(target instanceof URL ? target.origin : target),
+    timeout: (options as http.RequestOptions | undefined)?.timeout,
+    agent: (options as http.RequestOptions | undefined)?.agent,
+  }));
+  assert.deepEqual(
+    calls.map(({ origin, timeout }) => [origin, timeout]),
+    [
+      [provider.origin, 600_000],
+      [provider.origin, 600_000],
+      [provider.origin, 600_000],
+      [anthropic.origin, 600_000],
+    ],
+  );
+  const agents = new Set(calls.map(({ agent }) => agent));
+  assert.equal(agents.size, 1);
+  const other = state.register(
+    "lima:other",
+    path.join(path.dirname(socket), "other.sock"),
+    "tester",
+  );
+  await gateway.refresh();
+  assert.equal(
+    (
+      await fireworks(
+        other.socket,
+        "POST",
+        "/inference/v1/messages",
+        poolHeaders,
+        "{}",
+      )
+    ).status,
+    200,
+  );
+  assert.deepEqual(provider.connections.length, 3);
+  assert.equal(provider.requests.at(-1)?.connection, 3);
+});
+
+test("an http upstream for one model host and a TLS upstream for the other are each reached from one VM, in either order", async () => {
+  const secure: string[] = [];
+  const upstream = https.createServer(
+    { cert: readFileSync(certificate), key: readFileSync(key) },
+    (request, response) => {
+      secure.push(request.url ?? "");
+      request.resume();
+      response.writeHead(200, { "content-length": "2" }).end("ok");
+    },
+  );
+  await new Promise<void>((resolve) => {
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  defer(async () => {
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      upstream.close(() => {
+        resolve();
+      });
+    });
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+  const NativeAgent = https.Agent;
+  const mutable = https as { Agent: unknown };
+  mutable.Agent = class extends NativeAgent {
+    constructor(options?: https.AgentOptions) {
+      super({
+        ...options,
+        ca: readFileSync(certificate),
+        checkServerIdentity: () => {
+          return;
+        },
+      });
+    }
+  };
+  defer(() => {
+    mutable.Agent = NativeAgent;
+  });
+  const plain = await startModelStub();
+  const { socket, state, gateway } = await startGateway({
+    models: {
+      anthropic: plain.origin,
+      fireworks: `https://127.0.0.1:${String(address.port)}`,
+    },
+  });
+  const other = state.register(
+    "lima:other",
+    path.join(path.dirname(socket), "other.sock"),
+    "tester",
+  );
+  await gateway.refresh();
+  const reach = async (vm: string, host: "claude" | "fireworks") =>
+    host === "claude"
+      ? claude(vm, "POST", "/v1/messages", {}, "{}")
+      : fireworks(vm, "POST", "/inference/v1/messages", {}, "{}");
+  for (const [vm, order] of [
+    [socket, ["claude", "fireworks"]],
+    [other.socket, ["fireworks", "claude"]],
+  ] as const) {
+    for (const host of order) {
+      assert.equal((await reach(vm, host)).status, 200, host);
+    }
+  }
+  assert.deepEqual(
+    plain.requests.map(({ url }) => url),
+    ["/v1/messages", "/v1/messages"],
+  );
+  assert.deepEqual(secure, [
+    "/inference/v1/messages",
+    "/inference/v1/messages",
+  ]);
+});
+
+function sendModel(
+  socket: string,
+  method: string,
+  target: string,
+  body: Buffer | Buffer[],
+  agent: https.Agent,
+  headers: Record<string, string> = {},
+): ReturnType<typeof send> {
+  return send(
+    socket,
+    method,
+    target,
+    body,
+    claudeName,
+    {
+      authorization: "Bearer cog",
+      ...headers,
+    },
+    agent,
+  );
+}
+
+function keepAliveAgent(): https.Agent {
+  const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+  defer(() => {
+    agent.destroy();
+  });
+  return agent;
+}
+
+function countConnections(listener: https.Server): { count: () => number } {
+  let total = 0;
+  listener.on("secureConnection", () => {
+    total += 1;
+  });
+  return { count: () => total };
+}
+
+const largeBody = Buffer.alloc(3_000_000, 0x61);
+
+test("a provider that resets the connection after the upload began is a 503 that closes the guest's connection, so a retry on the same keep-alive agent opens another and succeeds", async () => {
+  let seen = 0;
+  const stub = await startModelStub((request, response, entry) => {
+    seen += 1;
+    if (seen === 1) {
+      request.once("data", () => {
+        request.socket.resetAndDestroy();
+      });
+      return;
+    }
+    replyOk(request, response, entry);
+  });
+  const stderr = captureStderr();
+  const { socket, listener } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const connections = countConnections(listener);
+  const agent = keepAliveAgent();
+  const first = await within(
+    "the 503",
+    sendModel(socket, "POST", "/v1/messages", largeBody, agent),
+  );
+  assert.equal(first.status, 503);
+  assert.equal(first.headers.connection, "close");
+  const retry = await within(
+    "the retry",
+    sendModel(socket, "POST", "/v1/messages", Buffer.from("{}"), agent),
+  );
+  assert.equal(retry.status, 200);
+  assert.equal(connections.count(), 2);
+  assert.match(stderr.join(""), /gateway request failed/);
+});
+
+test("a refusal that leaves the upload unread closes the guest's connection, and the next request on the agent opens another", async () => {
+  const stub = await startModelStub();
+  const { socket, listener } = await startGateway({
+    models: { anthropic: stub.origin },
+  });
+  const connections = countConnections(listener);
+  const agent = keepAliveAgent();
+  const refused = await within(
+    "the refusal",
+    sendModel(socket, "POST", "/v1/messages", largeBody, agent, {
+      authorization: "Bearer not-cog",
+    }),
+  );
+  assert.equal(refused.status, 403);
+  assert.equal(refused.headers.connection, "close");
+  const next = await within(
+    "the next request",
+    sendModel(socket, "POST", "/v1/messages", Buffer.from("{}"), agent),
+  );
+  assert.equal(next.status, 200);
+  assert.equal(connections.count(), 2);
+});
+
+// eslint-disable-next-line unicorn/prefer-event-target -- A ClientRequest is an EventEmitter.
+class FakeUpstream extends EventEmitter {
+  readonly written: string[] = [];
+  ended = false;
+  destroyed = 0;
+  private readonly accepts: boolean;
+
+  constructor(accepts: boolean) {
+    super();
+    this.accepts = accepts;
+  }
+
+  write(chunk: Buffer): boolean {
+    this.written.push(chunk.toString());
+    return this.accepts;
+  }
+
+  end(): void {
+    this.ended = true;
+  }
+
+  destroy(): void {
+    this.destroyed += 1;
+  }
+}
+
+function guestBody(chunks: string[]): {
+  body: Parameters<typeof sendBody>[1];
+  unread: () => number;
+} {
+  const pending = [...chunks];
+  const remaining: AsyncIterator<Buffer> = {
+    next: () =>
+      Promise.resolve(
+        pending.length === 0
+          ? { done: true, value: undefined }
+          : { done: false, value: Buffer.from(pending.shift() ?? "") },
+      ),
+  };
+  return {
+    body: { buffered: Buffer.from("a"), remaining },
+    unread: () => pending.length,
+  };
+}
+
+test("a body is sent to an upstream that takes every write", async () => {
+  const upstream = new FakeUpstream(true);
+  const { body, unread } = guestBody(["b", "c"]);
+  await sendBody(upstream as unknown as ClientRequest, body, signal().promise);
+  assert.deepEqual(upstream.written, ["a", "b", "c"]);
+  assert.equal(upstream.ended, true);
+  assert.equal(upstream.destroyed, 0);
+  assert.equal(unread(), 0);
+});
+
+test("a body waits for the upstream to drain, and goes on", async () => {
+  const upstream = new FakeUpstream(false);
+  upstream.on("newListener", (event) => {
+    if (event === "drain") {
+      queueMicrotask(() => {
+        upstream.emit("drain");
+      });
+    }
+  });
+  const { body, unread } = guestBody(["b", "c"]);
+  await sendBody(upstream as unknown as ClientRequest, body, signal().promise);
+  assert.deepEqual(upstream.written, ["a", "b", "c"]);
+  assert.equal(upstream.ended, true);
+  assert.equal(upstream.destroyed, 0);
+  assert.equal(unread(), 0);
+});
+
+test("an upstream that is done while a write waits to drain is cut off, and the rest of the body is read and dropped", async () => {
+  const upstream = new FakeUpstream(false);
+  const { body, unread } = guestBody(["b", "c", "d"]);
+  const done = signal();
+  done.resolve();
+  await within(
+    "the body to be read",
+    sendBody(upstream as unknown as ClientRequest, body, done.promise),
+  );
+  assert.deepEqual(upstream.written, ["a"]);
+  assert.equal(upstream.ended, false);
+  assert.equal(upstream.destroyed, 1);
+  assert.equal(unread(), 0);
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("an upstream that fails while a write waits to drain fails the body", async () => {
+  const upstream = new FakeUpstream(false);
+  const { body } = guestBody(["b"]);
+  const sending = sendBody(
+    upstream as unknown as ClientRequest,
+    body,
+    signal().promise,
+  );
+  await delay(1);
+  upstream.emit("error", new Error("reset"));
+  await assert.rejects(within("the failure", sending), /reset/);
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("an upstream that stops reading while a write waits to drain fails the body once the limit passes", async () => {
+  const upstream = new FakeUpstream(false);
+  const { body } = guestBody(["b"]);
+  await assert.rejects(
+    within(
+      "the stall",
+      sendBody(
+        upstream as unknown as ClientRequest,
+        body,
+        signal().promise,
+        20,
+      ),
+    ),
+    /stopped reading/,
+  );
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("a body that waits to drain many times adds one reaction to upstreamDone and leaves no listener on the upstream", async () => {
+  const upstream = new FakeUpstream(false);
+  upstream.on("newListener", (event) => {
+    if (event === "drain") {
+      queueMicrotask(() => {
+        upstream.emit("drain");
+      });
+    }
+  });
+  const { body, unread } = guestBody(Array.from({ length: 20 }, () => "b"));
+  const done = signal();
+  const reactions = spyOn(done.promise, "then");
+  await sendBody(upstream as unknown as ClientRequest, body, done.promise);
+  assert.equal(upstream.written.length, 21);
+  assert.equal(upstream.ended, true);
+  assert.equal(upstream.destroyed, 0);
+  assert.equal(unread(), 0);
+  assert.equal(reactions.mock.calls.length, 1);
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("an upstream that is done between two writes cuts off the next write that does not drain, and the rest of the body is read and dropped", async () => {
+  const upstream = new FakeUpstream(false);
+  upstream.on("newListener", (event) => {
+    if (event === "drain" && upstream.written.length === 1) {
+      queueMicrotask(() => {
+        upstream.emit("drain");
+      });
+    }
+  });
+  const { body, unread } = guestBody(["b", "c", "d"]);
+  const done = signal();
+  const read = body.remaining.next.bind(body.remaining);
+  body.remaining.next = async () => {
+    done.resolve();
+    await nextTurn();
+    return read();
+  };
+  await within(
+    "the body to be read",
+    sendBody(upstream as unknown as ClientRequest, body, done.promise),
+  );
+  assert.deepEqual(upstream.written, ["a", "b"]);
+  assert.equal(upstream.ended, false);
+  assert.equal(upstream.destroyed, 1);
+  assert.equal(unread(), 0);
+  assert.equal(upstream.listenerCount("drain"), 0);
+  assert.equal(upstream.listenerCount("error"), 0);
+});
+
+test("a GitHub refusal that leaves the upload unread closes the guest's connection", async () => {
+  const { socket, listener } = await startGateway();
+  const connections = countConnections(listener);
+  const agent = keepAliveAgent();
+  const refused = await within(
+    "the refusal",
+    send(
+      socket,
+      "POST",
+      "/shields/dotfiles.git/git-receive-pack?x=1",
+      largeBody,
+      "github.com",
+      {},
+      agent,
+    ),
+  );
+  assert.equal(refused.status, 403);
+  assert.equal(refused.headers.connection, "close");
+  const next = await within(
+    "the next request",
+    send(
+      socket,
+      "GET",
+      "/shields/dotfiles.git/info/refs?service=git-upload-pack",
+      Buffer.alloc(0),
+      "github.com",
+      {},
+      agent,
+    ),
+  );
+  assert.equal(next.status, 200);
+  assert.equal(connections.count(), 2);
+});
+
+test("a refusal answers a request that announced a body it never sent, with or without Expect: 100-continue, and closes the connection", async () => {
+  const { socket } = await startGateway();
+  for (const extra of ["", "expect: 100-continue\r\n"]) {
+    const reply = await exchange(
+      socket,
+      claudeName,
+      `POST /v1/messages HTTP/1.1\r\nhost: ${claudeName}\r\nauthorization: Bearer not-cog\r\ncontent-length: 1000000\r\n${extra}\r\n`,
+    );
+    assert.match(reply, /HTTP\/1\.1 403 /, extra);
+    assert.match(reply, /\r\nconnection: close\r\n/i, extra);
+  }
+});
+
+test("a refusal of a request with no body, or of one whose body was read to its end, keeps the connection", async () => {
+  const { socket, listener } = await startGateway();
+  const connections = countConnections(listener);
+  for (const [name, host, method, target, body] of [
+    ["a GET", claudeName, "GET", "/v1/messages", ""],
+    ["a query", "api.github.com", "POST", "/graphql", "not json"],
+  ] as const) {
+    const agent = keepAliveAgent();
+    for (let round = 0; round < 2; round += 1) {
+      const refused = await within(
+        `the refusal of ${name}`,
+        send(
+          socket,
+          method,
+          target,
+          Buffer.from(body),
+          host,
+          {
+            authorization: "Bearer not-cog",
+          },
+          agent,
+        ),
+      );
+      assert.equal(refused.status, 403, name);
+      assert.notEqual(refused.headers.connection, "close", name);
+    }
+  }
+  assert.equal(connections.count(), 2);
+});
+
+test("a refusal that leaves a pipelined request behind answers only the refused one, and closes the connection", async () => {
+  const { socket } = await startGateway();
+  const second = `GET /v1/models HTTP/1.1\r\nhost: ${claudeName}\r\nconnection: close\r\n\r\n`;
+  const reply = await exchange(
+    socket,
+    claudeName,
+    `POST /v1/messages HTTP/1.1\r\nhost: ${claudeName}\r\nauthorization: Bearer not-cog\r\ncontent-length: 2\r\n\r\n{}${second}`,
+  );
+  assert.match(reply, /^HTTP\/1\.1 403 /);
+  assert.equal(reply.match(/^HTTP\/1\.1 /gm)?.length, 1);
+});
+
+function requestFireworksKey(
+  adminSocket: string,
+  method = "GET",
+): Promise<{ status: number; type: unknown; text: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        socketPath: adminSocket,
+        path: "/fireworks-key",
+        method,
+        agent: false,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.once("end", () => {
+          resolve({
+            status: response.statusCode ?? 0,
+            type: response.headers["content-type"],
+            text: Buffer.concat(chunks).toString(),
+          });
+        });
+      },
+    );
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+test("GET /fireworks-key answers for the key file as the daemon sees it at that moment, and never shows the key", async () => {
+  const stderr = captureStderr();
+  const { root, file } = await startFireworks(null);
+  const adminSocket = path.join(root, "admin.sock");
+  const ask = async (): Promise<unknown> => {
+    const answer = await requestFireworksKey(adminSocket);
+    assert.equal(answer.status, 200);
+    assert.equal(answer.type, "application/json");
+    noKeys(answer.text);
+    return JSON.parse(answer.text);
+  };
+  assert.deepEqual(await ask(), { state: "missing", reason: null });
+  symlinkSync(`${file}.nowhere`, file);
+  assert.deepEqual(await ask(), {
+    state: "unusable",
+    reason: "is not a regular file",
+  });
+  rmSync(file);
+  writeFileSync(file, `${keys.one} ${keys.two}\n`);
+  assert.deepEqual(await ask(), {
+    state: "unusable",
+    reason: "holds more than one word",
+  });
+  writeFileSync(file, `${keys.one}\r\n`);
+  assert.deepEqual(await ask(), { state: "usable", reason: null });
+  rmSync(file);
+  mkdirSync(file);
+  assert.deepEqual(await ask(), {
+    state: "unusable",
+    reason: "is not a regular file",
+  });
+  assert.deepEqual(stderr, []);
+});
+
+test("GET /fireworks-key answers missing when no key file is configured, and 404 to other methods", async () => {
+  const stub = await startModelStub();
+  const { root } = await startGateway({ models: { anthropic: stub.origin } });
+  const adminSocket = path.join(root, "admin.sock");
+  const answer = await requestFireworksKey(adminSocket);
+  assert.equal(answer.status, 200);
+  assert.deepEqual(JSON.parse(answer.text), { state: "missing", reason: null });
+  assert.equal((await requestFireworksKey(adminSocket, "POST")).status, 404);
 });

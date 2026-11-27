@@ -118,7 +118,8 @@ STUB
 # $LIMA_STUB_BLOCK creates $LIMA_STUB_STATE/blocked and waits for
 # a terminal signal. A call to a subcommand named in
 # $LIMA_STUB_SNAPSHOT saves the gateway's state to
-# $LIMA_STUB_STATE/snapshots/CALL.json before it does anything.
+# $LIMA_STUB_STATE/snapshots/CALL.json before it does anything. The guest shell
+# check answers $LIMA_STUB_GUEST_CHECK, "done" by default.
 cat > "$STUBS/limactl" <<'STUB'
 #!/bin/bash
 state=$LIMA_STUB_STATE
@@ -162,8 +163,8 @@ list)
         case $2 in
         '{{.Protected}}') [[ -e "$state/protected-$3" ]] && echo true || echo false ;;
         '{{.Status}}') [[ -e "$state/stopped-$3" ]] && echo Stopped || echo Running ;;
-        '{{.Dir}}') echo "$HOME/.lima/$3" ;;
         '{{len .Config.Mounts}}') cat "$state/mounts" 2>/dev/null || echo 0 ;;
+        *PortForwards*) cat "$state/forwards" 2>/dev/null || true ;;
         esac
         ;;
     *) cat "$state/instances" ;;
@@ -238,6 +239,7 @@ shell)
         tar -xf "$state/calls/$call.stdin" -C "$state/lib"
         ;;
     'env GIT_TERMINAL_PROMPT=0 git clone '*) ;;
+    'sh -c exec zsh -i -c '*) printf '%s\n' "${LIMA_STUB_GUEST_CHECK-done}" ;;
     'git '*) git -C "$state/guest" "${@:2}" || exit $? ;;
     esac
     ;;
@@ -377,12 +379,12 @@ rm -rf "$BUILD"
 # The dotfiles checkout: each reader of a marker names it.
 MARKER_READERS=(
     .zshrc:/etc/cog-throwaway
-    .zshrc:/etc/cog-github-gateway
-    .zshenv:/etc/cog-github-gateway
-    .zsh.d/wt.zsh:/etc/cog-github-gateway
-    .codex/hooks/git_guard.py:/etc/cog-github-gateway
+    .zshrc:/etc/cog-gateway
+    .zshenv:/etc/cog-gateway
+    .zsh.d/wt.zsh:/etc/cog-gateway
+    .codex/hooks/git_guard.py:/etc/cog-gateway
     tools/configure_codex.py:/etc/cog-throwaway
-    provision.sh:/etc/cog-github-gateway
+    provision.sh:/etc/cog-gateway
 )
 DOTFILES="$TMPBASE/dotfiles"
 mkdir -p "$DOTFILES/.claude" "$DOTFILES/.codex/hooks" "$DOTFILES/.zsh.d" "$DOTFILES/tools"
@@ -407,6 +409,7 @@ mkdir -p "$TMPBASE/elsewhere"
 GUEST_DIR=/home/guest/src/github.com/shields/dotfiles
 OTHER_DIR=/home/guest/src/github.com/shields/other
 FAKE_CLAUDE='sk-ant-oat01-FAKEclaudeToken-7f3c9a'
+FAKE_LEGACY='sk-ant-oat01-FAKElegacyFile-2b8d41'
 FAKE_CODEX='FAKE-codex-access-token-4c8e'
 FAKE_FIREWORKS='fw_FAKEfireworksKey0123'
 CODEX_JSON=$'{\n  "OPENAI_API_KEY": null,\n  "tokens": {\n    "access_token": "'"$FAKE_CODEX"$'",\n    "refresh_token": "FAKE-codex-refresh-9d1a"\n  }\n}\n'
@@ -422,9 +425,11 @@ CERTS_ROOT="$TMPBASE/certs"
 COG_ROOT="$CERTS_ROOT" bun --no-env-file "$GATEWAY_STATE" certificates
 CERTS="$CERTS_ROOT/secrets"
 
-# new_case [INSTANCE...]: a fresh state with a home that holds a Codex login, a
-# Claude token to type and the instances that exist, and a gateway root that
-# nothing runs in yet (new_gateway_case does that).
+# new_case [INSTANCE...]: a fresh state with a home that holds a Codex login and
+# the instances that exist, and a gateway root that nothing runs in yet
+# (new_gateway_case does that). POOL_SEED says what the gateway's Claude pool
+# holds when it starts: usable (one account), unusable (an account that group
+# and other can read) or none.
 new_case() {
     stop_gateway
     (( ++CASE_N ))
@@ -437,14 +442,14 @@ new_case() {
     (( $# == 0 )) || printf '%s\n' "$@" >> "$STATE/instances"
     : > "$STATE/limactl.log"
     echo 4242 > "$STATE/gh-id"
-    print -r -- "$FAKE_CLAUDE" > "$STATE/prompt"
+    POOL_SEED=usable
     STAGE_ARGS_LOG="$STATE/stage-args"
         RUN_PATH=
     RUN_STDIN=
     RUN_COG=
     RUN_CWD=
     RUN_UMASK=022
-    EXTRA_ENV=(COG_PROMPT_INPUT="$STATE/prompt")
+    EXTRA_ENV=()
 }
 
 gateway_state() {
@@ -456,6 +461,16 @@ prepare_gateway() {
     chmod 700 "$GATEWAY_ROOT/secrets"
     cp -p "$CERTS"/* "$GATEWAY_ROOT/secrets/"
     gateway_state seed-auth shields/dotfiles shields/other
+    if [[ $POOL_SEED != none ]]; then
+        mkdir -p "$GATEWAY_ROOT/secrets/claude-pool"
+        chmod 700 "$GATEWAY_ROOT/secrets/claude-pool"
+        print -r -- "$FAKE_CLAUDE" > "$GATEWAY_ROOT/secrets/claude-pool/work"
+        if [[ $POOL_SEED == usable ]]; then
+            chmod 600 "$GATEWAY_ROOT/secrets/claude-pool/work"
+        else
+            chmod 644 "$GATEWAY_ROOT/secrets/claude-pool/work"
+        fi
+    fi
 }
 
 # start_gateway: prepare_gateway, then a daemon under the case's RUN_UMASK, with
@@ -493,7 +508,7 @@ new_gateway_case() {
 # register_vm NAME: the gateway already has an active VM of that name, which
 # its daemon does not know.
 register_vm() {
-    gateway_state register "lima:$1" "$HOME_DIR/.lima/$1/sock/github-registered.sock"
+    gateway_state register "lima:$1" "$GATEWAY_ROOT/state/sock/github-registered.sock"
 }
 
 gateway_dump() {
@@ -678,10 +693,12 @@ assert_contains "help lists new" "cog new" "$OUT"
 assert_contains "help lists the grant command" "cog grant NAME [OWNER/REPO] [--profile read|cog]" "$OUT"
 assert_contains "help names --repo" "--repo OWNER/REPO" "$OUT"
 assert_contains "help names --no-repo" "--no-repo" "$OUT"
-assert_contains "help names --no-claude-token" "--no-claude-token" "$OUT"
-assert_contains "help names --no-codex-auth" "--no-codex-auth" "$OUT"
+assert_contains "help names --no-claude" "--no-claude" "$OUT"
+assert_contains "help names --no-codex" "--no-codex" "$OUT"
 assert_contains "help says where Codex keeps its login" 'cli_auth_credentials_store = "file"' "$OUT"
-assert_contains "help lists claude-token" "cog claude-token" "$OUT"
+assert_eq "help does not list claude-token" 0 "$(grep -c 'cog claude-token' <<<"$OUT" || true)"
+assert_contains "help says the VM holds only a placeholder" "holds only a placeholder" "$OUT"
+assert_contains "help lists account" "cog account add claude NAME | rm claude NAME | rename claude OLD NEW | list | status" "$OUT"
 assert_contains "help names the Fireworks key file" ".config/secrets/FIREWORKS_API_KEY" "$OUT"
 assert_contains "help describes the Mac gateway" "Credentials" "$OUT"
 run_cog
@@ -699,6 +716,18 @@ assert_eq "list is limactl list" "list" "$(limactl_log)"
 expected_env="$(printf '%s\n' "${RUN_ENV[@]}" | LC_ALL=C sort)"
 child_env="$(grep -Ev '^(PWD|OLDPWD|SHLVL|_)=|^BASH_FUNC_' "$STATE/calls/1.env")"
 assert_eq "list passes its environment to limactl unchanged" "$expected_env" "$child_env"
+run_cog ls
+assert_eq "ls succeeds" 0 "$RC"
+assert_eq "ls is limactl list" $'list\nlist' "$(limactl_log)"
+run_cog ls x
+assert_eq "ls with an argument fails like list" 1 "$RC"
+assert_eq "ls with an argument names the usage" "cog: usage: cog list" "$OUT"
+run_cog new t1 --no-repo --no-claude-"token"
+assert_eq "the earlier claude flag is an unknown option" 1 "$RC"
+assert_contains "the earlier claude flag is named as unknown" "unknown option --no-claude-""token" "$OUT"
+run_cog new t1 --no-repo --no-codex-"auth"
+assert_eq "the earlier codex flag is an unknown option" 1 "$RC"
+assert_contains "the earlier codex flag is named as unknown" "unknown option --no-codex-""auth" "$OUT"
 
 # --- 3. base on a fresh machine ---
 new_case
@@ -1016,7 +1045,7 @@ assert_contains "it names the missing guest directory" "guest/" "$OUT"
 assert_eq "it touches no VM" "" "$(limactl_log)"
 RUN_COG=
 
-for guest_script in configure-github-access.sh github-gateway-credential install-push-instructions.sh reset-identity.sh setup-github-gateway setup-secrets throwaway.sh; do
+for guest_script in configure-github-access.sh github-gateway-credential install-push-instructions.sh reset-identity.sh setup-github-gateway setup-model-gateway setup-secrets throwaway.sh; do
     new_case test-base
     run_base_with_guest_fault "missing:$guest_script"
     assert_eq "a staged tree without guest/$guest_script fails base" 1 "$RC"
@@ -1119,6 +1148,14 @@ dotfiles_copy pre-split
 for entry in $MARKER_READERS; do
     MARKER=${entry#*:} perl -pi -e 's/\Q$ENV{MARKER}\E/\/etc\/dotfiles-throwaway/g' "$TMPBASE/pre-split/${entry%%:*}"
 done
+dotfiles_copy earlier-marker
+earlier_marker="/etc/cog-git""hub-gateway"
+for entry in $MARKER_READERS; do
+    [[ ${entry#*:} == /etc/cog-gateway ]] || continue
+    EARLIER=$earlier_marker perl -pi -e 's/\/etc\/cog-gateway/$ENV{EARLIER}/g' "$TMPBASE/earlier-marker/${entry%%:*}"
+done
+refuse_dotfiles "a checkout that reads the earlier marker path" "$TMPBASE/earlier-marker" \
+    "in the dotfiles checkout does not name /etc/cog-gateway"
 refuse_dotfiles "a checkout from before the split" "$TMPBASE/pre-split" "reads other markers"
 
 # --- 6b. guest scripts install root-owned in /usr/local/lib/cog ---
@@ -1231,13 +1268,16 @@ assert_eq "new with a repository succeeds" 0 "$RC"
 vm_id="$(instance_query t1 .id | tr -d '"')"
 assert_eq "the gateway registered the VM under an ID of its own" 1 \
     "$([[ $vm_id =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] && echo 1 || echo 0)"
-assert_eq "new registers the VM as active, with a socket in its Lima directory" 1 \
-    "$([[ "$(instance_query t1 .socket | tr -d '"')" == "$HOME_DIR/.lima/t1/sock/github-"*.sock ]] && echo 1 || echo 0)"
+assert_eq "new registers the VM as active, with a socket in the gateway's socket directory" 1 \
+    "$([[ "$(instance_query t1 .socket | tr -d '"')" == "$GATEWAY_ROOT/state/sock/github-"*.sock ]] && echo 1 || echo 0)"
+assert_eq "the gateway listens on the VM's socket" 1 \
+    "$([[ -S "$(instance_query t1 .socket | tr -d '"')" ]] && echo 1 || echo 0)"
+assert_eq "new makes no sock directory in the Lima directory" 0 "$([[ -e $HOME_DIR/.lima ]] && echo 1 || echo 0)"
 assert_eq "new registers exactly one VM" 1 "$(gateway_dump | jq '.instances | length')"
 assert_eq "new leaves the VM active at its registration revision" '{"disabled":false,"revision":0}' \
     "$(instance_query t1 '{disabled, revision}')"
 assert_contains "new installs reverse socket forwarding to the registered socket" \
-    "guestSocket\":\"/tmp/cog-github.sock\",\"hostSocket\":\"{{.Dir}}/sock/$(instance_query t1 .socket | tr -d '"' | xargs basename)\",\"reverse\":true" \
+    "guestSocket\":\"/tmp/cog-github.sock\",\"hostSocket\":\"$(instance_query t1 .socket | tr -d '"')\",\"reverse\":true" \
     "$(<"$STATE/limactl.log")"
 assert_contains "new starts the VM after configuring its socket" "edit --tty=false --set" "$(<"$STATE/limactl.log")"
 start_call=$(grep -n '^start --tty=false t1$' "$STATE/limactl.log" | head -1 | cut -d: -f1)
@@ -1245,8 +1285,20 @@ assert_eq "the VM is registered before it starts" "$vm_id" "$(jq -r '.instances[
 assert_contains "new installs guest trust and relay for the registered ID" "setup-github-gateway $vm_id" "$(<"$STATE/limactl.log")"
 assert_contains "new runs the gateway setup from the root-owned directory" \
     "shell t1 sudo $GUEST_LIB/setup-github-gateway $vm_id" "$(<"$STATE/limactl.log")"
-assert_contains "new installs the Claude token with the root-owned setup-secrets" \
+assert_contains "new installs the Claude placeholder with the root-owned setup-secrets" \
     "shell t1 $GUEST_LIB/setup-secrets CLAUDE_CODE_OAUTH_TOKEN" "$(<"$STATE/limactl.log")"
+assert_contains "new wires the Claude host with the root-owned setup-model-gateway" \
+    "shell t1 sudo $GUEST_LIB/setup-model-gateway claude" "$(<"$STATE/limactl.log")"
+assert_eq "the model wiring follows the GitHub wiring and precedes the secrets" 1 \
+    "$(( $(grep -n 'setup-github-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) < $(grep -n 'setup-model-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) && $(grep -n 'setup-model-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) < $(grep -n 'setup-secrets' "$STATE/limactl.log" | head -1 | cut -d: -f1) ))"
+assert_eq "new probes the guest's Anthropic relay once" 1 "$(count_in_log 'https://api.anthropic.com/__cog__/health')"
+assert_eq "new probes the guest's GitHub relay once" 1 "$(count_in_log 'https://api.github.com/__cog__/health')"
+assert_eq "new checks the guest's shell once" 1 "$(count_in_log 'sh -c exec zsh -i -c')"
+assert_eq "the guest shell check follows the last secret install" 1 \
+    "$(( $(grep -n 'setup-secrets' "$STATE/limactl.log" | tail -1 | cut -d: -f1) < $(grep -n 'exec zsh -i -c' "$STATE/limactl.log" | head -1 | cut -d: -f1) ))"
+guest_check_call=$(grep -n 'exec zsh -i -c' "$STATE/limactl.log" | head -1 | cut -d: -f1)
+assert_eq "the guest shell check reads nothing from stdin" "" "$(stdin_of "$guest_check_call")"
+assert_eq "the guest shell check never names a token value" 0 "$(grep -c 'sk-ant-' "$STATE/calls/$guest_check_call.argv" || true)"
 assert_contains "new installs the Codex login with the root-owned setup-secrets" \
     "shell t1 $GUEST_LIB/setup-secrets CODEX_AUTH" "$(<"$STATE/limactl.log")"
 assert_eq "new refers to nothing in the home directory's bin" 0 "$(grep -cE '/bin/setup-|HOME/bin|/home/guest/bin' "$STATE/limactl.log" || true)"
@@ -1262,7 +1314,10 @@ gateway_call=$(grep -n 'setup-github-gateway' "$STATE/limactl.log" | head -1 | c
 assert_eq "the guest receives only the gateway CA, the one the gateway issued" "$(<"$GATEWAY_ROOT/secrets/ca.pem")" "$(stdin_of "$gateway_call")"
 claude_call=$(grep -n 'CLAUDE_CODE_OAUTH_TOKEN' "$STATE/limactl.log" | head -1 | cut -d: -f1)
 codex_call=$(grep -n 'CODEX_AUTH' "$STATE/limactl.log" | head -1 | cut -d: -f1)
-assert_eq "the Claude token reaches only setup-secrets stdin" "$FAKE_CLAUDE" "$(stdin_of "$claude_call")"
+assert_eq "the Claude placeholder is exactly cog and a newline" "636f670a" "$(stdin_of "$claude_call" | od -An -tx1 | tr -d ' \n')"
+assert_eq "no real-looking Claude token reaches any argument, environment or stdin" 0 \
+    "$(cat "$STATE"/calls/*(N.) | grep -c 'sk-ant-' || true)"
+assert_eq "no real-looking Claude token reaches cog's output" 0 "$(printf '%s' "$OUT" | grep -c 'sk-ant-' || true)"
 assert_eq "the Codex login reaches only setup-secrets stdin" "${CODEX_JSON%$'\n'}" "$(stdin_of "$codex_call")"
 assert_no_secret_leak "new with a repository"
 assert_eq "a successful new leaves the gateway access enabled" false "$(instance_query t1 .disabled)"
@@ -1303,66 +1358,144 @@ assert_contains "new opens the private repository shell" "shell --workdir $OTHER
 
 new_gateway_case test-base
 stdin_marker
-run_cog new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude --no-codex
 assert_eq "new without a repository succeeds" 0 "$RC"
 assert_eq "new without a repository registers the VM with no grant" '{"disabled":false,"grants":{}}' "$(instance_query t1 '{disabled, grants}')"
 assert_eq "new without a repository still installs the gateway" 1 "$(count_in_log setup-github-gateway)"
 assert_only_the_shell_reads_stdin "new without a repository"
 assert_eq "new without a repository sends no GitHub secret" 0 "$(count_in_log GITHUB_APP_AUTH)"
-assert_eq "--no-claude-token skips the Claude secret" 0 "$(count_in_log CLAUDE_CODE_OAUTH_TOKEN)"
-assert_eq "--no-codex-auth skips the Codex login" 0 "$(count_in_log CODEX_AUTH)"
+assert_eq "--no-claude skips the Claude secret" 0 "$(count_in_log CLAUDE_CODE_OAUTH_TOKEN)"
+assert_eq "--no-claude skips the model wiring" 0 "$(count_in_log setup-model-gateway)"
+assert_eq "--no-claude skips the Anthropic probe" 0 "$(count_in_log api.anthropic.com)"
+assert_eq "--no-claude skips the guest shell check" 0 "$(count_in_log 'exec zsh -i -c')"
+assert_contains "--no-claude says to log in" "run claude auth login in the VM" "$OUT"
+assert_eq "--no-codex skips the Codex login" 0 "$(count_in_log CODEX_AUTH)"
 assert_eq "no Fireworks key file means no Fireworks secret" 0 "$(count_in_log FIREWORKS_API_KEY)"
 
 new_gateway_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 print -r -- "  $FAKE_FIREWORKS  " > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_cog new t1 --no-repo --no-claude-token --no-codex-auth
-assert_eq "new installs the saved Fireworks key" 0 "$RC"
+run_cog new t1 --no-repo --no-claude --no-codex
+assert_eq "new with a Fireworks key file succeeds" 0 "$RC"
+assert_contains "--no-claude with a Fireworks key file wires only Fireworks" \
+    "shell t1 sudo $GUEST_LIB/setup-model-gateway fireworks" "$(<"$STATE/limactl.log")"
+assert_eq "--no-claude with a Fireworks key file runs the wiring once" 1 "$(count_in_log setup-model-gateway)"
+assert_eq "new probes the guest's Fireworks relay once" 1 "$(count_in_log 'https://api.fireworks.ai/__cog__/health')"
+assert_eq "--no-claude with a Fireworks key file skips the Anthropic probe" 0 "$(count_in_log api.anthropic.com)"
+assert_eq "the Fireworks wiring follows the GitHub wiring and precedes the secrets" 1 \
+    "$(( $(grep -n 'setup-github-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) < $(grep -n 'setup-model-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) && $(grep -n 'setup-model-gateway' "$STATE/limactl.log" | head -1 | cut -d: -f1) < $(grep -n 'setup-secrets' "$STATE/limactl.log" | head -1 | cut -d: -f1) ))"
+assert_eq "a Fireworks key file means exactly one secret install" 1 "$(count_in_log setup-secrets)"
 fireworks_call=$(grep -n 'FIREWORKS_API_KEY' "$STATE/limactl.log" | head -1 | cut -d: -f1)
-assert_eq "the Fireworks key reaches only setup-secrets stdin, trimmed" "$FAKE_FIREWORKS" "$(stdin_of "$fireworks_call")"
+assert_eq "the Fireworks placeholder is exactly cog and a newline" "636f670a" "$(stdin_of "$fireworks_call" | od -An -tx1 | tr -d ' \n')"
+assert_eq "the real Fireworks key reaches no stdin" 0 "$(cat "$STATE"/calls/*.stdin(N) | grep -c "$FAKE_FIREWORKS" || true)"
 assert_no_secret_leak "new with a Fireworks key"
 
 new_gateway_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
+print -r -- "$FAKE_FIREWORKS" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
+run_cog new t1 --no-repo --no-codex
+assert_eq "new with Claude and Fireworks succeeds" 0 "$RC"
+assert_contains "new wires both models in one run" \
+    "shell t1 sudo $GUEST_LIB/setup-model-gateway claude fireworks" "$(<"$STATE/limactl.log")"
+assert_eq "new with both models runs the wiring once" 1 "$(count_in_log setup-model-gateway)"
+assert_eq "new with both models probes Anthropic once" 1 "$(count_in_log 'https://api.anthropic.com/__cog__/health')"
+assert_eq "new with both models probes Fireworks once" 1 "$(count_in_log 'https://api.fireworks.ai/__cog__/health')"
+assert_eq "new with both models installs two placeholders" 2 "$(grep -c "^shell t1 $GUEST_LIB/setup-secrets" "$STATE/limactl.log" || true)"
+assert_no_secret_leak "new with Claude and Fireworks"
+
+new_gateway_case test-base
+mkdir -p "$HOME_DIR/.config/secrets"
+print -r -- "$FAKE_FIREWORKS" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
+EXTRA_ENV+=(LIMA_STUB_FAIL=api.fireworks.ai/__cog__/health LIMA_STUB_SNAPSHOT=delete)
+run_cog new t1 --no-repo --no-claude --no-codex
+assert_eq "a failed Fireworks probe stops new" 1 "$RC"
+assert_contains "a failed Fireworks probe says to rebuild the base" "run cog base again" "$OUT"
+assert_eq "a failed Fireworks probe disables gateway access" '{"disabled":true,"grants":{}}' "$(instance_query t1 '{disabled, grants}')"
+assert_contains "a failed Fireworks probe deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+assert_eq "a failed Fireworks probe installs no secret" 0 "$(count_in_log setup-secrets)"
+assert_no_secret_leak "a failed Fireworks probe"
+
+new_gateway_case test-base
+mkdir -p "$HOME_DIR/.config/secrets"
+print -r -- "$FAKE_FIREWORKS" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
+EXTRA_ENV+=($'LIMA_STUB_GUEST_CHECK=ca\ndone' LIMA_STUB_SNAPSHOT=delete)
+run_cog new t1 --no-repo --no-claude --no-codex
+assert_eq "a guest shell without the CA export stops a Fireworks-only new" 1 "$RC"
+assert_contains "a Fireworks-only guest shell check names Fireworks" \
+    "t1's shell is not set up for Fireworks through the gateway: NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle" "$OUT"
+assert_eq "a Fireworks-only guest shell check does not look at the Claude token" 0 "$(count_in_log 'CLAUDE_CODE_OAUTH_TOKEN')"
+assert_contains "a Fireworks-only guest shell check deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+assert_no_secret_leak "a Fireworks-only guest shell check"
+
+new_gateway_case test-base
+mkdir -p "$HOME_DIR/.config/secrets"
 print -r -- "$FAKE_FIREWORKS other" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_cog new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude --no-codex
 assert_eq "a Fireworks key file with two words fails" 1 "$RC"
 assert_contains "a Fireworks key file with two words says so" "more than one word" "$OUT"
+assert_contains "a Fireworks key file with two words names the file" "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY holds more than one word" "$OUT"
 assert_eq "a Fireworks key file with two words creates no VM" 0 "$(count_in_log clone)"
+assert_eq "a Fireworks key file with two words registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
+assert_eq "a Fireworks key file with two words never reaches limactl past the base check" 0 "$(count_in_log setup-)"
 assert_no_secret_leak "a Fireworks key file with two words"
 
 new_gateway_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 : > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_cog new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude --no-codex
 assert_eq "an empty Fireworks key file fails" 1 "$RC"
 assert_eq "an empty Fireworks key file creates no VM" 0 "$(count_in_log clone)"
 
 new_gateway_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
 ln -s "$HOME_DIR/.config/secrets/missing" "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_cog new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog new t1 --no-repo --no-claude --no-codex
 assert_eq "a dangling Fireworks key link fails" 1 "$RC"
 assert_contains "a dangling Fireworks key link says it is not a regular file" "is not a regular file" "$OUT"
 assert_eq "a dangling Fireworks key link creates no VM" 0 "$(count_in_log clone)"
 
 new_gateway_case test-base
 mkdir -p "$HOME_DIR/.config/secrets"
-print -r -- "$FAKE_FIREWORKS other" > "$HOME_DIR/.config/secrets/FIREWORKS_API_KEY"
-run_cog new t1 --no-repo --no-codex-auth
-assert_eq "a bad Fireworks key file fails with the Claude token still to ask for" 1 "$RC"
-assert_contains "a bad Fireworks key file is reported" "more than one word" "$OUT"
-assert_eq "a bad Fireworks key file is reported before the Claude token is asked for" 0 \
-    "$([[ $OUT == *'keeps the token for next time'* ]] && echo 1 || echo 0)"
-assert_no_secret_leak "a bad Fireworks key file before the Claude prompt"
-
-new_gateway_case test-base
-mkdir -p "$HOME_DIR/.config/secrets"
-print -r -- "$FAKE_CLAUDE" > "$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN"
-run_cog new t1 --no-repo --no-codex-auth
-assert_eq "new reuses the saved Claude token" 0 "$RC"
+print -r -- "$FAKE_LEGACY" > "$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN"
+run_cog new t1 --no-repo --no-codex
+assert_eq "new succeeds with an old Claude token file on the Mac" 0 "$RC"
 claude_call=$(grep -n 'CLAUDE_CODE_OAUTH_TOKEN' "$STATE/limactl.log" | head -1 | cut -d: -f1)
-assert_eq "the saved Claude token reaches setup-secrets" "$FAKE_CLAUDE" "$(stdin_of "$claude_call")"
+assert_eq "new installs the placeholder, not the old token file" "cog" "$(stdin_of "$claude_call")"
+assert_eq "no call carries the old Claude token file's content" 0 "$(cat "$STATE"/calls/*(N.) | grep -c -e "$FAKE_LEGACY" || true)"
+assert_eq "new leaves the old Claude token file alone" "$FAKE_LEGACY" "$(<"$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN")"
+
+new_case test-base
+POOL_SEED=none
+start_gateway
+run_cog new t1 --no-repo --no-codex
+assert_eq "an unconfigured Claude pool stops new" 1 "$RC"
+assert_contains "an unconfigured pool says to add an account" "the Claude pool has no account; run cog account add claude NAME, or pass --no-claude" "$OUT"
+assert_eq "an unconfigured pool changes no VM" 0 "$(grep -vc '^list ' "$STATE/limactl.log" || true)"
+assert_eq "an unconfigured pool registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
+assert_no_secret_leak "new with an unconfigured Claude pool"
+
+new_case test-base
+POOL_SEED=unusable
+start_gateway
+run_cog new t1 --no-repo --no-codex
+assert_eq "an unusable Claude pool stops new" 1 "$RC"
+assert_contains "an unusable pool gives its reason" "the Claude pool is not usable: account work is accessible to group or other; fix that (cog account rm claude NAME removes an account), or pass --no-claude" "$OUT"
+assert_eq "an unusable pool changes no VM" 0 "$(grep -vc '^list ' "$STATE/limactl.log" || true)"
+assert_eq "an unusable pool registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
+assert_no_secret_leak "new with an unusable Claude pool"
+
+new_case test-base
+POOL_SEED=unusable
+start_gateway
+chmod 600 "$GATEWAY_ROOT/secrets/claude-pool/work"
+run_cog new t1 --no-repo --no-codex
+assert_eq "a pool entry that was fixed by hand counts at the next new" 0 "$RC"
+
+new_case test-base
+POOL_SEED=none
+start_gateway
+run_cog new t1 --no-repo --no-claude --no-codex
+assert_eq "--no-claude needs no pool" 0 "$RC"
 
 new_gateway_case test-base
 print -r -- '[]' > "$HOME_DIR/.codex/auth.json"
@@ -1374,7 +1507,7 @@ new_gateway_case test-base
 EXTRA_ENV+=(COG_GITHUB_WEB_URL=https://github.com)
 unseed_auth shields/dotfiles
 : > "$STATE/gh-fail"
-run_cog new t1 --no-claude-token --no-codex-auth
+run_cog new t1 --no-claude --no-codex
 assert_eq "new infers the GitHub origin" 0 "$RC"
 assert_contains "new says where the repository comes from" "using shields/dotfiles from the origin of this checkout" "$OUT"
 assert_eq "the inferred public repository needs no grant" '{}' "$(instance_query t1 .grants)"
@@ -1406,7 +1539,7 @@ register_vm t1
 EXTRA_ENV+=(LIMA_STUB_SNAPSHOT=delete)
 run_cog new t1 --repo shields/dotfiles
 assert_eq "a failed registration stops new" 1 "$RC"
-assert_contains "a failed registration says so" "cannot register t1 with the GitHub gateway" "$OUT"
+assert_contains "a failed registration says why" "cannot register t1 with the gateway: VM is already registered" "$OUT"
 assert_contains "a failed registration deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 assert_eq "a failed registration leaves no instance" 0 "$(grep -cx t1 "$STATE/instances" || true)"
 assert_eq "a failed registration leaves the earlier registration alone" '{"disabled":false,"revision":0}' \
@@ -1431,6 +1564,61 @@ run_cog new t1 --repo shields/dotfiles
 assert_eq "a failed relay probe stops new" 1 "$RC"
 assert_eq "a failed relay probe disables gateway access" true "$(instance_query t1 .disabled)"
 assert_eq "a failed relay probe installs no secret" 0 "$(count_in_log setup-secrets)"
+assert_eq "a failed GitHub relay probe runs no model wiring" 0 "$(count_in_log setup-model-gateway)"
+
+new_gateway_case test-base
+EXTRA_ENV+=(LIMA_STUB_FAIL=setup-model-gateway LIMA_STUB_SNAPSHOT=delete)
+run_cog new t1 --repo shields/dotfiles
+assert_eq "a failed model wiring stops new" 1 "$RC"
+assert_contains "a failed model wiring says to rebuild the base" "a base built by an older cog lacks this wiring, so run cog base again" "$OUT"
+assert_eq "a failed model wiring disables gateway access" '{"disabled":true,"grants":{}}' "$(instance_query t1 '{disabled, grants}')"
+assert_contains "a failed model wiring deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+delete_call=$(grep -n '^delete ' "$STATE/limactl.log" | head -1 | cut -d: -f1)
+assert_eq "a failed model wiring disables access before it deletes the VM" true \
+    "$(jq -r '.instances[0].disabled' "$STATE/snapshots/$delete_call.json")"
+assert_eq "a failed model wiring runs no Anthropic probe" 0 "$(count_in_log api.anthropic.com)"
+assert_eq "a failed model wiring installs no secret" 0 "$(count_in_log setup-secrets)"
+assert_no_secret_leak "a failed model wiring"
+
+new_gateway_case test-base
+EXTRA_ENV+=(LIMA_STUB_FAIL=api.anthropic.com/__cog__/health LIMA_STUB_SNAPSHOT=delete)
+run_cog new t1 --repo shields/dotfiles
+assert_eq "a failed Anthropic probe stops new" 1 "$RC"
+assert_contains "a failed Anthropic probe says to rebuild the base" "run cog base again" "$OUT"
+assert_eq "a failed Anthropic probe disables gateway access" '{"disabled":true,"grants":{}}' "$(instance_query t1 '{disabled, grants}')"
+assert_contains "a failed Anthropic probe deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+delete_call=$(grep -n '^delete ' "$STATE/limactl.log" | head -1 | cut -d: -f1)
+assert_eq "a failed Anthropic probe disables access before it deletes the VM" true \
+    "$(jq -r '.instances[0].disabled' "$STATE/snapshots/$delete_call.json")"
+assert_eq "a failed Anthropic probe installs no secret" 0 "$(count_in_log setup-secrets)"
+assert_no_secret_leak "a failed Anthropic probe"
+
+for guest_case in "ca|NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle" \
+    "token|CLAUDE_CODE_OAUTH_TOKEN is not exported as the placeholder cog" \
+    "|zsh did not run to the end of the check"; do
+    new_gateway_case test-base
+    guest_words=${guest_case%%|*}
+    [[ -z $guest_words ]] || guest_words+=$'\ndone'
+    EXTRA_ENV+=("LIMA_STUB_GUEST_CHECK=$guest_words" LIMA_STUB_SNAPSHOT=delete)
+    run_cog new t1 --repo shields/dotfiles
+    assert_eq "a guest shell that fails '${guest_case%%|*}' stops new" 1 "$RC"
+    assert_contains "a guest shell that fails '${guest_case%%|*}' says what is missing" "${guest_case#*|}" "$OUT"
+    assert_contains "a guest shell that fails '${guest_case%%|*}' says to update the dotfiles and run cog base" \
+        "update the dotfiles checkout and run cog base again" "$OUT"
+    assert_eq "a guest shell that fails '${guest_case%%|*}' disables gateway access" '{"disabled":true,"grants":{}}' "$(instance_query t1 '{disabled, grants}')"
+    assert_contains "a guest shell that fails '${guest_case%%|*}' deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+    assert_eq "a guest shell that fails '${guest_case%%|*}' opens no shell" 0 "$(count_in_log 'shell --workdir')"
+    assert_no_secret_leak "a guest shell that fails '${guest_case%%|*}'"
+done
+
+new_gateway_case test-base
+EXTRA_ENV+=(LIMA_STUB_FAIL="exec zsh -i -c" LIMA_STUB_SNAPSHOT=delete)
+run_cog new t1 --repo shields/dotfiles
+assert_eq "a failing guest shell check stops new" 1 "$RC"
+assert_contains "a failing guest shell check says that limactl failed, not that the dotfiles lack the exports" \
+    "(limactl shell failed with status 1); run cog new again" "$OUT"
+assert_contains "a failing guest shell check says to run cog base again" "run cog base again" "$OUT"
+assert_contains "a failing guest shell check deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
 
 new_gateway_case test-base
 EXTRA_ENV+=(LIMA_STUB_FAIL="brew upgrade")
@@ -1487,6 +1675,38 @@ assert_eq "rm of a VM the gateway does not know fails" 1 "$RC"
 assert_contains "rm of an unknown VM says why" "VM is not active" "$OUT"
 assert_eq "rm of an unknown VM deletes nothing" 0 "$(count_in_log delete)"
 
+new_case test-base t1 t2
+prepare_gateway
+gateway_state register lima:t1 "$HOME_DIR/.lima/t1/sock/github-aa-11.sock"
+gateway_state register lima:t2 "$GATEWAY_ROOT/state/sock/github-new.sock"
+start_gateway
+assert_eq "the daemon disables a VM registered outside the socket directory" '{"disabled":true,"grants":{}}' \
+    "$(instance_query t1 '{disabled, grants}')"
+assert_eq "the daemon keeps a VM registered in the socket directory" false "$(instance_query t2 .disabled)"
+assert_eq "the daemon says which VM an older cog registered" 1 \
+    "$([[ "$(<"$STATE/gateway.err")" == "cog: t1 ($(instance_query t1 .id | tr -d '"')) was registered by an older cog; its gateway access is disabled; run cog rm t1 and make it again with cog new" ]] && echo 1 || echo 0)"
+assert_eq "the daemon listens for the VM that stays" 1 "$([[ -S $GATEWAY_ROOT/state/sock/github-new.sock ]] && echo 1 || echo 0)"
+run_cog disable t1
+assert_eq "disable of an already disabled VM fails" 1 "$RC"
+assert_contains "disable of an already disabled VM says why" "VM is not active" "$OUT"
+run_cog gateway "disable" t1
+assert_eq "the disable verb of gateway is a usage error" 1 "$RC"
+assert_eq "the disable verb of gateway names the gateway verbs" "cog: usage: cog gateway serve|health" "$OUT"
+run_cog rm t1
+assert_eq "rm refuses a VM of that name which lacks the registered socket" 1 "$RC"
+assert_contains "rm of a VM which lacks the registered socket says why" "VM is not active" "$OUT"
+assert_eq "rm of a VM which lacks the registered socket deletes nothing" 0 "$(count_in_log delete)"
+printf 't1\t%s\n' "$HOME_DIR/.lima/t1/sock/github-aa-11.sock" > "$STATE/forwards"
+run_cog rm t1
+assert_eq "rm deletes a VM that an older cog registered" 0 "$RC"
+assert_contains "rm of a VM that an older cog registered deletes it" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
+assert_eq "rm of a VM that an older cog registered leaves the other VM" false "$(instance_query t2 .disabled)"
+assert_eq "rm of a VM that an older cog registered leaves the other VM's socket" 1 \
+    "$([[ -S $GATEWAY_ROOT/state/sock/github-new.sock ]] && echo 1 || echo 0)"
+run_cog rm t2
+assert_eq "rm of the registered VM succeeds" 0 "$RC"
+assert_eq "rm removes the VM's socket file" 0 "$([[ -e $GATEWAY_ROOT/state/sock/github-new.sock ]] && echo 1 || echo 0)"
+
 # --- 10. only the final shell reads cog's stdin ---
 new_case test-base
 stdin_marker
@@ -1518,26 +1738,6 @@ archive_modes() {
 }
 
 for umask_value in 022 000 077; do
-    new_case
-    RUN_UMASK=$umask_value
-    run_cog claude-token
-    assert_eq "claude-token succeeds under umask $umask_value" 0 "$RC"
-    assert_eq "claude-token keeps the token under umask $umask_value" "$FAKE_CLAUDE" "$(<"$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN")"
-    assert_eq "claude-token under umask $umask_value makes everything it writes private" "" "$(tree_violations "$HOME_DIR/.config")"
-    assert_eq "claude-token under umask $umask_value leaves only the token file" CLAUDE_CODE_OAUTH_TOKEN "$(ls -A "$HOME_DIR/.config/secrets")"
-    assert_no_secret_leak "claude-token under umask $umask_value"
-
-    new_case
-    RUN_UMASK=$umask_value
-    mkdir -p "$HOME_DIR/.config/secrets"
-    chmod 755 "$HOME_DIR/.config/secrets"
-    print -r -- old-token > "$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN"
-    chmod 644 "$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN"
-    run_cog claude-token
-    assert_eq "claude-token replaces a token under umask $umask_value" "$FAKE_CLAUDE" "$(<"$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN")"
-    assert_eq "claude-token tightens the modes of what was there under umask $umask_value" "" "$(tree_violations "$HOME_DIR/.config/secrets")"
-    assert_eq "claude-token replacing a token leaves no temporary file under umask $umask_value" CLAUDE_CODE_OAUTH_TOKEN "$(ls -A "$HOME_DIR/.config/secrets")"
-
     new_case test-base
     RUN_UMASK=$umask_value
     start_gateway
@@ -1545,7 +1745,9 @@ for umask_value in 022 000 077; do
     assert_eq "new succeeds under umask $umask_value" 0 "$RC"
     assert_eq "the gateway's state under umask $umask_value is private" "" "$(tree_violations "$GATEWAY_ROOT/state")"
     assert_eq "the gateway's secrets under umask $umask_value are private" "" "$(tree_violations "$GATEWAY_ROOT/secrets")"
-    assert_eq "the VM's socket directory under umask $umask_value is private" "" "$(tree_violations "$HOME_DIR/.lima/t1/sock")"
+    assert_eq "the socket directory under umask $umask_value is private" "" "$(tree_violations "$GATEWAY_ROOT/state/sock")"
+    assert_eq "the socket directory under umask $umask_value holds the VM's socket" 1 \
+        "$([[ -d $GATEWAY_ROOT/state/sock && -S "$(instance_query t1 .socket | tr -d '"')" ]] && echo 1 || echo 0)"
     assert_eq "the state directory holds the database and the admin socket under umask $umask_value" 1 \
         "$([[ -s $GATEWAY_ROOT/state/state.sqlite && -S $GATEWAY_ROOT/state/admin.sock ]] && echo 1 || echo 0)"
 
@@ -1565,12 +1767,12 @@ for umask_value in 022 000 077; do
 done
 
 # --- 12. a signal at each stage of new and base cleans up ---
-# new_signal_stage SIGNAL STATUS STAGE BLOCK REGISTERED ARGS...: SIGNAL reaches
-# new while the limactl call that contains BLOCK is held. REGISTERED is 1 when
-# the VM is registered with the gateway by then.
+# new_signal_stage SIGNAL STATUS STAGE BLOCK ARGS...: SIGNAL reaches new while
+# the limactl call that contains BLOCK is held. Each such call comes after the
+# VM is registered with the gateway.
 new_signal_stage() {
-    local signal=$1 expected=$2 stage=$3 block=$4 registered=$5 desc delete_call
-    shift 5
+    local signal=$1 expected=$2 stage=$3 block=$4 desc delete_call
+    shift 4
     desc="$signal $stage"
     new_gateway_case test-base
     EXTRA_ENV+=(LIMA_STUB_BLOCK="$block" LIMA_STUB_SNAPSHOT=delete)
@@ -1579,15 +1781,11 @@ new_signal_stage() {
     assert_contains "$desc: new says it removes the VM" "removing t1 after the failure" "$OUT"
     assert_contains "$desc: new deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
     assert_eq "$desc: no instance is left" 0 "$(grep -cx t1 "$STATE/instances" || true)"
-    if (( registered )); then
-        assert_eq "$desc: gateway access is disabled and its grants removed" '{"disabled":true,"grants":{}}' \
-            "$(instance_query t1 '{disabled, grants}')"
-        delete_call=$(grep -n '^delete ' "$STATE/limactl.log" | head -1 | cut -d: -f1)
-        assert_eq "$desc: access is disabled before the VM is deleted" true \
-            "$(jq -r '.instances[0].disabled' "$STATE/snapshots/$delete_call.json")"
-    else
-        assert_eq "$desc: nothing was registered" null "$(instance_query t1 .id)"
-    fi
+    assert_eq "$desc: gateway access is disabled and its grants removed" '{"disabled":true,"grants":{}}' \
+        "$(instance_query t1 '{disabled, grants}')"
+    delete_call=$(grep -n '^delete ' "$STATE/limactl.log" | head -1 | cut -d: -f1)
+    assert_eq "$desc: access is disabled before the VM is deleted" true \
+        "$(jq -r '.instances[0].disabled' "$STATE/snapshots/$delete_call.json")"
     assert_eq "$desc: the daemon stays silent" "" "$(<"$STATE/gateway.err")"
     assert_no_secret_leak "$desc"
 }
@@ -1595,15 +1793,19 @@ new_signal_stage() {
 for entry in HUP:129 INT:130 TERM:143; do
     signal=${entry%%:*}
     expected=${entry#*:}
-    new_signal_stage "$signal" "$expected" "after the clone" "{{.Dir}} t1" 0 --repo shields/dotfiles
-    new_signal_stage "$signal" "$expected" "after the registration" "start --tty=false t1" 1 --repo shields/dotfiles
-    new_signal_stage "$signal" "$expected" "during the Claude token install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" 1 --repo shields/other
-    new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" 1 --repo shields/other
+    new_signal_stage "$signal" "$expected" "while the Lima config is edited" "edit --tty=false --set" --repo shields/dotfiles
+    new_signal_stage "$signal" "$expected" "after the registration" "start --tty=false t1" --repo shields/dotfiles
+    new_signal_stage "$signal" "$expected" "during the model gateway wiring" "setup-model-gateway" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the Anthropic probe" "https://api.anthropic.com/__cog__/health" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the repository clone" "git clone" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the Claude placeholder install" "setup-secrets CLAUDE_CODE_OAUTH_TOKEN" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the Codex login install" "setup-secrets CODEX_AUTH" --repo shields/other
+    new_signal_stage "$signal" "$expected" "during the guest shell check" "exec zsh -i -c" --repo shields/other
 done
 
 new_gateway_case test-base
 EXTRA_ENV+=(LIMA_STUB_BLOCK="start --tty=false t1" LIMA_STUB_SNAPSHOT=delete)
-run_cog_signal --dead-output HUP new t1 --no-repo --no-claude-token --no-codex-auth
+run_cog_signal --dead-output HUP new t1 --no-repo --no-claude --no-codex
 assert_eq "a hangup with no reader for the output ends new with the hangup status" 129 "$RC"
 assert_eq "a hangup with no reader for the output disables gateway access" true "$(instance_query t1 .disabled)"
 assert_contains "a hangup with no reader for the output deletes the clone" "delete --tty=false --force t1" "$(<"$STATE/limactl.log")"
@@ -1645,8 +1847,8 @@ for entry in HUP:129 INT:130 TERM:143; do
 done
 
 # --- 13. a file that would be quoted by a parse error is not quoted ---
-# The Codex login and the token files hold secrets, and the tool that parses
-# them may print the text around a syntax error.
+# The Codex login holds secrets, and the tool that parses it may print the text
+# around a syntax error.
 codex_contents=(
     "{\"tokens\": {\"access_token\": \"$FAKE_CODEX\""
     "$FAKE_CODEX"
@@ -1659,48 +1861,12 @@ codex_contents=(
 for content in "${codex_contents[@]}"; do
     new_gateway_case test-base
     print -rn -- "$content" > "$HOME_DIR/.codex/auth.json"
-    run_cog new t1 --no-repo --no-claude-token
+    run_cog new t1 --no-repo --no-claude
     assert_eq "a Codex login that is not a JSON object fails new" 1 "$RC"
     assert_contains "a Codex login that is not a JSON object says so" "is not a JSON object" "$OUT"
     assert_eq "a Codex login that is not a JSON object creates no VM" 0 "$(count_in_log clone)"
     assert_eq "a Codex login that is not a JSON object registers no VM" 0 "$(gateway_dump | jq '.instances | length')"
     assert_no_secret_leak "a Codex login that is not a JSON object"
-done
-
-claude_contents=(
-    "$FAKE_CLAUDE other"
-    "$FAKE_CLAUDE"$'\n'"second-line"
-    "$FAKE_CLAUDE"$'\t'"second"
-    "other $FAKE_CLAUDE"
-)
-for content in "${claude_contents[@]}"; do
-    new_gateway_case test-base
-    mkdir -p "$HOME_DIR/.config/secrets"
-    print -rn -- "$content" > "$HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN"
-    run_cog new t1 --no-repo --no-codex-auth
-    assert_eq "a Claude token file with two words fails new" 1 "$RC"
-    assert_contains "a Claude token file with two words says so" "holds more than one token" "$OUT"
-    assert_eq "a Claude token file with two words creates no VM" 0 "$(count_in_log clone)"
-    assert_no_secret_leak "a Claude token file with two words"
-done
-
-# The prompt reads one line.
-multiline=$'*\n*'
-for content in "${(@)claude_contents:#$~multiline}"; do
-    new_gateway_case test-base
-    print -rn -- "$content" > "$STATE/prompt"
-    run_cog new t1 --no-repo --no-codex-auth
-    assert_eq "a typed Claude token with two words fails new" 1 "$RC"
-    assert_contains "a typed Claude token with two words says so" "has spaces in it" "$OUT"
-    assert_eq "a typed Claude token with two words creates no VM" 0 "$(count_in_log clone)"
-    assert_no_secret_leak "a typed Claude token with two words"
-
-    new_case
-    print -rn -- "$content" > "$STATE/prompt"
-    run_cog claude-token
-    assert_eq "claude-token with two words fails" 1 "$RC"
-    assert_eq "claude-token with two words writes no file" no "$([[ -e $HOME_DIR/.config/secrets/CLAUDE_CODE_OAUTH_TOKEN ]] && echo yes || echo no)"
-    assert_no_secret_leak "claude-token with two words"
 done
 
 assert_eq "no case called security" 0 "$(cat "$TMPBASE"/s[0-9]*/security.log(N) </dev/null | wc -l | tr -d ' ')"

@@ -13,12 +13,15 @@
 // limitations under the License.
 
 import { randomUUID } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { AppAuth, defaultApiUrl, type DeviceCodePrompt } from "./auth.ts";
 import { ensureCertificates, type Certificates } from "./cert.ts";
+import { accountName, type AccountSnapshot } from "./pool.ts";
 import {
   compareCodeUnits,
   cogPrefix,
@@ -39,8 +42,10 @@ export type Env = Readonly<Record<string, string | undefined>>;
 
 export interface Locations {
   state: string;
+  sockets: string;
   secrets: string;
   admin: string;
+  pool: string;
 }
 
 // HOME comes from the environment, not from the passwd entry.
@@ -49,8 +54,10 @@ export function locations(env: Env): Locations {
   if (root) {
     return {
       state: path.join(root, "state"),
+      sockets: path.join(root, "state", "sock"),
       secrets: path.join(root, "secrets"),
       admin: path.join(root, "state", "admin.sock"),
+      pool: path.join(root, "secrets", "claude-pool"),
     };
   }
   const home = env.HOME;
@@ -58,10 +65,13 @@ export function locations(env: Env): Locations {
     throw new Error("HOME is not set");
   }
   const state = path.join(home, ".local", "state", "cog");
+  const secrets = path.join(home, ".config", "secrets", "cog");
   return {
     state,
-    secrets: path.join(home, ".config", "secrets", "cog"),
+    sockets: path.join(state, "sock"),
+    secrets,
     admin: path.join(state, "admin.sock"),
+    pool: path.join(secrets, "claude-pool"),
   };
 }
 
@@ -137,21 +147,49 @@ export function parseEdit(
   };
 }
 
-async function adminCall(
+const poolAnswerLimit = 1_048_576;
+const fireworksKeyAnswerLimit = 4096;
+const acknowledgementLimit = 4096;
+
+async function adminRequest(
   socket: string,
   route: string,
   method: string,
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+  limit: number,
+): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
     const request = http.request(
       { socketPath: socket, path: route, method, timeout: 10_000 },
       (response) => {
-        response.resume();
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > limit) {
+            reject(new Error("gateway administration answer too big"));
+            request.destroy();
+          } else {
+            chunks.push(chunk);
+          }
+        });
         response.on("end", () => {
           if (response.statusCode === 200) {
-            resolve();
+            resolve(Buffer.concat(chunks).toString("utf8"));
+          } else if (response.statusCode === 404) {
+            reject(
+              new Error(
+                "the running gateway is older than this cog; run ./install.sh in the cog checkout",
+              ),
+            );
           } else {
             reject(new Error("gateway administration failed"));
+          }
+        });
+        // An answer that is cut off ends with "close" and no "end", and the
+        // request's timeout stops counting once its socket is gone.
+        response.once("close", () => {
+          if (!response.complete) {
+            reject(new Error("gateway administration answer was cut off"));
           }
         });
       },
@@ -164,8 +202,150 @@ async function adminCall(
   });
 }
 
+async function adminCall(
+  socket: string,
+  route: string,
+  method: string,
+): Promise<void> {
+  await adminRequest(socket, route, method, acknowledgementLimit);
+}
+
+export interface PoolStatus {
+  state: "unconfigured" | "unusable" | "usable";
+  reason: string | null;
+  accounts: AccountSnapshot[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function parseAccount(value: unknown): AccountSnapshot {
+  if (
+    !isRecord(value) ||
+    typeof value.name !== "string" ||
+    !accountName.test(value.name) ||
+    typeof value.held !== "boolean" ||
+    !(value.heldUntil === null || finite(value.heldUntil)) ||
+    !Array.isArray(value.buckets)
+  ) {
+    throw new Error("the gateway answered with an invalid pool account");
+  }
+  const buckets = value.buckets.map((bucket: unknown) => {
+    if (
+      !isRecord(bucket) ||
+      typeof bucket.bucket !== "string" ||
+      !finite(bucket.utilization) ||
+      !finite(bucket.expires)
+    ) {
+      throw new Error("the gateway answered with an invalid pool bucket");
+    }
+    return {
+      bucket: bucket.bucket,
+      utilization: bucket.utilization,
+      expires: bucket.expires,
+    };
+  });
+  return {
+    name: value.name,
+    held: value.held,
+    heldUntil: value.heldUntil,
+    buckets,
+  };
+}
+
+function parsePoolStatus(text: string): PoolStatus {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("the gateway answered with invalid JSON");
+  }
+  if (
+    !isRecord(raw) ||
+    (raw.state !== "unconfigured" &&
+      raw.state !== "unusable" &&
+      raw.state !== "usable") ||
+    !Array.isArray(raw.accounts)
+  ) {
+    throw new Error("the gateway answered with an invalid pool state");
+  }
+  const { state } = raw;
+  const reason: unknown = raw.reason;
+  let checked: string | null = null;
+  if (state === "unusable") {
+    if (typeof reason !== "string" || reason === "") {
+      throw new Error("the gateway answered with an invalid pool reason");
+    }
+    checked = reason;
+  } else if (reason !== null) {
+    throw new Error("the gateway answered with an invalid pool reason");
+  }
+  if (state !== "usable" && raw.accounts.length > 0) {
+    throw new Error("the gateway listed accounts of a pool it cannot use");
+  }
+  return {
+    state,
+    reason: checked,
+    accounts: raw.accounts.map((account: unknown) => parseAccount(account)),
+  };
+}
+
+export interface FireworksKeyStatus {
+  state: "missing" | "unusable" | "usable";
+  reason: string | null;
+}
+
+function parseFireworksKeyStatus(text: string): FireworksKeyStatus {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("the gateway answered with invalid JSON");
+  }
+  if (
+    !isRecord(raw) ||
+    (raw.state !== "missing" &&
+      raw.state !== "unusable" &&
+      raw.state !== "usable")
+  ) {
+    throw new Error("the gateway answered with an invalid Fireworks key state");
+  }
+  const { state } = raw;
+  const reason: unknown = raw.reason;
+  if (state === "unusable") {
+    if (typeof reason !== "string" || reason === "") {
+      throw new Error(
+        "the gateway answered with an invalid Fireworks key reason",
+      );
+    }
+    return { state, reason };
+  }
+  if (reason !== null) {
+    throw new Error(
+      "the gateway answered with an invalid Fireworks key reason",
+    );
+  }
+  return { state, reason: null };
+}
+
+export const socketName = /^github-[0-9a-f-]+\.sock$/;
+
 export type LogRow =
   (AccessLog & { kind: "request" }) | (PolicyEvent & { kind: "policy" });
+
+// A registration that fails in the caller's process, before the daemon is
+// asked for anything, so the daemon's log holds nothing about it.
+export class RegistrationFailedHere extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "RegistrationFailedHere";
+  }
+}
 
 export class Control {
   readonly location: Locations;
@@ -211,6 +391,58 @@ export class Control {
     await adminCall(this.location.admin, "/health", "GET");
   }
 
+  // Whether anything accepts a connection on the admin socket, whatever it
+  // answers. A missing file or one that nothing listens on (a killed daemon
+  // leaves it) is no daemon. macOS refuses a connection to a listener whose
+  // queue of waiting connections is full with the same ECONNREFUSED, so such
+  // a daemon reads as none. Any other error throws, since reading it as "no
+  // daemon" would let a second daemon remove the sockets of the first. Bun
+  // reports a connection that the Seatbelt profile denies as ECONNREFUSED, so
+  // the profile's rule for this connect is what keeps a denial from reading as
+  // "no daemon".
+  async daemonListening(): Promise<boolean> {
+    const socket = this.location.admin;
+    return await new Promise<boolean>((resolve, reject) => {
+      const connection = net.connect({ path: socket });
+      const finish = (listening: boolean): void => {
+        connection.destroy();
+        resolve(listening);
+      };
+      connection.once("connect", () => {
+        finish(true);
+      });
+      connection.once("error", (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ECONNREFUSED") {
+          finish(false);
+        } else {
+          connection.destroy();
+          reject(
+            new Error(
+              `cannot tell whether a gateway listens on ${socket}: ${error.code ?? "error"}`,
+            ),
+          );
+        }
+      });
+    });
+  }
+
+  async pool(): Promise<PoolStatus> {
+    return parsePoolStatus(
+      await adminRequest(this.location.admin, "/pool", "GET", poolAnswerLimit),
+    );
+  }
+
+  async fireworksKey(): Promise<FireworksKeyStatus> {
+    return parseFireworksKeyStatus(
+      await adminRequest(
+        this.location.admin,
+        "/fireworks-key",
+        "GET",
+        fireworksKeyAnswerLimit,
+      ),
+    );
+  }
+
   async sync(): Promise<void> {
     await adminCall(this.location.admin, "/sync", "POST");
   }
@@ -223,22 +455,74 @@ export class Control {
     return instance;
   }
 
+  ensureSocketDirectory(): void {
+    const directory = this.location.sockets;
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (!lstatSync(directory).isDirectory()) {
+      throw new Error(`${directory} is not a directory`);
+    }
+    chmodSync(directory, 0o700);
+  }
+
+  // The daemon's profile lets it listen only in the socket directory.
+  disableOutsideSocketDirectory(): Instance[] {
+    const outside = this.state
+      .active()
+      .filter(
+        (instance) => path.dirname(instance.socket) !== this.location.sockets,
+      );
+    for (const instance of outside) {
+      this.state.disable(instance.name, this.actor);
+    }
+    return outside;
+  }
+
+  // The runtime removes a socket when its listener closes, so only a daemon
+  // that was killed leaves one behind.
+  removeStaleSockets(): string[] {
+    const wanted = new Set(
+      this.state
+        .active()
+        .filter(
+          (instance) => path.dirname(instance.socket) === this.location.sockets,
+        )
+        .map((instance) => path.basename(instance.socket)),
+    );
+    const removed: string[] = [];
+    for (const entry of readdirSync(this.location.sockets)) {
+      if (!socketName.test(entry) || wanted.has(entry)) {
+        continue;
+      }
+      const file = path.join(this.location.sockets, entry);
+      if (!lstatSync(file).isDirectory()) {
+        rmSync(file);
+        removed.push(file);
+      }
+    }
+    return removed;
+  }
+
   // The daemon must listen on the VM's socket before the VM starts, so the
   // registration is undone when the daemon cannot be told.
-  async register(name: string, limaDirectory: string): Promise<Instance> {
-    if (!path.isAbsolute(limaDirectory)) {
-      throw new Error("Lima instance directory must be absolute");
-    }
-    ensureCertificates(this.location.secrets);
+  async register(name: string): Promise<Instance> {
     const socket = path.join(
-      limaDirectory,
-      "sock",
+      this.location.sockets,
       `github-${randomUUID()}.sock`,
     );
-    if (Buffer.byteLength(socket) > 100) {
-      throw new Error("VM path is too long for a Unix socket");
+    let instance: Instance;
+    try {
+      if (Buffer.byteLength(socket) > 100) {
+        throw new Error("the state directory is too long for a Unix socket");
+      }
+      ensureCertificates(this.location.secrets);
+      this.ensureSocketDirectory();
+      instance = this.state.register(name, socket, this.actor);
+    } catch (error) {
+      throw new RegistrationFailedHere(
+        error instanceof Error ? error.message : "unknown error",
+        { cause: error },
+      );
     }
-    const instance = this.state.register(name, socket, this.actor);
     try {
       await this.sync();
     } catch (error) {
@@ -380,11 +664,22 @@ export class Control {
   }
 
   // The requests and policy changes of a VM, the oldest first.
-  logs(instance: Instance, limit: number): LogRow[] {
+  logs(
+    instance: Instance,
+    limit: number,
+    also: readonly string[] = [],
+  ): LogRow[] {
+    const recent = this.state.logs(instance.id, limit);
+    const listed = new Set(recent.map((entry) => entry.id));
+    const older = this.state.logsById(
+      instance.id,
+      also.filter((id) => !listed.has(id)),
+    );
     return [
-      ...this.state
-        .logs(instance.id, limit)
-        .map((entry) => ({ kind: "request" as const, ...entry })),
+      ...[...recent, ...older].map((entry) => ({
+        kind: "request" as const,
+        ...entry,
+      })),
       ...this.state
         .events(instance.id, limit)
         .map((entry) => ({ kind: "policy" as const, ...entry })),

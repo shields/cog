@@ -52,12 +52,12 @@ type BaseContext = LifecycleContext<
 
 const markerReaders = [
   [".zshrc", "/etc/cog-throwaway"],
-  [".zshrc", "/etc/cog-github-gateway"],
-  [".zshenv", "/etc/cog-github-gateway"],
-  [".zsh.d/wt.zsh", "/etc/cog-github-gateway"],
-  [".codex/hooks/git_guard.py", "/etc/cog-github-gateway"],
+  [".zshrc", "/etc/cog-gateway"],
+  [".zshenv", "/etc/cog-gateway"],
+  [".zsh.d/wt.zsh", "/etc/cog-gateway"],
+  [".codex/hooks/git_guard.py", "/etc/cog-gateway"],
   ["tools/configure_codex.py", "/etc/cog-throwaway"],
-  ["provision.sh", "/etc/cog-github-gateway"],
+  ["provision.sh", "/etc/cog-gateway"],
 ] as const;
 
 function parseArgs(
@@ -172,7 +172,7 @@ function checkMarkerReaders(tree: string): void {
   for (const [file, marker] of markerReaders) {
     if (!hasMarker(path.join(tree, file), marker)) {
       throw new CogError(
-        `${file} in the dotfiles checkout does not name ${marker}, which cog writes; a checkout from before the split reads other markers, so update it`,
+        `${file} in the dotfiles checkout does not name ${marker}, which cog writes; a checkout from before the split or the rename of the gateway marker reads other markers, so update it`,
       );
     }
   }
@@ -213,6 +213,7 @@ function checkGuestScripts(guest: string): void {
     "install-push-instructions.sh",
     "reset-identity.sh",
     "setup-github-gateway",
+    "setup-model-gateway",
     "setup-secrets",
     "throwaway.sh",
   ]) {

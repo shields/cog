@@ -35,6 +35,11 @@ declare module "*/setup-github-gateway" {
   export default text;
 }
 
+declare module "*/setup-model-gateway" {
+  const text: string;
+  export default text;
+}
+
 declare module "*/setup-secrets" {
   const text: string;
   export default text;

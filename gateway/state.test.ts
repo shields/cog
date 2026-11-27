@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, mock, spyOn, test } from "bun:test";
+import { compareCodeUnits } from "./policy.ts";
 import { State } from "./state.ts";
 
 afterEach(() => {
@@ -251,6 +252,27 @@ function withState(run: (state: State) => void): void {
   }
 }
 
+test("a retired socket is that of the newest registration of a name with no active one and no Tailscale cleanup pending", () => {
+  withState((state) => {
+    assert.equal(state.retiredSocket("lima:vm"), null);
+    state.register("lima:vm", "/sock/first.sock", "tester");
+    assert.equal(state.retiredSocket("lima:vm"), null);
+    state.disable("lima:vm", "tester");
+    assert.equal(state.retiredSocket("lima:vm"), "/sock/first.sock");
+    const second = state.register("lima:vm", "/sock/second.sock", "tester");
+    state.beginTailscale(second.id, "key");
+    state.disable("lima:vm", "tester");
+    assert.equal(state.retiredSocket("lima:vm"), null);
+    state.forgetTailscale(second.id);
+    assert.equal(state.retiredSocket("lima:vm"), "/sock/second.sock");
+    assert.equal(state.retiredSocket("lima:other"), null);
+    assert.throws(
+      () => state.disable("lima:vm", "tester", { forRemoval: true }),
+      /VM is not active/,
+    );
+  });
+});
+
 function insertLog(state: State, id: string, createdAt: number): void {
   state.db
     .prepare(
@@ -258,6 +280,86 @@ function insertLog(state: State, id: string, createdAt: number): void {
     )
     .run(id, createdAt);
 }
+
+test("model requests are audited with no repository, and rows from before the model operations still read back", () => {
+  withState((state) => {
+    const instance = state.register(
+      "lima:work",
+      path.join(tmpdir(), "work.sock"),
+      "tester",
+    );
+    state.logDecision({
+      id: "model.claude",
+      instanceId: instance.id,
+      repository: null,
+      operation: "model.claude",
+      refs: [],
+      allowed: true,
+      reason: "pool account work",
+      revision: 0,
+    });
+    state.finish("model.claude", 429, 12, "completed");
+    insertLog(state, "older", Date.now() - day);
+    state.db
+      .prepare("UPDATE access_logs SET instance_id = ? WHERE id = 'older'")
+      .run(instance.id);
+    assert.deepEqual(
+      state
+        .logs(instance.id)
+        .map(({ id, operation, repository, upstreamStatus, outcome }) => ({
+          id,
+          operation,
+          repository,
+          upstreamStatus,
+          outcome,
+        }))
+        .toSorted((a, b) => compareCodeUnits(a.id, b.id)),
+      [
+        {
+          id: "model.claude",
+          operation: "model.claude",
+          repository: null,
+          upstreamStatus: 429,
+          outcome: "completed",
+        },
+        {
+          id: "older",
+          operation: "git.read",
+          repository: null,
+          upstreamStatus: null,
+          outcome: "completed",
+        },
+      ],
+    );
+  });
+});
+
+test("a Fireworks model request is audited with its own operation", () => {
+  withState((state) => {
+    const instance = state.register(
+      "lima:work",
+      path.join(tmpdir(), "work.sock"),
+      "tester",
+    );
+    state.logDecision({
+      id: "model.fireworks",
+      instanceId: instance.id,
+      repository: null,
+      operation: "model.fireworks",
+      refs: [],
+      allowed: true,
+      reason: "fireworks key",
+      revision: 0,
+    });
+    state.finish("model.fireworks", 200, 3, "completed");
+    const [row, ...others] = state.logs(instance.id);
+    assert.deepEqual(others, []);
+    assert.equal(row?.operation, "model.fireworks");
+    assert.equal(row.reason, "fireworks key");
+    assert.equal(row.repository, null);
+    assert.equal(row.upstreamStatus, 200);
+  });
+});
 
 function insertEvent(state: State, id: string, createdAt: number): void {
   state.db
@@ -297,6 +399,65 @@ test("pruning finds expired audit rows through an index on their time", () => {
       plan[0] ?? "",
       /^SEARCH access_logs USING (COVERING )?INDEX access_logs_created \(created_at<\?\)$/,
     );
+  });
+});
+
+test("rows fetched by ID are found through the ID index, not by reading the VM's history", () => {
+  withState((state) => {
+    const prepared: string[] = [];
+    const prepare = state.db.prepare.bind(state.db);
+    spyOn(state.db, "prepare").mockImplementation((sql: string) => {
+      prepared.push(sql);
+      return prepare(sql);
+    });
+    state.logsById("instance", ["a"]);
+    mock.restore();
+    const lookups = prepared.filter((sql) => sql.includes("json_each"));
+    assert.equal(lookups.length, 1);
+    const plan = state.db
+      .prepare(`EXPLAIN QUERY PLAN ${lookups[0] ?? ""}`)
+      .all()
+      .map((row) => row.detail as string)
+      .join("\n");
+    assert.match(
+      plan,
+      /^SEARCH access_logs USING INDEX sqlite_autoindex_access_logs_1 \(id=\?\)$/m,
+    );
+    assert.doesNotMatch(plan, /access_logs_instance_time/);
+  });
+});
+
+test("rows fetched by ID are the asking VM's, once each, and unknown IDs are ignored", () => {
+  withState((state) => {
+    for (const [id, instanceId] of [
+      ["a", "one"],
+      ["b", "two"],
+      ["c", "one"],
+    ] as const) {
+      state.logDecision({
+        id,
+        instanceId,
+        repository: null,
+        operation: "model.claude",
+        refs: [],
+        allowed: true,
+        reason: "granted",
+        revision: 0,
+      });
+    }
+    state.finish("c", 200, 4, "completed");
+    const fetched = (instanceId: string, wanted: string[]) =>
+      state
+        .logsById(instanceId, wanted)
+        .map((row) => `${row.id} ${String(row.durationMs)}`)
+        .toSorted(compareCodeUnits);
+    assert.deepEqual(fetched("one", ["c", "b", "a", "a", "x"]), [
+      "a null",
+      "c 4",
+    ]);
+    assert.deepEqual(fetched("one", ["b"]), []);
+    assert.deepEqual(fetched("one", []), []);
+    assert.deepEqual(fetched("none", ["a", "b", "c"]), []);
   });
 });
 

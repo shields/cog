@@ -14,32 +14,52 @@
 
 import { Gateway } from "../../gateway/server.ts";
 import { CogError } from "../errors.ts";
-import { gatewayName, validName } from "../names.ts";
-import { say } from "../output.ts";
+import { note, say } from "../output.ts";
 import type { Context } from "./context.ts";
 
 async function serve(args: string[], context: Context): Promise<void> {
   if (args.length > 0) {
     throw new CogError("usage: cog gateway serve");
   }
-  // The daemon's sockets and files are private to the user. No other command
-  // sets a umask, since limactl, git and tar run under the caller's.
-  process.umask(0o077);
-  const control = context.gateway();
-  const gateway = new Gateway(control.state, control.auth, {
-    ...control.certificates(),
-    adminSocket: control.location.admin,
-  });
-  await gateway.start();
-  await new Promise<void>((resolve) => {
-    process.once("SIGINT", () => {
-      resolve();
+  // A signal with no handler ends the process wherever it is, and one that
+  // arrives while the certificates are issued would leave their lock behind,
+  // which blocks every later start.
+  const { promise: stopped, resolve } = Promise.withResolvers<undefined>();
+  const stop = (): void => {
+    resolve(undefined);
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    // The daemon's sockets and files are private to the user. No other command
+    // sets a umask, since limactl, git and tar run under the caller's.
+    process.umask(0o077);
+    const control = context.gateway();
+    if (await control.daemonListening()) {
+      throw new CogError(
+        `a gateway is already running: ${control.location.admin} accepts connections`,
+      );
+    }
+    control.ensureSocketDirectory();
+    for (const instance of control.disableOutsideSocketDirectory()) {
+      note(
+        `cog: ${instance.name.replace(/^lima:/, "")} (${instance.id}) was registered by an older cog; its gateway access is disabled; run cog rm ${instance.name.replace(/^lima:/, "")} and make it again with cog new`,
+      );
+    }
+    control.removeStaleSockets();
+    const gateway = new Gateway(control.state, control.auth, {
+      ...control.certificates(),
+      adminSocket: control.location.admin,
+      pool: control.location.pool,
+      fireworksKeyFile: context.config.fireworksKeyFile,
     });
-    process.once("SIGTERM", () => {
-      resolve();
-    });
-  });
-  await gateway.stop();
+    await gateway.start();
+    await stopped;
+    await gateway.stop();
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+  }
 }
 
 export async function gatewayCommand(
@@ -58,15 +78,7 @@ export async function gatewayCommand(
       await context.gateway().health();
       say("ready");
       return;
-    case "disable": {
-      const [name, ...extra] = rest;
-      if (name === undefined || extra.length > 0) {
-        throw new CogError("usage: cog gateway disable NAME");
-      }
-      await context.gateway().disable(gatewayName(validName(name)));
-      return;
-    }
     default:
-      throw new CogError("usage: cog gateway serve|health|disable NAME");
+      throw new CogError("usage: cog gateway serve|health");
   }
 }

@@ -25,6 +25,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { claudeHost, fireworksHost } from "./models.ts";
+
+const leafNames = ["github.com", "api.github.com", claudeHost, fireworksHost];
+
+// A running daemon keeps serving the leaf it loaded, so the leaf is replaced
+// with half of its life left: only a daemon that runs that long without a
+// restart serves an expired one.
+const leafDays = 365;
+const renewalSeconds = (leafDays / 2) * 24 * 60 * 60;
 
 export interface Certificates {
   ca: string;
@@ -54,6 +63,15 @@ function openssl(...arguments_: string[]): void {
 
 function succeeds(...arguments_: string[]): boolean {
   return run(arguments_, 30_000).status === 0;
+}
+
+function hasAllNames(cert: string): boolean {
+  const present = new Set(
+    new X509Certificate(readFileSync(cert)).subjectAltName
+      ?.split(",")
+      .map((name) => name.trim()),
+  );
+  return leafNames.every((name) => present.has(`DNS:${name}`));
 }
 
 function paired(cert: string, key: KeyObject): boolean {
@@ -153,11 +171,35 @@ function issueAuthority(scratch: string, { ca, caKey }: Paths): void {
     "basicConstraints=critical,CA:TRUE",
     "-addext",
     "keyUsage=critical,keyCertSign,cRLSign",
+    "-addext",
+    "subjectKeyIdentifier=hash",
   );
   // LibreSSL leaves the mode of a key to the umask.
   chmodSync(newKey, 0o600);
   renameSync(newKey, caKey);
   renameSync(newCa, ca);
+}
+
+// Python 3.13 and later verify with VERIFY_X509_STRICT, which refuses a CA
+// without a Subject Key Identifier and a leaf without an Authority Key
+// Identifier. LibreSSL's -x509_strict does not check them, so they are looked
+// for in the text form.
+function hasExtension(cert: string, name: string, remedy: string): boolean {
+  const result = run(["x509", "-noout", "-text", "-in", cert], 30_000);
+  if (result.status !== 0) {
+    throw new Error(
+      `openssl cannot read ${cert}: ${result.stderr.trim().slice(-300)}; ${remedy}`,
+    );
+  }
+  return result.stdout.includes(`X509v3 ${name}`);
+}
+
+function hasSubjectKeyIdentifier({ ca, caKey }: Paths): boolean {
+  return hasExtension(
+    ca,
+    "Subject Key Identifier",
+    `remove ${ca} and ${caKey} to issue a new CA`,
+  );
 }
 
 function validLeaf({ ca, cert, key }: Paths): Certificates | undefined {
@@ -170,11 +212,23 @@ function validLeaf({ ca, cert, key }: Paths): Certificates | undefined {
     );
   }
   const leafKey = readLeafKey(key, cert);
+  const remedy = `remove ${cert} and ${key} to issue a new pair`;
   // A leaf issued by any other CA is unexpired but fails every handshake, and
   // a key that is not the leaf's fails when the first listener starts, so the
-  // chain and the key pair are checked as well as the dates.
-  return succeeds("x509", "-checkend", "2592000", "-noout", "-in", cert) &&
-    succeeds("verify", "-CAfile", ca, cert) &&
+  // chain and the key pair are checked as well as the dates. A leaf that lacks
+  // a name that guests connect to fails every handshake for it.
+  return succeeds(
+    "x509",
+    "-checkend",
+    String(renewalSeconds),
+    "-noout",
+    "-in",
+    cert,
+  ) &&
+    succeeds("verify", "-x509_strict", "-CAfile", ca, cert) &&
+    hasAllNames(cert) &&
+    hasExtension(cert, "Subject Key Identifier", remedy) &&
+    hasExtension(cert, "Authority Key Identifier", remedy) &&
     paired(cert, leafKey)
     ? { ca, cert, key }
     : undefined;
@@ -187,7 +241,7 @@ function issueLeaf(scratch: string, paths: Paths): void {
   const newCert = path.join(scratch, "github.pem");
   writeFileSync(
     extensions,
-    "subjectAltName=DNS:github.com,DNS:api.github.com\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
+    `subjectAltName=${leafNames.map((name) => `DNS:${name}`).join(",")}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n`,
     { mode: 0o600 },
   );
   openssl(
@@ -219,12 +273,15 @@ function issueLeaf(scratch: string, paths: Paths): void {
     "-out",
     newCert,
     "-days",
-    "365",
+    String(leafDays),
     "-sha256",
     "-extfile",
     extensions,
   );
-  const verified = run(["verify", "-CAfile", paths.ca, newCert], 30_000);
+  const verified = run(
+    ["verify", "-x509_strict", "-CAfile", paths.ca, newCert],
+    30_000,
+  );
   if (verified.status !== 0) {
     throw new Error(
       `gateway certificate does not verify against the gateway CA: ${`${verified.stdout}${verified.stderr}`.trim().slice(-300)}`,
@@ -265,7 +322,7 @@ export function ensureCertificates(
         `gateway CA files are incomplete: ${present} exists without ${missing}; remove ${path.join(directory, present)} to issue a new CA`,
       );
     }
-    if (!hasCa) {
+    if (!hasCa || !hasSubjectKeyIdentifier(paths)) {
       inWorkDirectory(directory, (scratch) => {
         issueAuthority(scratch, paths);
       });

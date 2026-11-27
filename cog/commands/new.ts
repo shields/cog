@@ -12,12 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { placeholderCredential } from "../../gateway/models.ts";
 import { grantProfiles } from "../../gateway/policy.ts";
+import {
+  RegistrationFailedHere,
+  socketName,
+  type Control,
+  type FireworksKeyStatus,
+  type PoolStatus,
+} from "../../gateway/control.ts";
 import type { Instance } from "../../gateway/state.ts";
 import { dotfilesRepo, guestLib, guestRepo } from "../config.ts";
-import { CogError, Interrupted } from "../errors.ts";
+import { CogError, CommandFailed, Interrupted } from "../errors.ts";
 import { gatewayName, sizeArgs, validName, validRepository } from "../names.ts";
 import { note, say } from "../output.ts";
 import {
@@ -26,20 +33,13 @@ import {
   tailscaleCredential,
 } from "../tailscale.ts";
 import { signals } from "../proc.ts";
-import {
-  fireworksKeyPresent,
-  readClaudeTokenFile,
-  readCodexAuth,
-  readFireworksKey,
-  toBytes,
-} from "../secrets.ts";
+import { readCodexAuth, toBytes } from "../secrets.ts";
 import type { LifecycleContext } from "./context.ts";
 import { inferRepository } from "./lifecycle.ts";
 
 type NewContext = LifecycleContext<
   | "boot"
   | "clone"
-  | "directory"
   | "edit"
   | "enter"
   | "exists"
@@ -53,8 +53,12 @@ type NewContext = LifecycleContext<
   | "disable"
   | "grant"
   | "health"
+  | "location"
+  | "pool"
   | "prepareRepository"
+  | "fireworksKey"
   | "state"
+  | "sync"
   | "register"
 >;
 
@@ -87,10 +91,10 @@ function parseArgs(args: readonly string[]): {
       case "--no-repo":
         noRepo = true;
         break;
-      case "--no-claude-token":
+      case "--no-claude":
         noClaude = true;
         break;
-      case "--no-codex-auth":
+      case "--no-codex":
         noCodex = true;
         break;
       default:
@@ -102,7 +106,7 @@ function parseArgs(args: readonly string[]): {
           name = argument;
         } else {
           throw new CogError(
-            "usage: cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude-token] [--no-codex-auth]",
+            "usage: cog new [NAME] [--repo OWNER/REPO | --no-repo] [--no-claude] [--no-codex]",
           );
         }
     }
@@ -114,6 +118,92 @@ function parseArgs(args: readonly string[]): {
     noClaude,
     noCodex,
   };
+}
+
+async function requireUsablePool(
+  gateway: Pick<Control, "pool" | "sync">,
+): Promise<void> {
+  const skip = "or pass --no-claude";
+  const reason = (error: unknown): string =>
+    error instanceof Error ? error.message : "unknown error";
+  try {
+    // The gateway reads the pool directory when it starts and when it syncs,
+    // so a bad entry that was fixed by hand counts only after a sync. The
+    // registration syncs too, so skipping the pool does not get past a sync
+    // that fails.
+    await gateway.sync();
+  } catch (error) {
+    throw new CogError(
+      `cannot make the gateway read the Claude pool again: ${reason(error)}; see ~/Library/Logs/dev.msrl.cog.gateway.err`,
+    );
+  }
+  let status: PoolStatus;
+  try {
+    status = await gateway.pool();
+  } catch (error) {
+    throw new CogError(
+      `cannot read the Claude pool state from the gateway: ${reason(error)}, ${skip}`,
+    );
+  }
+  if (status.state === "unconfigured") {
+    throw new CogError(
+      `the Claude pool has no account; run cog account add claude NAME, ${skip}`,
+    );
+  }
+  if (status.state === "unusable") {
+    throw new CogError(
+      `the Claude pool is not usable: ${status.reason ?? "unknown reason"}; fix that (cog account rm claude NAME removes an account), ${skip}`,
+    );
+  }
+}
+
+// The gateway judges the file, since it runs under a profile that allows
+// reading only the path that the installer resolved.
+async function fireworksWired(
+  gateway: Pick<Control, "fireworksKey">,
+  file: string,
+): Promise<boolean> {
+  let status: FireworksKeyStatus;
+  try {
+    status = await gateway.fireworksKey();
+  } catch (error) {
+    throw new CogError(
+      `cannot read the Fireworks key state from the gateway: ${error instanceof Error ? error.message : "unknown error"}`,
+    );
+  }
+  if (status.state === "unusable") {
+    const reason = status.reason ?? "is not usable";
+    throw new CogError(
+      reason.startsWith("cannot be read")
+        ? `the gateway's ${file} ${reason}; if the file or link was moved since the install, run ./install.sh in the cog checkout again, otherwise fix it or remove it`
+        : `${file} ${reason}; fix it or remove it`,
+    );
+  }
+  return status.state === "usable";
+}
+
+// Lima expands "{{" in a host socket and passes the path to ssh, which expands
+// "%" and "${" in it, reads ":" as the end of the path and drops a "\" as an
+// escape, so a path that holds one would name a different socket or none.
+const limaUnsafe = /\{\{|[%$:\\]/u;
+
+function requireLimaSafe(location: string): void {
+  const found = limaUnsafe.exec(location)?.[0];
+  if (found !== undefined) {
+    throw new CogError(
+      `the gateway's socket location ${location} contains "${found}", which Lima or ssh would read as something else; use a state directory without it`,
+    );
+  }
+}
+
+function requireLimaSocket(socket: string, directory: string): void {
+  if (
+    !path.isAbsolute(socket) ||
+    path.dirname(socket) !== directory ||
+    !socketName.test(path.basename(socket))
+  ) {
+    throw new CogError("the gateway returned an invalid socket");
+  }
 }
 
 function cleanupNote(text: string): void {
@@ -138,6 +228,35 @@ const probe = (seconds: string, url: string): string[] => [
   url,
 ];
 
+// Claude Code in a guest needs the CA bundle and, for Claude, the placeholder
+// token that the dotfiles' .zshenv and .zshrc export, so a variable that is
+// only set in the shell does not count. Only fixed words leave the guest, since
+// the token variable could hold a real credential. zsh's startup noise ("can't
+// change option: zle" without a terminal) goes to /dev/null. The startup files
+// may leave a partial line on stdout, which the first print ends so that no
+// word is glued to it.
+const guestExportsCheck = (claude: boolean): string[] => [
+  "sh",
+  "-c",
+  'exec zsh -i -c "$1" 2>/dev/null',
+  "sh",
+  [
+    "print",
+    `[[ \${(t)NODE_EXTRA_CA_CERTS} == *export* && -r $NODE_EXTRA_CA_CERTS && $NODE_EXTRA_CA_CERTS -ef /etc/ssl/certs/ca-certificates.crt ]] || print ca`,
+    ...(claude
+      ? [
+          `[[ \${(t)CLAUDE_CODE_OAUTH_TOKEN} == *export* && $CLAUDE_CODE_OAUTH_TOKEN == ${placeholderCredential} ]] || print token`,
+        ]
+      : []),
+    "print done",
+  ].join("; "),
+];
+
+const guestExportsMissing = {
+  ca: "NODE_EXTRA_CA_CERTS is not exported as the guest's CA bundle (.zshenv)",
+  token: `CLAUDE_CODE_OAUTH_TOKEN is not exported as the placeholder ${placeholderCredential} (.zshrc)`,
+};
+
 export async function newVM(
   args: readonly string[],
   context: NewContext,
@@ -150,16 +269,8 @@ export async function newVM(
     noCodex,
   } = parseArgs(args);
   const name = validName(inputName);
-  const {
-    base,
-    githubWebUrl,
-    cpus,
-    memory,
-    claudeTokenFile,
-    codexAuthFile,
-    fireworksKeyFile,
-    promptInput,
-  } = context.config;
+  const { base, githubWebUrl, cpus, memory, codexAuthFile, fireworksKeyFile } =
+    context.config;
   if (name === base || name === "cog-base") {
     throw new CogError(`${name} is the base VM; choose another name`);
   }
@@ -183,9 +294,10 @@ export async function newVM(
     await gateway.health();
   } catch {
     throw new CogError(
-      "the GitHub gateway is not running; run ./install.sh in the cog checkout",
+      "the gateway is not running; run ./install.sh in the cog checkout",
     );
   }
+  requireLimaSafe(gateway.location.sockets);
   // eslint-disable-next-line unicorn/no-declarations-before-early-exit -- Invalid sizes fail before querying Lima.
   const size = sizeArgs(cpus, memory);
   if (!(await lima.exists(base))) {
@@ -202,20 +314,9 @@ export async function newVM(
   }
   const credential = tailscaleCredential(context.config.tailscaleFile);
   const codex = noCodex ? undefined : readCodexAuth(codexAuthFile);
-  const fireworks = fireworksKeyPresent(fireworksKeyFile)
-    ? readFireworksKey(fireworksKeyFile)
-    : undefined;
-  let claude: string | undefined;
+  const fireworks = await fireworksWired(gateway, fireworksKeyFile);
   if (!noClaude) {
-    if (existsSync(claudeTokenFile)) {
-      claude = readClaudeTokenFile(claudeTokenFile);
-    } else {
-      claude = await context.prompt(
-        promptInput,
-        ", run cog claude-token once, or pass --no-claude-token",
-      );
-      note("cog: cog claude-token keeps the token for next time");
-    }
+    await requireUsablePool(gateway);
   }
   const access =
     repository === null
@@ -230,40 +331,24 @@ export async function newVM(
   try {
     await lima.clone(base, name, size);
     ownsClone = true;
-    let directory: string;
-    try {
-      directory = await lima.directory(name);
-    } catch {
-      signals.check();
-      throw new CogError(`cannot find the Lima directory of ${name}`);
-    }
-    if (!path.isAbsolute(directory)) {
-      throw new CogError(`invalid Lima directory for ${name}`);
-    }
-    const socketDirectory = path.join(directory, "sock");
-    mkdirSync(socketDirectory, { recursive: true, mode: 0o700 });
-    if (!lstatSync(socketDirectory).isDirectory()) {
-      throw new CogError(`invalid socket directory for ${name}`);
-    }
-    chmodSync(socketDirectory, 0o700);
-
     let registration: Instance;
     try {
-      registration = await gateway.register(gatewayVM, directory);
+      registration = await gateway.register(gatewayVM);
       registeredId = registration.id;
-    } catch {
+    } catch (error) {
       signals.check();
-      throw new CogError(`cannot register ${name} with the GitHub gateway`);
+      throw new CogError(
+        error instanceof RegistrationFailedHere
+          ? `cannot register ${name} with the gateway: ${error.message.replaceAll(/\s+/g, " ")}`
+          : `cannot register ${name} with the gateway; see ~/Library/Logs/dev.msrl.cog.gateway.err`,
+      );
     }
     signals.check();
     const { id, socket } = registration;
-    const socketName = path.basename(socket);
-    if (!/^github-[0-9a-f-]+\.sock$/.test(socketName)) {
-      throw new CogError("the GitHub gateway returned an invalid socket");
-    }
+    requireLimaSocket(socket, gateway.location.sockets);
     const rule = {
       guestSocket: "/tmp/cog-github.sock",
-      hostSocket: `{{.Dir}}/sock/${socketName}`,
+      hostSocket: socket,
       reverse: true,
     };
     await lima.edit(
@@ -293,6 +378,42 @@ export async function newVM(
       name,
       probe("10", "https://api.github.com/__cog__/health"),
     );
+    const models = [
+      ...(noClaude ? [] : ["claude"]),
+      ...(fireworks ? ["fireworks"] : []),
+    ];
+    const wired = [
+      ...(noClaude ? [] : ["Claude"]),
+      ...(fireworks ? ["Fireworks"] : []),
+    ].join(" and ");
+    if (models.length > 0) {
+      try {
+        await lima.shell(name, [
+          "sudo",
+          `${guestLib}/setup-model-gateway`,
+          ...models,
+        ]);
+        if (!noClaude) {
+          await lima.shell(
+            name,
+            probe("10", "https://api.anthropic.com/__cog__/health"),
+          );
+        }
+        if (fireworks) {
+          await lima.shell(
+            name,
+            probe("10", "https://api.fireworks.ai/__cog__/health"),
+          );
+        }
+      } catch (error) {
+        if (!(error instanceof CommandFailed)) {
+          throw error;
+        }
+        throw new CogError(
+          `${name} cannot reach ${wired} through the gateway; if cog gateway health fails, start the gateway, and a base built by an older cog lacks this wiring, so run cog base again`,
+        );
+      }
+    }
 
     let cloned = false;
     if (repository !== null) {
@@ -328,12 +449,12 @@ export async function newVM(
     const secrets: readonly (readonly [string, Uint8Array | undefined])[] = [
       [
         "CLAUDE_CODE_OAUTH_TOKEN",
-        claude === undefined ? undefined : toBytes(`${claude}\n`),
+        noClaude ? undefined : toBytes(`${placeholderCredential}\n`),
       ],
       ["CODEX_AUTH", codex],
       [
         "FIREWORKS_API_KEY",
-        fireworks === undefined ? undefined : toBytes(`${fireworks}\n`),
+        fireworks ? toBytes(`${placeholderCredential}\n`) : undefined,
       ],
     ];
     for (const [key, bytes] of secrets) {
@@ -341,6 +462,32 @@ export async function newVM(
         await lima.shell(name, [`${guestLib}/setup-secrets`, key], {
           stdin: bytes,
         });
+      }
+    }
+
+    if (models.length > 0) {
+      let words: string[];
+      try {
+        words = (
+          await lima.shellOutput(name, guestExportsCheck(!noClaude))
+        ).split("\n");
+      } catch (error) {
+        if (!(error instanceof CommandFailed)) {
+          throw error;
+        }
+        throw new CogError(
+          `cannot check ${name}'s shell for ${wired} through the gateway (${error.message}); run cog new again, and if it fails the same way, the dotfiles in the base may break zsh, so update the dotfiles checkout and run cog base again`,
+        );
+      }
+      const problems = words.includes("done")
+        ? (["ca", "token"] as const)
+            .filter((word) => words.includes(word))
+            .map((word) => guestExportsMissing[word])
+        : ["zsh did not run to the end of the check"];
+      if (problems.length > 0) {
+        throw new CogError(
+          `${name}'s shell is not set up for ${wired} through the gateway: ${problems.join("; ")}; the base was built from dotfiles that lack this, so update the dotfiles checkout and run cog base again`,
+        );
       }
     }
 
@@ -390,7 +537,7 @@ export async function newVM(
           await gateway.disable(gatewayVM);
         } catch {
           cleanupNote(
-            `cog: could not disable GitHub access for ${name}; run: cog gateway disable ${name}`,
+            `cog: could not disable gateway access for ${name}; run: cog disable ${name}`,
           );
         }
       }

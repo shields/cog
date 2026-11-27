@@ -29,21 +29,21 @@ command -v socat >/dev/null || die "socat is not installed"
 command -v jq >/dev/null || die "jq is not installed"
 
 lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-ca=$(mktemp /usr/local/share/ca-certificates/.cog-github-gateway.XXXXXX)
+ca=$(mktemp /usr/local/share/ca-certificates/.cog-gateway.XXXXXX)
 trap 'rm -f "$ca"' EXIT
 cat >"$ca"
 openssl x509 -noout -in "$ca" >/dev/null || die "invalid gateway CA certificate"
 chmod 644 "$ca"
-mv -f "$ca" /usr/local/share/ca-certificates/cog-github-gateway.crt
+mv -f "$ca" /usr/local/share/ca-certificates/cog-gateway.crt
 update-ca-certificates >/dev/null
 
 if ! grep -qx '127.0.0.1 github.com api.github.com # cog' /etc/hosts; then
     printf '%s\n' '127.0.0.1 github.com api.github.com # cog' >>/etc/hosts
 fi
 
-cat >/etc/systemd/system/cog-github-gateway.service <<'EOF'
+cat >/etc/systemd/system/cog-gateway.service <<'EOF'
 [Unit]
-Description=Relay GitHub HTTPS through the Lima gateway
+Description=Relay HTTPS to the Mac gateway
 After=network-online.target
 
 [Service]
@@ -62,4 +62,4 @@ EOF
 "$lib_dir/configure-github-access.sh" "$SUDO_USER" "$1"
 
 systemctl daemon-reload
-systemctl enable --now cog-github-gateway.service
+systemctl enable --now cog-gateway.service

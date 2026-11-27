@@ -21,7 +21,6 @@ import {
   existsSync,
   fchmodSync,
   fsyncSync,
-  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -92,72 +91,27 @@ function regularFile(file: string): boolean {
   }
 }
 
-export function readClaudeTokenFile(file: string): string {
-  if (!regularFile(file)) {
-    throw new CogError(
-      `${file} is not a regular file; remove it, or pass --no-claude-token`,
-    );
-  }
-  if (!readable(file)) {
-    throw new CogError(
-      `cannot read ${file}; run cog claude-token to replace it, or pass --no-claude-token`,
-    );
-  }
-  return setOneWord(
-    latin1(readFileSync(file)),
-    `${file} is empty; run cog claude-token to replace it, or pass --no-claude-token`,
-    `${file} holds more than one token; run cog claude-token to replace it`,
-  );
-}
-
-// A dangling symbolic link counts as present, and then fails the read.
-export function fireworksKeyPresent(file: string): boolean {
-  if (existsSync(file)) {
-    return true;
-  }
-  try {
-    lstatSync(file);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function readFireworksKey(file: string): string {
-  if (!regularFile(file)) {
-    throw new CogError(`${file} is not a regular file; remove it`);
-  }
-  if (!readable(file)) {
-    throw new CogError(`cannot read ${file}`);
-  }
-  return setOneWord(
-    latin1(readFileSync(file)),
-    `${file} is empty; put the key in it, or remove it`,
-    `${file} holds more than one word; put only the key in it`,
-  );
-}
-
 // The bytes that are validated are the bytes that are sent. A parse error is
 // never reported, since it can quote the file.
 export function readCodexAuth(file: string): Uint8Array {
   if (!existsSync(file)) {
     throw new CogError(
-      `${file} does not exist; Codex keeps its login in the OS credential store when cli_auth_credentials_store in ~/.codex/config.toml is keyring or auto: set it to "file" and run codex login on this Mac, or pass --no-codex-auth`,
+      `${file} does not exist; Codex keeps its login in the OS credential store when cli_auth_credentials_store in ~/.codex/config.toml is keyring or auto: set it to "file" and run codex login on this Mac, or pass --no-codex`,
     );
   }
   if (!regularFile(file)) {
     throw new CogError(
-      `${file} is not a regular file; remove it, or pass --no-codex-auth`,
+      `${file} is not a regular file; remove it, or pass --no-codex`,
     );
   }
   if (!readable(file)) {
     throw new CogError(
-      `cannot read ${file}; run codex login on this Mac again, or pass --no-codex-auth`,
+      `cannot read ${file}; run codex login on this Mac again, or pass --no-codex`,
     );
   }
   if (statSync(file).size === 0) {
     throw new CogError(
-      `${file} is empty; run codex login on this Mac again, or pass --no-codex-auth`,
+      `${file} is empty; run codex login on this Mac again, or pass --no-codex`,
     );
   }
   const bytes = new Uint8Array(readFileSync(file));
@@ -169,16 +123,10 @@ export function readCodexAuth(file: string): Uint8Array {
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new CogError(
-      `${file} is not a JSON object; run codex login on this Mac again, or pass --no-codex-auth`,
+      `${file} is not a JSON object; run codex login on this Mac again, or pass --no-codex`,
     );
   }
   return bytes;
-}
-
-export function requireRegularOrAbsent(file: string): void {
-  if (existsSync(file) && !regularFile(file)) {
-    throw new CogError(`${file} is not a regular file; remove it first`);
-  }
 }
 
 // The helper restores the terminal on a signal as well as on a normal end.
@@ -195,14 +143,13 @@ printf %s "$line"`;
 async function readHidden(
   promptText: string,
   subject: string,
-  orElse: string,
 ): Promise<string> {
   let terminal: number;
   try {
     terminal = openSync("/dev/tty", "r+");
   } catch {
     throw new CogError(
-      `there is no terminal to ask for the ${subject}; run in a terminal${orElse}`,
+      `there is no terminal to ask for the ${subject}; run in a terminal`,
     );
   }
   try {
@@ -238,10 +185,9 @@ export async function promptSecretLine(
   input: string,
   prompt: string,
   subject: string,
-  hint = "",
 ): Promise<string> {
   if (input === "") {
-    return firstLine(await readHidden(prompt, subject, hint));
+    return firstLine(await readHidden(prompt, subject));
   }
   if (!readable(input)) throw new CogError("cannot read COG_PROMPT_INPUT");
   try {
@@ -252,19 +198,15 @@ export async function promptSecretLine(
 }
 
 // promptInput names a file to read instead of the terminal, for tests.
-export async function promptClaudeToken(
-  promptInput: string,
-  orElse = "",
-): Promise<string> {
+export async function promptClaudeToken(promptInput: string): Promise<string> {
   const line = await promptSecretLine(
     promptInput,
     "Paste the output of claude setup-token (no echo), then press Enter: ",
     "Claude token",
-    orElse,
   );
   return setOneWord(
     line,
-    `the Claude token is empty; run claude setup-token in another terminal and paste its output${orElse}`,
+    "the Claude token is empty; run claude setup-token in another terminal and paste its output",
     "the Claude token has spaces in it; paste only the token",
   );
 }
@@ -284,18 +226,28 @@ export function writeSecretFile(file: string, bytes: Uint8Array): void {
     fchmodSync(descriptor, 0o600);
     writeAll(descriptor, bytes);
     fsyncSync(descriptor);
-    closeSync(descriptor);
+    const written = descriptor;
     descriptor = undefined;
+    closeSync(written);
     renameSync(temporary, file);
   } catch {
-    try {
-      if (descriptor !== undefined) {
-        closeSync(descriptor);
-      }
-      rmSync(temporary, { force: true });
-    } catch {
-      // The write failed first, and its error is the one that is reported.
+    const unclosed = descriptor;
+    if (unclosed !== undefined) {
+      attempt(() => {
+        closeSync(unclosed);
+      });
     }
+    attempt(() => {
+      rmSync(temporary, { force: true });
+    });
     throw new CogError(`cannot write ${file}`);
+  }
+}
+
+function attempt(cleanup: () => void): void {
+  try {
+    cleanup();
+  } catch {
+    // The write failed first, and its error is the one that is reported.
   }
 }
