@@ -25,10 +25,13 @@ export interface Account {
 export type PoolLoad =
   { usable: true; accounts: Account[] } | { usable: false; reason: string };
 
+export type HoldCause = "limit" | "refused";
+
 export interface AccountSnapshot {
   name: string;
   held: boolean;
   heldUntil: number | null;
+  hold: HoldCause | null;
   buckets: { bucket: string; utilization: number; expires: number }[];
 }
 
@@ -161,6 +164,7 @@ interface Bucket {
 interface Runtime {
   heldAt: number;
   heldUntil: number;
+  cause: HoldCause;
   buckets: Map<string, Bucket>;
 }
 
@@ -198,7 +202,7 @@ export class AccountPool {
         : undefined;
       this.runtime.set(
         name,
-        kept ?? { heldAt: 0, heldUntil: 0, buckets: new Map() },
+        kept ?? { heldAt: 0, heldUntil: 0, cause: "limit", buckets: new Map() },
       );
     }
   }
@@ -289,11 +293,15 @@ export class AccountPool {
       headerValue(headers, "anthropic-ratelimit-unified-status") === "rejected"
     ) {
       state.heldAt = now;
-      state.heldUntil =
+      const until =
         resetTime(
           headerValue(headers, "anthropic-ratelimit-unified-reset"),
           now,
         ) ?? Math.max(state.heldUntil, now + 300_000);
+      if (until !== state.heldUntil) {
+        state.cause = "limit";
+        state.heldUntil = until;
+      }
     } else if (status === 401) {
       // The request's path and headers are the guest's, so a 401 may not cut
       // a longer hold short or write a line for each one of a run.
@@ -303,7 +311,10 @@ export class AccountPool {
         );
       }
       state.heldAt = now;
-      state.heldUntil = Math.max(state.heldUntil, now + 600_000);
+      if (now + 600_000 > state.heldUntil) {
+        state.cause = "refused";
+        state.heldUntil = now + 600_000;
+      }
     }
   }
 
@@ -314,6 +325,7 @@ export class AccountPool {
         name,
         held: state.heldUntil > now,
         heldUntil: state.heldUntil > now ? state.heldUntil : null,
+        hold: state.heldUntil > now ? state.cause : null,
         buckets: [...state.buckets]
           .filter(([, bucket]) => bucket.expires > now)
           .map(([bucket, { utilization, expires }]) => ({

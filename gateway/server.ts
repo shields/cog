@@ -628,6 +628,27 @@ export class Gateway {
     });
   }
 
+  private respondPool(response: ServerResponse, instanceId: string): void {
+    const now = Date.now();
+    const pool = this.pool;
+    const body = JSON.stringify(
+      pool === null
+        ? { state: "unusable", now, current: null, accounts: [] }
+        : {
+            state: "usable",
+            now,
+            current: pool.choose(instanceId, now).name,
+            accounts: pool.snapshot(now),
+          },
+    );
+    response
+      .writeHead(200, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      })
+      .end(body);
+  }
+
   private poolStatus(): {
     state: "unconfigured" | "unusable" | "usable";
     reason: string | null;
@@ -809,7 +830,12 @@ export class Gateway {
           operation: model.operation,
           refs: [],
         };
-        const route = classifyModel(method, target, request.rawHeaders);
+        const route = classifyModel(
+          method,
+          target,
+          request.rawHeaders,
+          model.credential === "pool",
+        );
         requireNoGetOrHeadBody(
           method,
           request.headers["transfer-encoding"],
@@ -820,6 +846,10 @@ export class Gateway {
           throw new PolicyError("VM access has been revoked");
         }
         revision = current.revision;
+        if (route.kind === "pool") {
+          this.respondPool(response, instanceId);
+          return;
+        }
         const credential =
           route.kind === "forward" && route.route === "placeholder"
             ? this.credentialFor(model, instanceId)

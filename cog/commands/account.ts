@@ -538,9 +538,11 @@ function utc(milliseconds: number): string {
 }
 
 function describeAccount(account: AccountSnapshot): string {
+  const cause =
+    account.hold === "refused" ? "token refused (401)" : "limit reached";
   const held =
     account.held && account.heldUntil !== null
-      ? `held until ${utc(account.heldUntil)}`
+      ? `${cause}, held until ${utc(account.heldUntil)}`
       : "not held";
   const readings =
     account.buckets.length === 0

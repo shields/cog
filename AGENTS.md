@@ -148,6 +148,14 @@
   receiving the rest only while its request takes each write without
   backpressure; at the first write that has to wait, the upload is cut off, and
   the audit row still says `completed`.
+  `GET /__cog__/pool` (exact target, `api.anthropic.com` only, answered in
+  `Gateway.respondPool` after the revoked check) is the one request that the
+  server answers with no audit row and no stderr line, since a status line asks
+  every half minute for every session: `{state, now, current, accounts}` from
+  `AccountPool.choose(instance, now)` and `snapshot(now)`, or `unusable` with no
+  reason when `this.pool` is null. Other methods and a query string go
+  upstream as for the health path. The Fireworks host sends this path upstream
+  too, though it answers the health path itself.
   The same server answers `api.anthropic.com` and `api.fireworks.ai`, the
   third and fourth names on the leaf, for a guest whose `/etc/hosts` points
   those names at the relay. `guest/setup-github-gateway` maps the two GitHub
@@ -231,7 +239,9 @@
   with no reload, and over a failed unlink, whose message is then not shown.
   `list` prints `claude NAME` and `status` prefixes each line with `claude`.
   `GET /pool` on the admin socket
-  (`Control.pool`) reports the state and each account's hold and readings, never
+  (`Control.pool`) reports the state and each account's hold, the hold's cause
+  (`hold`: `limit` or `refused`, whichever event set the hold's end, so a 401
+  during a longer limit hold stays `limit`) and readings, never
   a token, and `list` reads the directory with the loader.
   Bun's HTTP server groups response header lines of one name next to the first
   and respells later ones, so duplicates keep their values and count but not
@@ -475,7 +485,13 @@ must be present) needs the same change in dotfiles. The marker lists in
 file that reads a marker. The `cog/UUID/*` branch names come from dotfiles' `wt`.
 On the Mac, dotfiles' `c` reads `SECRETS/proxy-url`, `STATE/ca.pem` and the
 first word of `cog proxy status` (`listening`), and exports the placeholder
-`cog`; a change to any of the four needs the same change there.
+`cog`; a change to any of the four needs the same change there. Dotfiles' status
+line reads `GET /__cog__/pool` (the JSON shape in the README). It takes a
+session as pooled on the Mac when the proxy variable has the shape that `cog
+proxy enable` writes (`http://cog:KEY@[::1]:PORT`), and then trusts
+`STATE/ca.pem`, and on Linux when `/etc/cog-gateway` exists and the token file
+holds the placeholder. A change to the path, the shape of the answer or of the
+URL, the CA copy's place or the marker needs the same change there.
 
 ## Tests
 

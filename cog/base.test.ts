@@ -54,6 +54,7 @@ async function fixture() {
   write(".claude/settings.json", "{}\n");
   write("tools/configure_codex.py", "/etc/cog-throwaway\n");
   write("provision.sh", "#!/bin/sh\n# /etc/cog-gateway\n", 0o755);
+  write(".claude/statusline.sh", "#!/bin/bash\n# /etc/cog-gateway\n", 0o755);
   await run([
     "git",
     "-C",

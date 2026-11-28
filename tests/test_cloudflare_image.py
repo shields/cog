@@ -47,6 +47,7 @@ MARKER_READERS = {
     ".codex/hooks/git_guard.py": "/etc/cog-gateway\n",
     "tools/configure_codex.py": "/etc/cog-throwaway\n",
     "provision.sh": "#!/bin/sh\n# /etc/cog-gateway\n",
+    ".claude/statusline.sh": "#!/bin/bash\n# /etc/cog-gateway\n",
 }
 
 BUNX_STUB = """\

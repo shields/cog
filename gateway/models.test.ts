@@ -35,10 +35,11 @@ function classify(
   target: string,
   headers: string[] = [...host],
   method = "POST",
+  poolHost = false,
 ): string {
   try {
-    const result = classifyModel(method, target, headers);
-    return result.kind === "health" ? "health" : result.route;
+    const result = classifyModel(method, target, headers, poolHost);
+    return result.kind === "forward" ? result.route : result.kind;
   } catch (error) {
     assert.ok(error instanceof ModelDenied, String(error));
     return "refused";
@@ -73,6 +74,33 @@ test("targets are judged only by their first character and their bytes, never de
   for (const [target, expected] of cases) {
     assert.equal(classify(target), expected, JSON.stringify(target));
   }
+});
+
+test("the exact pool target is answered locally for the pool host only", () => {
+  assert.equal(classify("/__cog__/pool", [...host], "GET", true), "pool");
+  assert.equal(
+    classify("/__cog__/pool", [...host, "x-api-key", "k"], "GET", true),
+    "pool",
+  );
+  assert.equal(classify("/__cog__/pool", [...host], "GET"), "direct");
+  assert.deepEqual(classifyModel("GET", "/__cog__/pool", [...host]), {
+    kind: "forward",
+    route: "direct",
+  });
+  assert.equal(classify("/__cog__/pool?x=1", [...host], "GET", true), "direct");
+  assert.equal(classify("/__cog__/pool/", [...host], "GET", true), "direct");
+  assert.equal(classify("/__cog__/pool", [...host], "POST", true), "direct");
+  assert.equal(classify("/__cog__/pool", [...host], "HEAD", true), "direct");
+  assert.equal(classify("/__cog__/pool", [], "GET", true), "refused");
+  assert.equal(
+    classify(
+      "/__cog__/pool",
+      [...host, "transfer-encoding", "chunked"],
+      "GET",
+      true,
+    ),
+    "refused",
+  );
 });
 
 test("the exact health target is answered locally, and nothing else is", () => {

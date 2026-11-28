@@ -4310,6 +4310,236 @@ test("only the exact health target is answered locally", async () => {
   assert.equal(stub.requests.length, 2);
 });
 
+test("the pool path answers the accounts' readings and holds and the account this VM would use, with no audit row and no log line", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  const later = reset + 7200;
+  let count = 0;
+  const stub = await startModelStub((_request, response, entry) => {
+    count += 1;
+    const first = count === 1;
+    void entry.ended.then(() => {
+      response
+        .writeHead(
+          first ? 429 : 200,
+          first
+            ? [
+                "content-type",
+                "application/json",
+                "anthropic-ratelimit-unified-status",
+                "rejected",
+                "anthropic-ratelimit-unified-reset",
+                String(reset),
+              ]
+            : [
+                "content-type",
+                "application/json",
+                "anthropic-ratelimit-unified-5h-utilization",
+                "0.25",
+                "anthropic-ratelimit-unified-5h-reset",
+                String(reset),
+                "anthropic-ratelimit-unified-7d_oi-utilization",
+                "0.5",
+                "anthropic-ratelimit-unified-7d_oi-reset",
+                String(later),
+              ],
+        )
+        .end("{}");
+    });
+  });
+  const stderr = captureStderr();
+  const { socket, instance, state } = await startGateway({
+    models: { anthropic: stub.origin, pool: bothAccounts },
+  });
+  const audit = recordFinishes(state, 2);
+  const post = (): Promise<ModelReply> =>
+    claude(socket, "POST", "/v1/messages", poolHeaders, "{}");
+  const names = Object.keys(bothAccounts);
+  const preferred = firstAccount(instance.id);
+  const other = names.find((name) => name !== preferred);
+  assert.equal((await post()).status, 429);
+  assert.equal((await post()).status, 200);
+  await within("the audit rows", audit.all);
+  const rows = state.logs(instance.id).length;
+  const lines = stderr.length;
+  const before = Date.now();
+  const reply = await claude(socket, "GET", "/__cog__/pool");
+  const after = Date.now();
+  assert.equal(reply.status, 200);
+  assert.equal(reply.headers["content-type"], "application/json");
+  assert.equal(reply.headers["cache-control"], "no-store");
+  const answer = JSON.parse(reply.body.toString()) as { now: number };
+  assert.ok(answer.now >= before && answer.now <= after);
+  assert.deepEqual(answer, {
+    state: "usable",
+    now: answer.now,
+    current: other,
+    accounts: names.map((name) =>
+      name === preferred
+        ? {
+            name,
+            held: true,
+            heldUntil: reset * 1000,
+            hold: "limit",
+            buckets: [],
+          }
+        : {
+            name,
+            held: false,
+            heldUntil: null,
+            hold: null,
+            buckets: [
+              { bucket: "5h", utilization: 0.25, expires: reset * 1000 },
+              { bucket: "7d_oi", utilization: 0.5, expires: later * 1000 },
+            ],
+          },
+    ),
+  });
+  assert.equal(stub.requests.length, 2);
+  assert.equal(state.logs(instance.id).length, rows);
+  assert.equal(stderr.length, lines);
+  noSecrets(reply.body.toString());
+  assert.equal((await claude(socket, "GET", "/__cog__/health")).status, 200);
+  assert.equal(state.logs(instance.id).length, rows + 1);
+  const future = Date.now() + 2 * 3_600_000;
+  const clock = spyOn(Date, "now").mockReturnValue(future);
+  const aged = await claude(socket, "GET", "/__cog__/pool");
+  clock.mockRestore();
+  assert.deepEqual(JSON.parse(aged.body.toString()) as unknown, {
+    state: "usable",
+    now: future,
+    current: preferred,
+    accounts: names.map((name) => ({
+      name,
+      held: false,
+      heldUntil: null,
+      hold: null,
+      buckets:
+        name === preferred
+          ? []
+          : [{ bucket: "7d_oi", utilization: 0.5, expires: later * 1000 }],
+    })),
+  });
+});
+
+test("the pool path follows each VM's own order when no account is held", async () => {
+  const stub = await startModelStub();
+  captureStderr();
+  const { socket, instance, state, gateway } = await startGateway({
+    models: { anthropic: stub.origin, pool: bothAccounts },
+  });
+  const others = Array.from({ length: 8 }, (_unused, index) =>
+    state.register(
+      `lima:vm${String(index)}`,
+      path.join(path.dirname(socket), `vm${String(index)}.sock`),
+      "tester",
+    ),
+  );
+  await gateway.refresh();
+  for (const vm of [instance, ...others]) {
+    const reply = await claude(vm.socket, "GET", "/__cog__/pool");
+    const answer = JSON.parse(reply.body.toString()) as { current: string };
+    assert.equal(answer.current, firstAccount(vm.id), vm.name);
+  }
+  assert.equal(stub.requests.length, 0);
+});
+
+for (const [name, pool] of [
+  ["unset", "unset"],
+  ["missing", "missing"],
+  ["bad", { alpha: "not a token" }],
+] as const) {
+  test(`the pool path answers unusable with no reason when the pool is ${name}`, async () => {
+    captureStderr();
+    const stub = await startModelStub();
+    const { socket } = await startGateway({
+      models: { anthropic: stub.origin, pool },
+    });
+    const before = Date.now();
+    const reply = await claude(socket, "GET", "/__cog__/pool");
+    const after = Date.now();
+    assert.equal(reply.status, 200);
+    assert.equal(reply.headers["cache-control"], "no-store");
+    const answer = JSON.parse(reply.body.toString()) as { now: number };
+    assert.ok(answer.now >= before && answer.now <= after);
+    assert.deepEqual(answer, {
+      state: "unusable",
+      now: answer.now,
+      current: null,
+      accounts: [],
+    });
+    assert.equal(stub.requests.length, 0);
+  });
+}
+
+test("only the exact pool target is answered locally, and Fireworks does not serve it", async () => {
+  captureStderr();
+  const stub = await startModelStub();
+  const provider = await startModelStub();
+  const { socket } = await startGateway({
+    models: {
+      anthropic: stub.origin,
+      fireworks: provider.origin,
+      pool: { alpha: tokens.alpha },
+    },
+  });
+  for (const [method, target] of [
+    ["GET", "/__cog__/pool?x=1"],
+    ["POST", "/__cog__/pool"],
+    ["HEAD", "/__cog__/pool"],
+  ] as const) {
+    await claude(socket, method, target);
+  }
+  assert.deepEqual(
+    stub.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", "/__cog__/pool?x=1"],
+      ["POST", "/__cog__/pool"],
+      ["HEAD", "/__cog__/pool"],
+    ],
+  );
+  await fireworks(socket, "GET", "/__cog__/pool");
+  assert.deepEqual(
+    provider.requests.map(({ method, url }) => [method, url]),
+    [["GET", "/__cog__/pool"]],
+  );
+});
+
+test("the pool path refuses a GET with a body, as every other path does", async () => {
+  captureStderr();
+  const stub = await startModelStub();
+  const { socket } = await startGateway({
+    models: { anthropic: stub.origin, pool: { alpha: tokens.alpha } },
+  });
+  for (const headers of ["content-length: 5", "transfer-encoding: chunked"]) {
+    const reply = await exchange(
+      socket,
+      claudeName,
+      rawRequest("GET", "/__cog__/pool", claudeName, headers, "abcde"),
+    );
+    assert.equal(statusOf(reply), 403, headers);
+    assert.ok(!reply.includes("accounts"), headers);
+  }
+  assert.equal(stub.requests.length, 0);
+});
+
+test("a disabled VM is refused the pool path", async () => {
+  captureStderr();
+  const stub = await startModelStub();
+  const { socket, state } = await startGateway({
+    models: { anthropic: stub.origin, pool: { alpha: tokens.alpha } },
+  });
+  const byId = state.byId.bind(state);
+  const refusal = spyOn(state, "byId").mockImplementation((id: string) => {
+    const found = byId(id);
+    return found && { ...found, disabled: true };
+  });
+  const reply = await claude(socket, "GET", "/__cog__/pool");
+  refusal.mockRestore();
+  assert.equal(reply.status, 403);
+  assert.match(reply.body.toString(), /VM access has been revoked/);
+  assert.ok(!reply.body.toString().includes("accounts"));
+});
+
 const unusablePools: [string, PoolSpec | "empty" | "invalid", string | null][] =
   [
     ["no pool setting", "unset", null],
@@ -5339,6 +5569,7 @@ interface PoolAnswer {
       name: string;
       held: boolean;
       heldUntil: number | null;
+      hold: string | null;
       buckets: { bucket: string; utilization: number; expires: number }[];
     }[];
   };
@@ -5396,8 +5627,20 @@ for (const [name, pool, state, reason] of poolStates) {
       answer.json.accounts,
       state === "usable"
         ? [
-            { name: "alpha", held: false, heldUntil: null, buckets: [] },
-            { name: "bravo", held: false, heldUntil: null, buckets: [] },
+            {
+              name: "alpha",
+              held: false,
+              heldUntil: null,
+              hold: null,
+              buckets: [],
+            },
+            {
+              name: "bravo",
+              held: false,
+              heldUntil: null,
+              hold: null,
+              buckets: [],
+            },
           ]
         : [],
     );
@@ -5457,6 +5700,7 @@ test("GET /pool shows a utilization reading and a hold that a pooled response ca
       name: "alpha",
       held: false,
       heldUntil: null,
+      hold: null,
       buckets: [{ bucket: "5h", utilization: 0.25, expires: reset * 1000 }],
     },
   ]);
@@ -5467,6 +5711,7 @@ test("GET /pool shows a utilization reading and a hold that a pooled response ca
   assert.ok(account);
   assert.equal(account.held, true);
   assert.equal(account.heldUntil, reset * 1000);
+  assert.equal(account.hold, "limit");
   noSecrets(reading.text, held.text);
 });
 
@@ -7107,6 +7352,22 @@ async function proxyState(p: Proxied): Promise<unknown> {
 async function syncOk(p: Proxied): Promise<void> {
   assert.equal(await requestSync(p.adminSocket), 200);
 }
+
+test("the Mac's instance is answered the pool path through its tunnel, with no audit row", async () => {
+  const p = await startProxied();
+  assert.ok(p.mac);
+  const rows = p.state.logs(p.mac.id).length;
+  const reply = await requestOver(
+    await intercepted(p),
+    `GET /__cog__/pool HTTP/1.1\r\nhost: ${claudeName}\r\nconnection: close\r\n\r\n`,
+  );
+  assert.match(reply, /^HTTP\/1\.1 200 /);
+  assert.match(reply, /"state":"usable"/);
+  assert.match(reply, /"current":"alpha"/);
+  assert.equal(p.state.logs(p.mac.id).length, rows);
+  assert.equal(p.anthropic.requests.length, 0);
+  noSecrets(reply);
+});
 
 test("a model request through the Mac's proxy reaches the stub with a pooled token, and is audited to the mac instance", async () => {
   const p = await startProxied();

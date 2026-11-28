@@ -411,7 +411,9 @@ Every request decision is logged with VM ID, repository, operation, permitted
 refs, policy revision, result, upstream status and duration. Headers, bodies and
 raw queries are not logged. Policy changes are separately audited with the actor
 and old/new revision. Request logs are kept for 30 days and policy events for
-one year; requests fail closed if the audit database cannot be written.
+one year; requests fail closed if the audit database cannot be written. The one
+request the instance server answers with no row is `GET /__cog__/pool` (see "The
+contract with dotfiles"): a status line asks for it every half minute.
 `cog logs NAME --follow` streams recent entries, and `--all` prints
 the retained history. With `--follow`, a request still in flight is printed
 with outcome `unknown` and printed again, with its outcome, upstream status and
@@ -486,7 +488,8 @@ account another name without a new token: it links the file to NEW, refusing
 to replace an existing entry, then removes OLD, never opening the file, so its
 content, mode and owner stay, and it reloads. `cog account list` prints one
 line, `claude NAME`, for each account, and works without the gateway.
-`cog account status` asks the gateway for each account's hold and, for each
+`cog account status` asks the gateway for each account's hold (`limit reached`
+for a request that the rate limit rejected, `token refused (401)`) and, for each
 rate-limit window, its utilization and the time that reading lasts until (UTC,
 the window's reset when the provider gave one). It fails with the reason when
 the pool is configured but unusable.
@@ -697,10 +700,11 @@ A VM holds no real Claude credential: its Claude Code sends the placeholder
 mapping is installed, a program in the guest that sends its own Anthropic API
 key or login to `api.anthropic.com` is refused with 403, since the gateway
 accepts only the placeholder or no credential. The gateway attributes each
-request to the VM, and `cog logs NAME` shows it. A VM made with
-`--no-claude` has no mapping and keeps whatever login it makes. The
-gateway does not record which VMs were wired for a model, so a program with
-root in such a VM can still reach the pool by mapping the name itself.
+request to the VM, and `cog logs NAME` shows it, except `GET /__cog__/pool`,
+which has no row. A VM made with `--no-claude` has no mapping and keeps
+whatever login it makes. The gateway does not record which VMs were wired for
+a model, so a program with root in such a VM can still reach the pool by
+mapping the name itself.
 
 The same holds for Fireworks when the Mac has a key file: the VM holds only the
 placeholder `cog` for `api.fireworks.ai`, the gateway adds the key on the Mac,
@@ -960,7 +964,7 @@ dotfiles reads two marker files that cog writes in the guest:
 `/etc/cog-throwaway`, whose presence makes the machine a throwaway VM, and
 `/etc/cog-gateway`, one line holding the VM's UUID, or `cloudflare`. The
 readers are `.zshrc`, `.zshenv`, `.zsh.d/wt.zsh`, `.codex/hooks/git_guard.py`,
-`tools/configure_codex.py` and `provision.sh`. Where the second file holds a
+`tools/configure_codex.py`, `provision.sh` and `.claude/statusline.sh`. Where the second file holds a
 UUID, dotfiles' `wt` names a new worktree's branch `cog/UUID/worktree-NAME`,
 since the gateway accepts pushes only to `cog/UUID/*`. `cog base` and
 `cloudflare/context.sh` refuse a checkout whose readers do not name the markers.
@@ -992,6 +996,40 @@ nothing unless the output begins with `listening `, and then exports
 `NO_PROXY` for the loopback names to that `claude` alone. A change to either
 path, to that word of `cog proxy status` or to the placeholder needs the same
 change in dotfiles.
+
+In a pooled session (a Lima guest, or Claude Code on the Mac behind `cog
+proxy`), dotfiles' status line shows the pool instead of asking Anthropic's
+usage endpoint, which refuses a pool token. It fetches
+`GET https://api.anthropic.com/__cog__/pool`, which the instance server answers
+for that host alone, beside the health path and with the same request checks
+and refusal of a disabled VM. It needs no credential and writes no audit row
+and no log line. Fireworks does not serve it, and the answer is only for the
+exact target with GET: a query string, HEAD or POST goes upstream. The answer
+is status 200, `Content-Type: application/json`, `Cache-Control: no-store` and
+one object, with every time in milliseconds since the epoch:
+
+- `state`: `usable`, or `unusable` with `current` null and `accounts` empty.
+  No reason is given.
+- `now`: the gateway's clock, so that a reader whose own clock has drifted
+  still computes the right durations.
+- `current`: the name of the account that this VM's next pooled request would
+  use.
+- `accounts`: for each account its `name`, `held`, `heldUntil` (or null),
+  `hold` (`limit` for a request that the rate limit rejected, `refused` for a
+  401, or null) and `buckets`. A bucket has `bucket` (the middle of the header
+  name `anthropic-ratelimit-unified-BUCKET-utilization`: `5h`, `7d`, `7d_oi`),
+  `utilization` (a fraction that can be more than one) and `expires` (the
+  window's reset, or an hour after the reading when the provider gave none).
+
+No token, path or error text appears, but any program in a VM can read every
+account's name and how full it is. A request that a program in a VM sends can
+draw a 401 (see "The Claude pool"), so `refused` shows that the provider
+answered 401 to some request, not that the token is bad. The status line
+detects a pooled session on the Mac from an `HTTPS_PROXY` of the shape that
+`cog proxy enable` writes (`http://cog:KEY@[::1]:PORT`), with the CA at
+`~/.local/state/cog/ca.pem`, and in a guest from `/etc/cog-gateway` with the
+placeholder token. A change to the path, the shape or either sign needs the
+same change in dotfiles.
 
 ## History
 

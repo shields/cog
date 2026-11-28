@@ -57,7 +57,9 @@ export function modelHostFor(host: string | undefined): ModelHost | undefined {
 export type RawHeaders = readonly string[];
 
 export type ModelClassification =
-  { kind: "health" } | { kind: "forward"; route: ModelRoute };
+  | { kind: "health" }
+  | { kind: "pool" }
+  | { kind: "forward"; route: ModelRoute };
 
 export class ModelDenied extends PolicyError {
   constructor(message: string) {
@@ -165,6 +167,7 @@ export function classifyModel(
   method: string,
   target: string,
   headers: RawHeaders,
+  poolHost = false,
 ): ModelClassification {
   const pairs = entries(headers);
   checkRequest(target, pairs);
@@ -179,9 +182,13 @@ export function classifyModel(
   ) {
     deny("a request with this method must not be chunked");
   }
-  return method === "GET" && target === "/__cog__/health"
-    ? { kind: "health" }
-    : { kind: "forward", route: route(pairs) };
+  if (method === "GET" && target === "/__cog__/health") {
+    return { kind: "health" };
+  }
+  if (poolHost && method === "GET" && target === "/__cog__/pool") {
+    return { kind: "pool" };
+  }
+  return { kind: "forward", route: route(pairs) };
 }
 
 export function modelRequestHeaders(

@@ -426,6 +426,7 @@ const usableAnswer = {
       name: "alpha",
       held: true,
       heldUntil: 1_800_000_000_000,
+      hold: "limit",
       buckets: [{ bucket: "5h", utilization: 0.5, expires: 1_800_000_001_000 }],
     },
   ],
@@ -456,6 +457,28 @@ test("pool returns the answer of the daemon", async () => {
     (await control(third).pool()).reason,
     "account alpha is not a regular file",
   );
+  const refused = root();
+  const refusedAnswer = {
+    ...usableAnswer,
+    accounts: [
+      {
+        name: "bravo",
+        held: true,
+        heldUntil: 1_800_000_600_000,
+        hold: "refused",
+        buckets: [],
+      },
+      {
+        name: "charlie",
+        held: false,
+        heldUntil: null,
+        hold: null,
+        buckets: [],
+      },
+    ],
+  };
+  await answering(refused, { body: JSON.stringify(refusedAnswer) });
+  assert.deepEqual(await control(refused).pool(), refusedAnswer);
 });
 
 test("pool fails without a daemon and when the daemon refuses", async () => {
@@ -546,6 +569,54 @@ const malformed: [string, string, RegExp][] = [
     JSON.stringify({
       ...usableAnswer,
       accounts: [{ ...usableAnswer.accounts[0], held: "yes" }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "a hold with a cause that is not one of the two",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], hold: "tired" }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "an account with no cause of its hold",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], hold: undefined }],
+    }),
+    /the running gateway is older than this cog; run \.\/install\.sh/,
+  ],
+  [
+    "a hold with no cause",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], hold: null }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "a cause with no hold",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], held: false, heldUntil: null }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "a hold with no end",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], heldUntil: null }],
+    }),
+    /invalid pool account/,
+  ],
+  [
+    "an end with no hold",
+    JSON.stringify({
+      ...usableAnswer,
+      accounts: [{ ...usableAnswer.accounts[0], held: false, hold: null }],
     }),
     /invalid pool account/,
   ],

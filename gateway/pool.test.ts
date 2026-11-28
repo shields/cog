@@ -881,6 +881,53 @@ test("a 401 on a held account does not shorten the hold or write another line", 
   assert.equal(again.choose("vm-7", start + 19 * 60 * second).name, first);
 });
 
+test("the cause of a hold is the event that sets its end", () => {
+  captureStderr();
+  const first = order("vm-7", trio)[0] ?? "";
+  const cause = (pool: AccountPool, now: number): unknown =>
+    pool.snapshot(now).find(({ name }) => name === first)?.hold;
+  const rejected = (reset: number): string[] => [
+    "anthropic-ratelimit-unified-status",
+    "rejected",
+    "anthropic-ratelimit-unified-reset",
+    epoch(reset),
+  ];
+  const pool = trioPool();
+  assert.equal(cause(pool, start), null);
+  pool.observe(first, 429, rejected(start + 3 * hour), start);
+  assert.equal(cause(pool, start), "limit");
+  pool.observe(first, 401, [], start + second);
+  assert.equal(cause(pool, start + second), "limit");
+  assert.equal(cause(pool, start + 3 * hour), null);
+
+  const short = trioPool();
+  short.observe(first, 429, rejected(start + 5 * 60 * second), start);
+  short.observe(first, 401, [], start + second);
+  assert.equal(cause(short, start + second), "refused");
+  assert.equal(
+    short.snapshot(start + second).find(({ name }) => name === first)
+      ?.heldUntil,
+    start + second + 10 * 60 * second,
+  );
+  short.observe(first, 429, rejected(start + hour), start + 2 * second);
+  assert.equal(cause(short, start + 2 * second), "limit");
+  short.observe(first, 200, [], start + 3 * second);
+  assert.equal(cause(short, start + 3 * second), null);
+
+  const noReset = ["anthropic-ratelimit-unified-status", "rejected"];
+  const refused = trioPool();
+  refused.observe(first, 401, [], start);
+  refused.observe(first, 429, noReset, start + second);
+  assert.equal(cause(refused, start + second), "refused");
+  assert.equal(
+    refused.snapshot(start + second).find(({ name }) => name === first)
+      ?.heldUntil,
+    start + 10 * 60 * second,
+  );
+  refused.observe(first, 429, noReset, start + 6 * 60 * second);
+  assert.equal(cause(refused, start + 6 * 60 * second), "limit");
+});
+
 test("a 2xx clears a hold, a 403 changes nothing, and other statuses leave a hold alone", () => {
   captureStderr();
   const first = order("vm-7", trio)[0] ?? "";
@@ -921,6 +968,7 @@ test("a 2xx clears a hold, a 403 changes nothing, and other statuses leave a hol
       name: first,
       held: false,
       heldUntil: null,
+      hold: null,
       buckets: [],
     },
   );
@@ -1025,13 +1073,16 @@ test("a reload keeps the state of an account whose name and token are unchanged 
     after.snapshot(start).map((row) => [row.name, row] as const),
   );
   assert.equal(state.get("alpha")?.held, true);
+  assert.equal(state.get("alpha")?.hold, "limit");
   assert.equal(state.get("bravo")?.held, false);
   assert.deepEqual(state.get("bravo")?.buckets, []);
   assert.equal(state.get("charlie")?.held, true);
+  assert.equal(state.get("charlie")?.hold, "refused");
   assert.deepEqual(state.get("echo"), {
     name: "echo",
     held: false,
     heldUntil: null,
+    hold: null,
     buckets: [],
   });
   assert.equal(state.has("delta"), false);
@@ -1100,12 +1151,14 @@ test("a snapshot lists each account with its hold and its unexpired buckets, and
       name: "alpha",
       held: true,
       heldUntil: start + hour,
+      hold: "limit",
       buckets: [],
     },
     {
       name: "bravo",
       held: false,
       heldUntil: null,
+      hold: null,
       buckets: [
         { bucket: "5h", utilization: 0.5, expires: start + hour },
         { bucket: "7d", utilization: 0.7, expires: start + 2 * hour },
@@ -1115,19 +1168,21 @@ test("a snapshot lists each account with its hold and its unexpired buckets, and
       name: "charlie",
       held: true,
       heldUntil: start + 10 * 60 * second,
+      hold: "refused",
       buckets: [],
     },
   ]);
   const now = start + hour + second;
   assert.deepEqual(pool.snapshot(now), [
-    { name: "alpha", held: false, heldUntil: null, buckets: [] },
+    { name: "alpha", held: false, heldUntil: null, hold: null, buckets: [] },
     {
       name: "bravo",
       held: false,
       heldUntil: null,
+      hold: null,
       buckets: [{ bucket: "7d", utilization: 0.7, expires: start + 2 * hour }],
     },
-    { name: "charlie", held: false, heldUntil: null, buckets: [] },
+    { name: "charlie", held: false, heldUntil: null, hold: null, buckets: [] },
   ]);
   for (const at of [start, now, start + day]) {
     const text = JSON.stringify(pool.snapshot(at));

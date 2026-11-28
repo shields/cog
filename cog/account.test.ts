@@ -152,6 +152,7 @@ function fixture(options: Options = {}) {
                   name,
                   held: false,
                   heldUntil: null,
+                  hold: null,
                   buckets: [],
                 })),
               }
@@ -870,20 +871,35 @@ test("status prints one line for each account with times in UTC", async () => {
           name: "alpha",
           held: true,
           heldUntil: noon,
+          hold: "limit",
           buckets: [
             { bucket: "5h", utilization: 0.424, expires: noon + 3_600_000 },
             { bucket: "7d", utilization: 1, expires: noon + 86_400_000 },
           ],
         },
-        { name: "bravo", held: false, heldUntil: null, buckets: [] },
+        {
+          name: "bravo",
+          held: false,
+          heldUntil: null,
+          hold: null,
+          buckets: [],
+        },
+        {
+          name: "charlie",
+          held: true,
+          heldUntil: noon,
+          hold: "refused",
+          buckets: [],
+        },
       ],
     },
   });
   const { out } = io;
   await accountCommand(["status"], context, io);
   assert.deepEqual(out, [
-    "claude alpha; held until 2026-11-24T12:00:00Z; 5h 42% until 2026-11-24T13:00:00Z; 7d 100% until 2026-11-25T12:00:00Z\n",
+    "claude alpha; limit reached, held until 2026-11-24T12:00:00Z; 5h 42% until 2026-11-24T13:00:00Z; 7d 100% until 2026-11-25T12:00:00Z\n",
     "claude bravo; not held; no rate-limit reading\n",
+    "claude charlie; token refused (401), held until 2026-11-24T12:00:00Z; no rate-limit reading\n",
   ]);
 });
 
@@ -982,7 +998,9 @@ test("rename never opens the token file", async () => {
     status: {
       state: "usable",
       reason: null,
-      accounts: [{ name: "work", held: false, heldUntil: null, buckets: [] }],
+      accounts: [
+        { name: "work", held: false, heldUntil: null, hold: null, buckets: [] },
+      ],
     },
   });
   seed(pool, { alpha });

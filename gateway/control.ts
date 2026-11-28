@@ -170,6 +170,8 @@ export function parseEdit(
   };
 }
 
+const olderGateway =
+  "the running gateway is older than this cog; run ./install.sh in the cog checkout";
 const poolAnswerLimit = 1_048_576;
 const fireworksKeyAnswerLimit = 4096;
 const proxyAnswerLimit = 4096;
@@ -200,11 +202,7 @@ async function adminRequest(
           if (response.statusCode === 200) {
             resolve(Buffer.concat(chunks).toString("utf8"));
           } else if (response.statusCode === 404) {
-            reject(
-              new Error(
-                "the running gateway is older than this cog; run ./install.sh in the cog checkout",
-              ),
-            );
+            reject(new Error(olderGateway));
           } else {
             reject(new Error("gateway administration failed"));
           }
@@ -249,13 +247,24 @@ function finite(value: unknown): value is number {
 }
 
 function parseAccount(value: unknown): AccountSnapshot {
+  if (isRecord(value) && !("hold" in value)) {
+    throw new Error(olderGateway);
+  }
   if (
     !isRecord(value) ||
     typeof value.name !== "string" ||
     !accountName.test(value.name) ||
     typeof value.held !== "boolean" ||
     !(value.heldUntil === null || finite(value.heldUntil)) ||
-    !Array.isArray(value.buckets)
+    !(
+      value.hold === null ||
+      value.hold === "limit" ||
+      value.hold === "refused"
+    ) ||
+    !Array.isArray(value.buckets) ||
+    !(value.held
+      ? value.heldUntil !== null && value.hold !== null
+      : value.heldUntil === null && value.hold === null)
   ) {
     throw new Error("the gateway answered with an invalid pool account");
   }
@@ -278,6 +287,7 @@ function parseAccount(value: unknown): AccountSnapshot {
     name: value.name,
     held: value.held,
     heldUntil: value.heldUntil,
+    hold: value.hold,
     buckets,
   };
 }

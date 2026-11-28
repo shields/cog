@@ -385,6 +385,7 @@ MARKER_READERS=(
     .codex/hooks/git_guard.py:/etc/cog-gateway
     tools/configure_codex.py:/etc/cog-throwaway
     provision.sh:/etc/cog-gateway
+    .claude/statusline.sh:/etc/cog-gateway
 )
 DOTFILES="$TMPBASE/dotfiles"
 mkdir -p "$DOTFILES/.claude" "$DOTFILES/.codex/hooks" "$DOTFILES/.zsh.d" "$DOTFILES/tools"
