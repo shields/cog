@@ -609,11 +609,18 @@ What this does not do, and what it costs:
 - Only port 443 is tunnelled. HTTPS on another port fails with 403, and the
   Mac's own addresses with 502 (the installed gateway's profile denies them; a
   gateway run by hand has no profile), so `c` lists `localhost`, `127.0.0.1` and
-  `::1` in `NO_PROXY`.
+  `::1` in `NO_PROXY`. Claude Code's sandbox sends the connections of the
+  commands it runs on through the proxy as well, whatever their port, so git
+  over ssh from a sandboxed command fails unless `NO_PROXY` names the host,
+  which the sandbox then reaches directly; `c` names `github.com`.
 - Another Anthropic client in the session reaches the gateway too, so it works
   only with the placeholder and only if it trusts the gateway's CA, which
   `NODE_EXTRA_CA_CERTS` gives to Node and Bun programs alone. A program with
   its own API key needs `HTTPS_PROXY` unset.
+- A pool token is inference-only, as in a VM, so what Claude Code offers only
+  to a claude.ai login, such as Remote Control and Claude in Chrome, is refused
+  in such a session. A `claude` started without the three variables still has
+  the Mac's own login.
 - The registration `mac` gets `api.anthropic.com` and nothing else: a request
   for `api.fireworks.ai` or GitHub inside its tunnel is refused, so the proxy's
   key never lends the Mac's Fireworks key or a GitHub token. The Mac's own
